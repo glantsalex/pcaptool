@@ -38,6 +38,7 @@ var (
 	flagTopologyDNSWindow time.Duration
 	flagActiveResolve     bool
 	flagActiveResolvers   string
+	flagDisableSNI        bool
 )
 
 func init() {
@@ -85,6 +86,12 @@ func init() {
 		"active-resolvers",
 		"",
 		"Comma-separated resolver IPs for --active-resolve (e.g. 8.8.8.8,1.1.1.1). Defaults are used when empty.",
+	)
+	cmd.Flags().BoolVar(
+		&flagDisableSNI,
+		"disable-sni",
+		false,
+		"Disable TLS SNI extraction in pass 2 (speeds up truncated/offline workloads by skipping TCP ClientHello scan).",
 	)
 	cmd.Flags().DurationVar(
 		&flagTopologyDNSWindow,
@@ -141,8 +148,12 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// --------------------------------------------------------------------
 	// Pass 2: DNS + TLS SNI in one corpus scan (extractors)
 	// --------------------------------------------------------------------
-	progress.SetStage("Pass 2: scanning DNS + TLS SNI...")
-	txs, _, err := dns.BuildTransactionsWithSNIFromPCAPs(ctx, files)
+	if flagDisableSNI {
+		progress.SetStage("Pass 2: scanning DNS (SNI disabled)...")
+	} else {
+		progress.SetStage("Pass 2: scanning DNS + TLS SNI...")
+	}
+	txs, _, err := dns.BuildTransactionsWithSNIFromPCAPs(ctx, files, !flagDisableSNI)
 	if err != nil {
 		return err
 	}

@@ -21,14 +21,16 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
-// BuildTransactionsWithSNIFromPCAPs performs a single corpus scan that extracts:
+// BuildTransactionsWithSNIFromPCAPs performs a single corpus scan that always extracts:
 //  1. DNS A query/response transactions (real DNS)
-//  2. TLS ClientHello SNI synthetic transactions (SNI → dstIP:port)
 //
-// It returns a single slice of *DNSTransaction containing both sources.
-// The SNI synthetic tx already have DestinationPort set and will be skipped
-// by correlation index build (your BuildTxnIndex already does that).
-func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string) ([]*DNSTransaction, time.Time, error) {
+// and optionally extracts:
+//  2. TLS ClientHello SNI synthetic transactions (SNI -> dstIP:port)
+//
+// It returns a single slice of *DNSTransaction containing DNS txs plus SNI txs
+// when includeSNI is true. SNI synthetic txs already have DestinationPort set
+// and are skipped by correlation index build.
+func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string, includeSNI bool) ([]*DNSTransaction, time.Time, error) {
 	type fileResult struct {
 		txMap    map[TxKey][]*DNSTransaction
 		sniTxs   []*DNSTransaction
@@ -49,7 +51,7 @@ func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string) ([]*
 		go func() {
 			defer wg.Done()
 			for path := range fileCh {
-				txMap, sniTxs, earliest, err := scanDNSAndSNIInFile(ctx, path)
+				txMap, sniTxs, earliest, err := scanDNSAndSNIInFile(ctx, path, includeSNI)
 				resCh <- fileResult{
 					txMap:    txMap,
 					sniTxs:   sniTxs,
@@ -167,16 +169,20 @@ func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string) ([]*
 	return txs, globalEarliest, nil
 }
 
-func scanDNSAndSNIInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransaction, []*DNSTransaction, time.Time, error) {
+func scanDNSAndSNIInFile(ctx context.Context, path string, includeSNI bool) (map[TxKey][]*DNSTransaction, []*DNSTransaction, time.Time, error) {
 	handle, err := pcap.OpenOffline(path)
 	if err != nil {
 		return nil, nil, time.Time{}, fmt.Errorf("open pcap %s: %w", path, err)
 	}
 	defer handle.Close()
 
-	// Performance: keep DNS cheap and SNI feasible.
-	// This filters out non-DNS UDP entirely, but includes all TCP for ClientHello parsing.
-	if err := handle.SetBPFFilter("udp port 53 or tcp"); err != nil {
+	// Performance: when SNI is enabled include all TCP for ClientHello parsing,
+	// otherwise keep scan strictly on DNS transport.
+	filter := "udp port 53"
+	if includeSNI {
+		filter = "udp port 53 or tcp"
+	}
+	if err := handle.SetBPFFilter(filter); err != nil {
 		return nil, nil, time.Time{}, fmt.Errorf("set BPF filter on %s: %w", path, err)
 	}
 
@@ -184,7 +190,10 @@ func scanDNSAndSNIInFile(ctx context.Context, path string) (map[TxKey][]*DNSTran
 	src.NoCopy = true
 
 	dnsEx := newDNSExtractor()
-	sniEx := newSNIExtractor()
+	var sniEx *sniExtractor
+	if includeSNI {
+		sniEx = newSNIExtractor()
+	}
 
 	packets := src.Packets()
 	for {
@@ -196,17 +205,25 @@ func scanDNSAndSNIInFile(ctx context.Context, path string) (map[TxKey][]*DNSTran
 			if !ok {
 				// EOF
 				earliest := dnsEx.Earliest()
-				if s := sniEx.Earliest(); !s.IsZero() && (earliest.IsZero() || s.Before(earliest)) {
-					earliest = s
+				if sniEx != nil {
+					if s := sniEx.Earliest(); !s.IsZero() && (earliest.IsZero() || s.Before(earliest)) {
+						earliest = s
+					}
 				}
-				return dnsEx.Map(), sniEx.Slice(), earliest, nil
+				var sniTxs []*DNSTransaction
+				if sniEx != nil {
+					sniTxs = sniEx.Slice()
+				}
+				return dnsEx.Map(), sniTxs, earliest, nil
 			}
 
 			base := filepath.Base(path)
 
 			// Feed both extractors (each will early-return quickly if irrelevant)
 			dnsEx.OnPacket(pkt, base)
-			sniEx.OnPacket(pkt, base)
+			if sniEx != nil {
+				sniEx.OnPacket(pkt, base)
+			}
 		}
 	}
 }
