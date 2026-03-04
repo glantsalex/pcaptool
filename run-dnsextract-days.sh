@@ -91,10 +91,8 @@ local_base_path() {
 # This awk implements the same semantics reliably.
 list_matching_pcaps() {
   local base="$1"
-  # If ls fails (e.g., no files), return empty list without erroring the script.
-  gsutil ls "${base}/*.pcap" 2>/dev/null \
-    | awk '($0 ~ /a01\.pcap$/) || ($0 !~ /a01/)' \
-    || true
+  # Only a01 files, ignore b01 entirely
+  gsutil ls "${base}/*-a01.pcap" 2>/dev/null || true
 }
 
 # Download the given newline-separated list of GCS URLs into LOCAL_DIR
