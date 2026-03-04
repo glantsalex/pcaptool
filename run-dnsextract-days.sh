@@ -167,12 +167,6 @@ while true; do
 
   download_pcaps "$LOCAL_DIR" "$FILES"
 
-  # Verify we actually have pcaps locally; if not, stop (defensive)
-  if ! find "$LOCAL_DIR" -maxdepth 1 -type f -name '*.pcap' | grep -q .; then
-    echo "No local .pcap files found in $LOCAL_DIR after download -> stopping."
-    break
-  fi
-
   echo "Running dnsextract..."
   sudo "$PCAPTOOL" dnsextract \
     -r "$LOCAL_DIR" \

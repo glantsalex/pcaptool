@@ -271,6 +271,11 @@ func (c *Collector) onUDP(srcIP, dstIP net.IP, udp *layers.UDP, ts time.Time) {
 	if sport == 0 || dport == 0 {
 		return
 	}
+	// Symmetric exclusion for UDP: if either side uses an excluded service port
+	// (e.g. 53/123), suppress the flow regardless of capture order.
+	if c.isExcludedPort(sport) || c.isExcludedPort(dport) {
+		return
+	}
 
 	k := udpKey{srcIP.String(), dstIP.String(), sport, dport}
 	if _, ok := c.udpFirst[k]; !ok {
@@ -294,10 +299,6 @@ func (c *Collector) onUDP(srcIP, dstIP net.IP, udp *layers.UDP, ts time.Time) {
 			issuer, dst = dst, issuer
 			port = rev.cpt
 		}
-	}
-
-	if c.isExcludedPort(port) {
-		return
 	}
 
 	ek := edgeKey{issuer, dst, ProtoUDP, port}
