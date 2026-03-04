@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -50,7 +51,7 @@ func TestBuildNetworkTopologyMatrixEntries_CSVMidSingleNameUsesFullFQDNAndDedups
 	}
 }
 
-func TestBuildNetworkTopologyMatrixEntries_CSVConnSingleNameKeepsTLD1(t *testing.T) {
+func TestBuildNetworkTopologyMatrixEntries_CSVConnSingleNameUsesFullFQDN(t *testing.T) {
 	edges := []connectivity.Edge{
 		{
 			IssuerIP:  "44.44.44.44",
@@ -78,11 +79,36 @@ func TestBuildNetworkTopologyMatrixEntries_CSVConnSingleNameKeepsTLD1(t *testing
 	}
 
 	row := out[0]
-	if row.DNSName != "openstreetmap.org" {
-		t.Fatalf("expected tld+1 for csv+conn, got %q", row.DNSName)
+	if row.DNSName != "europe-03.nominatim.openstreetmap.org" {
+		t.Fatalf("expected full fqdn for csv+conn single-name IP, got %q", row.DNSName)
 	}
 	if row.DNSSource != "csv+conn" {
 		t.Fatalf("expected source csv+conn, got %q", row.DNSSource)
+	}
+}
+
+func TestCSVNameForIP_MultiNameAlwaysUsesTLD1(t *testing.T) {
+	ipToDNS := map[string][]string{
+		"203.0.113.10": {
+			"api.store.ccv.eu",
+			"mpush.store.ccv.eu",
+		},
+	}
+
+	gotConn, ok := csvNameForIP(ipToDNS, "203.0.113.10", false)
+	if !ok {
+		t.Fatalf("expected csvNameForIP to resolve for conn mode")
+	}
+	if gotConn != "ccv.eu" {
+		t.Fatalf("expected tld+1 for multi-name IP in conn mode, got %q", gotConn)
+	}
+
+	gotMid, ok := csvNameForIP(ipToDNS, "203.0.113.10", true)
+	if !ok {
+		t.Fatalf("expected csvNameForIP to resolve for mid mode")
+	}
+	if gotMid != "ccv.eu" {
+		t.Fatalf("expected tld+1 for multi-name IP in mid mode, got %q", gotMid)
 	}
 }
 
@@ -212,6 +238,69 @@ func TestBuildNetworkTopologyMatrixEntries_PrivateDestinationIsLastWithinIssuer(
 
 	if out[2].DestinationIP != "10.4.17.52" {
 		t.Fatalf("expected private destination last, got last=%q", out[2].DestinationIP)
+	}
+}
+
+func TestBuildNetworkTopologyMatrixEntries_StrongDNSSuppressesCSVConnSameTuple(t *testing.T) {
+	p3000 := uint16(3000)
+	txTime := time.Date(2026, 3, 3, 10, 0, 1, 0, time.UTC)
+
+	txs := []*DNSTransaction{
+		{
+			RequestTime:     txTime,
+			IssuerIP:        net.ParseIP("100.84.31.44"),
+			DNSName:         "mpush3.whatspos.com",
+			ResolvedIPs:     []net.IP{net.ParseIP("54.154.187.160")},
+			DestinationPort: &p3000,
+			ProtocolL4:      L4ProtoTCP,
+			NameEvidence:    EvDNSAnswer,
+			ResolvedIPEvidence: map[string]Evidence{
+				"54.154.187.160": EvDNSAnswer,
+			},
+		},
+	}
+
+	edges := []connectivity.Edge{
+		// Earlier edge cannot match tx by time, so it would fall back to csv+conn.
+		{
+			IssuerIP:  "100.84.31.44",
+			DstIP:     "54.154.187.160",
+			Protocol:  connectivity.ProtoTCP,
+			Port:      3000,
+			FirstSeen: txTime.Add(-1 * time.Second),
+		},
+		// Later edge matches tx and produces strong dns+synack.
+		{
+			IssuerIP:  "100.84.31.44",
+			DstIP:     "54.154.187.160",
+			Protocol:  connectivity.ProtoTCP,
+			Port:      3000,
+			FirstSeen: txTime.Add(1 * time.Second),
+		},
+	}
+
+	ipToDNS := map[string][]string{
+		"54.154.187.160": {"mpush3.whatspos.com"},
+	}
+
+	out := BuildNetworkTopologyMatrixEntriesWithOptions(
+		txs,
+		edges,
+		nil,
+		ipToDNS,
+		DefaultTopologyBuildOptions(),
+	)
+
+	if len(out) != 1 {
+		t.Fatalf("expected 1 row after csv+conn suppression, got %d: %#v", len(out), out)
+	}
+
+	row := out[0]
+	if row.DNSName != "mpush3.whatspos.com" {
+		t.Fatalf("expected strong DNS name to win, got %q", row.DNSName)
+	}
+	if row.DNSSource != "dns+synack" {
+		t.Fatalf("expected strong source dns+synack, got %q", row.DNSSource)
 	}
 }
 

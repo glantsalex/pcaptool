@@ -242,8 +242,27 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		return best
 	}
 
-	seen := make(map[string]struct{}, len(edges)*2)
+	seen := make(map[string]int, len(edges)*2)
 	out := make([]TopologyEntry, 0, len(edges)*2)
+
+	sourceRank := func(src string) int {
+		s := strings.ToLower(strings.TrimSpace(src))
+		switch s {
+		case "dns+synack", "dns+conn+synack",
+			"sni+synack", "sni+conn+synack",
+			"active+synack", "active+conn+synack":
+			return 30
+		case "csv+conn", "csv+mid":
+			return 20
+		case "mid-session":
+			return 10
+		case "":
+			return 0
+		default:
+			// Any non-empty evidence-like source that's not explicitly ranked.
+			return 15
+		}
+	}
 
 	for _, e := range edges {
 		if strings.TrimSpace(e.IssuerIP) == "" || strings.TrimSpace(e.DstIP) == "" || e.Port == 0 {
@@ -288,10 +307,15 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		emit := func(dnsName, src string) {
 			// IMPORTANT: use canonical dst IP in key and output.
 			key := issuer + "|" + dstIP + "|" + dnsName + "|" + proto + "|" + itoa16(e.Port)
-			if _, ok := seen[key]; ok {
+			if idx, ok := seen[key]; ok {
+				// Keep one row per key, but prefer stronger attribution source.
+				if sourceRank(src) > sourceRank(out[idx].DNSSource) {
+					out[idx].DNSSource = src
+					out[idx].ObservedAt = e.FirstSeen.UTC()
+				}
 				return
 			}
-			seen[key] = struct{}{}
+			seen[key] = len(out)
 			out = append(out, TopologyEntry{
 				IssuerIP:      issuer,
 				DestinationIP: dstIP,
@@ -365,7 +389,10 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	// - Applies only when DNSName is empty and dst IP is public IPv4.
 	// - Never applies to private dst IPs.
 	// - Does NOT overwrite existing DNS evidence.
-	// - If CSV resolves, fill DNSName with suffix-of-first and DNSSource "csv+conn".
+	// - If CSV resolves:
+	//   - single DNS name for IP -> full FQDN
+	//   - multiple DNS names for IP -> TLD+1
+	//   and DNSSource "csv+conn".
 	// - If CSV does not resolve, KEEP the unresolved row (do not drop it).
 	// ------------------------------------------------------------
 	if ipToDNS != nil && len(out) > 0 {
@@ -473,13 +500,13 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	}
 
 	// ------------------------------------------------------------
-	// Prefer DNS-observed attribution over CSV mid-session fallback
+	// Prefer DNS-observed attribution over CSV fallback
 	// for the same issuer|public-dst|proto|port tuple.
 	//
 	// If a tuple has DNSSource:
 	//   - dns+synack
 	//   - dns+conn+synack
-	// then csv+mid rows for that tuple are dropped.
+	// then csv+mid/csv+conn rows for that tuple are dropped.
 	// ------------------------------------------------------------
 	if len(out) > 0 {
 		type k struct {
@@ -492,8 +519,9 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			return s == "dns+synack" || s == "dns+conn+synack"
 		}
 
-		isCSVMid := func(src string) bool {
-			return strings.EqualFold(strings.TrimSpace(src), "csv+mid")
+		isCSVFallback := func(src string) bool {
+			s := strings.ToLower(strings.TrimSpace(src))
+			return s == "csv+mid" || s == "csv+conn"
 		}
 
 		preferredByTuple := make(map[k]struct{}, len(out))
@@ -517,7 +545,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		if len(preferredByTuple) > 0 {
 			out2 := make([]TopologyEntry, 0, len(out))
 			for _, row := range out {
-				if row.DNSName != "" && isCSVMid(row.DNSSource) {
+				if row.DNSName != "" && isCSVFallback(row.DNSSource) {
 					dst := net.ParseIP(row.DestinationIP)
 					if dst != nil && dst.To4() != nil && !dst.IsPrivate() {
 						key := k{
@@ -737,9 +765,9 @@ func csvNameForIP(ipToDNS map[string][]string, ipStr string, fullIfSingle bool) 
 		return "", false
 	}
 
-	// New rule:
-	// If multiple DNS names exist for an IP, choose the shortest FQDN.
-	// Ties are broken lexicographically for deterministic output.
+	// If multiple DNS names exist for an IP, collapse to TLD+1.
+	// We pick a deterministic representative name first (shortest, then lexical)
+	// before extracting TLD+1.
 	if len(names) > 1 {
 		best := names[0]
 		for _, n := range names[1:] {
@@ -747,19 +775,16 @@ func csvNameForIP(ipToDNS map[string][]string, ipStr string, fullIfSingle bool) 
 				best = n
 			}
 		}
-		return best, true
+		suf := dnsSuffixTLD1(best)
+		if suf == "" {
+			return best, true
+		}
+		return suf, true
 	}
 
-	first := names[0]
-	if fullIfSingle {
-		return first, true
-	}
-	suf := dnsSuffixTLD1(first)
-	if suf == "" {
-		// fallback to hostname if suffix extraction fails
-		return first, true
-	}
-	return suf, true
+	// Single-name case: always keep full FQDN.
+	_ = fullIfSingle
+	return names[0], true
 }
 
 func dnsSuffixTLD1(name string) string {
