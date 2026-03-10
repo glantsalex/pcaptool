@@ -36,13 +36,20 @@ type TopologyBuildOptions struct {
 	// MaxDNSAge limits how far back we look for DNS txs for a given edge timestamp.
 	// Zero disables the time limit.
 	MaxDNSAge time.Duration
+
+	// SortOutput controls the final presentation order.
+	// When true, output is sorted for readability/diffs.
+	// When false, issuers keep first-seen order and rows within each issuer keep
+	// first discovery order.
+	SortOutput bool
 }
 
 func DefaultTopologyBuildOptions() TopologyBuildOptions {
 	return TopologyBuildOptions{
 		// Conservative default: reduce shared-IP historical bleed while keeping
 		// enough headroom for normal DNS->connect delays.
-		MaxDNSAge: 2 * time.Minute,
+		MaxDNSAge:  2 * time.Minute,
+		SortOutput: true,
 	}
 }
 
@@ -390,9 +397,8 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	// - Never applies to private dst IPs.
 	// - Does NOT overwrite existing DNS evidence.
 	// - If CSV resolves:
-	//   - single DNS name for IP -> full FQDN
-	//   - multiple DNS names for IP -> TLD+1
-	//   and DNSSource "csv+conn".
+	//   - exactly one DNS name for IP -> full FQDN and DNSSource "csv+conn".
+	//   - more than one DNS name for IP -> skip CSV fallback (ambiguous mapping).
 	// - If CSV does not resolve, KEEP the unresolved row (do not drop it).
 	// ------------------------------------------------------------
 	if ipToDNS != nil && len(out) > 0 {
@@ -500,18 +506,25 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	}
 
 	// ------------------------------------------------------------
-	// Prefer DNS-observed attribution over CSV fallback
-	// for the same issuer|public-dst|proto|port tuple.
+	// Prefer DNS-observed attribution over CSV fallback.
 	//
-	// If a tuple has DNSSource:
+	// If a tuple has strong DNS evidence:
 	//   - dns+synack
 	//   - dns+conn+synack
-	// then csv+mid/csv+conn rows for that tuple are dropped.
+	// then csv+mid/csv+conn rows are handled as follows:
+	//   - issuer|public-dst|proto|port matches exactly, OR
+	//   - issuer|public-dst|proto matches and CSV DNS conflicts with strong DNS names.
+	//
+	// Exact tuple matches are dropped (duplicate attribution for same endpoint).
+	// Cross-port conflicts are downgraded to unresolved (keep endpoint visibility).
 	// ------------------------------------------------------------
 	if len(out) > 0 {
-		type k struct {
+		type key4 struct {
 			issuer, dst, proto string
 			port               uint16
+		}
+		type key3 struct {
+			issuer, dst, proto string
 		}
 
 		isPreferredDNS := func(src string) bool {
@@ -524,7 +537,12 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			return s == "csv+mid" || s == "csv+conn"
 		}
 
-		preferredByTuple := make(map[k]struct{}, len(out))
+		normalizeName := func(s string) string {
+			return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "."))
+		}
+
+		preferredByTuple4 := make(map[key4]struct{}, len(out))
+		strongNamesByTuple3 := make(map[key3]map[string]struct{}, len(out))
 		for _, row := range out {
 			if row.DNSName == "" || !isPreferredDNS(row.DNSSource) {
 				continue
@@ -533,29 +551,63 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			if dst == nil || dst.To4() == nil || dst.IsPrivate() {
 				continue
 			}
-			key := k{
+			k4 := key4{
 				issuer: row.IssuerIP,
 				dst:    row.DestinationIP,
 				proto:  row.Protocol,
 				port:   row.Port,
 			}
-			preferredByTuple[key] = struct{}{}
+			preferredByTuple4[k4] = struct{}{}
+
+			k3 := key3{
+				issuer: row.IssuerIP,
+				dst:    row.DestinationIP,
+				proto:  row.Protocol,
+			}
+			names := strongNamesByTuple3[k3]
+			if names == nil {
+				names = make(map[string]struct{}, 2)
+				strongNamesByTuple3[k3] = names
+			}
+			if n := normalizeName(row.DNSName); n != "" {
+				names[n] = struct{}{}
+			}
 		}
 
-		if len(preferredByTuple) > 0 {
+		if len(preferredByTuple4) > 0 || len(strongNamesByTuple3) > 0 {
 			out2 := make([]TopologyEntry, 0, len(out))
 			for _, row := range out {
 				if row.DNSName != "" && isCSVFallback(row.DNSSource) {
 					dst := net.ParseIP(row.DestinationIP)
 					if dst != nil && dst.To4() != nil && !dst.IsPrivate() {
-						key := k{
+						k4 := key4{
 							issuer: row.IssuerIP,
 							dst:    row.DestinationIP,
 							proto:  row.Protocol,
 							port:   row.Port,
 						}
-						if _, ok := preferredByTuple[key]; ok {
+						if _, ok := preferredByTuple4[k4]; ok {
 							continue
+						}
+
+						// Cross-port conflict handling:
+						// if strong DNS exists for same issuer|dst|proto and CSV DNS differs,
+						// downgrade CSV row to unresolved to avoid cross-port contamination
+						// from fallback tables while preserving endpoint visibility.
+						k3 := key3{
+							issuer: row.IssuerIP,
+							dst:    row.DestinationIP,
+							proto:  row.Protocol,
+						}
+						if strongNames := strongNamesByTuple3[k3]; len(strongNames) > 0 {
+							if _, ok := strongNames[normalizeName(row.DNSName)]; !ok {
+								row.DNSName = ""
+								if strings.EqualFold(strings.TrimSpace(row.DNSSource), "csv+mid") {
+									row.DNSSource = "mid-session"
+								} else {
+									row.DNSSource = ""
+								}
+							}
 						}
 					}
 				}
@@ -563,6 +615,127 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			}
 			out = out2
 		}
+	}
+
+	// ------------------------------------------------------------
+	// Run-local peer completion for unresolved rows.
+	//
+	// If a PUBLIC (dstIP, proto, port) tuple has a unique strong resolved DNS
+	// name elsewhere in the same run, use it to fill unresolved rows for that
+	// exact endpoint tuple across issuers.
+	//
+	// Donor priority:
+	//   1) direct donor:  dns+synack / sni+synack        -> peer+ipport
+	//   2) inferred donor: dns+conn+synack               -> peer+ipport+conn
+	//
+	// CSV/active/mid-session rows never act as donors. Ambiguous tuples (more than
+	// one unique donor name in the same tier) are left unresolved.
+	// ------------------------------------------------------------
+	if len(out) > 0 {
+		type peerKey struct {
+			dst, proto string
+			port       uint16
+		}
+		type donorSet struct {
+			directNames   map[string]string
+			inferredNames map[string]string
+		}
+
+		isDirectPeerDonor := func(src string) bool {
+			s := strings.ToLower(strings.TrimSpace(src))
+			return s == "dns+synack" || s == "sni+synack"
+		}
+		isInferredPeerDonor := func(src string) bool {
+			s := strings.ToLower(strings.TrimSpace(src))
+			return s == "dns+conn+synack"
+		}
+
+		donorsByTuple := make(map[peerKey]*donorSet, len(out))
+		for _, row := range out {
+			if strings.TrimSpace(row.DNSName) == "" {
+				continue
+			}
+			dst := net.ParseIP(row.DestinationIP)
+			if dst == nil || dst.To4() == nil || dst.IsPrivate() {
+				continue
+			}
+
+			pk := peerKey{
+				dst:   row.DestinationIP,
+				proto: row.Protocol,
+				port:  row.Port,
+			}
+			ds := donorsByTuple[pk]
+			if ds == nil {
+				ds = &donorSet{
+					directNames:   make(map[string]string, 1),
+					inferredNames: make(map[string]string, 1),
+				}
+				donorsByTuple[pk] = ds
+			}
+
+			name := normalize(row.DNSName)
+			if name == "" {
+				continue
+			}
+			switch {
+			case isDirectPeerDonor(row.DNSSource):
+				ds.directNames[name] = row.DNSName
+			case isInferredPeerDonor(row.DNSSource):
+				ds.inferredNames[name] = row.DNSName
+			}
+		}
+
+		for i := range out {
+			row := &out[i]
+			if strings.TrimSpace(row.DNSName) != "" {
+				continue
+			}
+			dst := net.ParseIP(row.DestinationIP)
+			if dst == nil || dst.To4() == nil || dst.IsPrivate() {
+				continue
+			}
+
+			pk := peerKey{
+				dst:   row.DestinationIP,
+				proto: row.Protocol,
+				port:  row.Port,
+			}
+			ds := donorsByTuple[pk]
+			if ds == nil {
+				continue
+			}
+
+			if len(ds.directNames) == 1 {
+				for _, orig := range ds.directNames {
+					row.DNSName = orig
+					row.DNSSource = "peer+ipport"
+				}
+				continue
+			}
+			if len(ds.directNames) == 0 && len(ds.inferredNames) == 1 {
+				for _, orig := range ds.inferredNames {
+					row.DNSName = orig
+					row.DNSSource = "peer+ipport+conn"
+				}
+			}
+		}
+	}
+
+	if !opt.SortOutput {
+		issuerFirst := make(map[string]int, len(out))
+		nextIssuer := 0
+		for _, row := range out {
+			if _, ok := issuerFirst[row.IssuerIP]; ok {
+				continue
+			}
+			issuerFirst[row.IssuerIP] = nextIssuer
+			nextIssuer++
+		}
+		sort.SliceStable(out, func(i, j int) bool {
+			return issuerFirst[out[i].IssuerIP] < issuerFirst[out[j].IssuerIP]
+		})
+		return out
 	}
 
 	// Deterministic ordering for diffs.
@@ -615,24 +788,49 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 
 // SquashNetworkTopologyShort keeps issuer|dst|proto|port uniqueness.
 func SquashNetworkTopologyShort(in []TopologyEntry) []TopologyEntry {
+	return SquashNetworkTopologyShortWithOptions(in, true)
+}
+
+func SquashNetworkTopologyShortWithOptions(in []TopologyEntry, sortOutput bool) []TopologyEntry {
 	type k struct {
 		i, d, p string
 		port    uint16
 	}
 	best := make(map[k]TopologyEntry, len(in))
+	order := make([]k, 0, len(in))
 
 	for _, e := range in {
 		key := k{e.IssuerIP, e.DestinationIP, e.Protocol, e.Port}
 		cur, ok := best[key]
+		if !ok {
+			order = append(order, key)
+		}
 		if !ok || (cur.DNSName == "" && e.DNSName != "") || (e.DNSName < cur.DNSName) {
 			best[key] = e
 		}
 	}
 
 	out := make([]TopologyEntry, 0, len(best))
-	for _, v := range best {
-		out = append(out, v)
+	for _, key := range order {
+		out = append(out, best[key])
 	}
+
+	if !sortOutput {
+		issuerFirst := make(map[string]int, len(out))
+		nextIssuer := 0
+		for _, row := range out {
+			if _, ok := issuerFirst[row.IssuerIP]; ok {
+				continue
+			}
+			issuerFirst[row.IssuerIP] = nextIssuer
+			nextIssuer++
+		}
+		sort.SliceStable(out, func(i, j int) bool {
+			return issuerFirst[out[i].IssuerIP] < issuerFirst[out[j].IssuerIP]
+		})
+		return out
+	}
+
 	issuerEndpointCount := endpointCountByIssuer(out)
 
 	sort.Slice(out, func(i, j int) bool {
@@ -718,7 +916,7 @@ func itoa16(v uint16) string {
 	return string(buf[i:])
 }
 
-func csvNameForIP(ipToDNS map[string][]string, ipStr string, fullIfSingle bool) (string, bool) {
+func csvNameForIP(ipToDNS map[string][]string, ipStr string, _ bool) (string, bool) {
 	if ipToDNS == nil {
 		return "", false
 	}
@@ -754,47 +952,27 @@ func csvNameForIP(ipToDNS map[string][]string, ipStr string, fullIfSingle bool) 
 	}
 
 	names := make([]string, 0, len(lst))
+	seenNames := make(map[string]struct{}, len(lst))
 	for _, n := range lst {
 		n = normalizeDNS(n)
 		if n == "" {
 			continue
 		}
+		if _, ok := seenNames[n]; ok {
+			continue
+		}
+		seenNames[n] = struct{}{}
 		names = append(names, n)
 	}
 	if len(names) == 0 {
 		return "", false
 	}
 
-	// If multiple DNS names exist for an IP, collapse to TLD+1.
-	// We pick a deterministic representative name first (shortest, then lexical)
-	// before extracting TLD+1.
+	// CSV fallback is allowed only for unambiguous one-to-one IP->DNS mappings.
 	if len(names) > 1 {
-		best := names[0]
-		for _, n := range names[1:] {
-			if len(n) < len(best) || (len(n) == len(best) && n < best) {
-				best = n
-			}
-		}
-		suf := dnsSuffixTLD1(best)
-		if suf == "" {
-			return best, true
-		}
-		return suf, true
+		return "", false
 	}
 
 	// Single-name case: always keep full FQDN.
-	_ = fullIfSingle
 	return names[0], true
-}
-
-func dnsSuffixTLD1(name string) string {
-	name = strings.TrimSpace(strings.TrimSuffix(strings.ToLower(name), "."))
-	if name == "" {
-		return ""
-	}
-	parts := strings.Split(name, ".")
-	if len(parts) < 2 {
-		return ""
-	}
-	return parts[len(parts)-2] + "." + parts[len(parts)-1]
 }

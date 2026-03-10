@@ -344,31 +344,28 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 
 	// --- Topology edge aggregation (new behavior) ---
 	type edgeBatch struct {
-		edges []connectivity.Edge
+		fileIdx int
+		edges   []connectivity.Edge
 	}
 	edgeCh := make(chan edgeBatch, 256)
-
-	mergedEdges := make(map[connectivity.Edge]struct{}, 65536)
-	var edgeAggWG sync.WaitGroup
-	edgeAggWG.Add(1)
-	go func() {
-		defer edgeAggWG.Done()
-		for b := range edgeCh {
-			for _, e := range b.edges {
-				mergedEdges[e] = struct{}{}
-			}
-		}
-	}()
 
 	// Worker pool over files
 	totalFiles := len(files)
 	if totalFiles == 0 {
 		close(updates)
 		aggWG.Wait()
-		close(edgeCh)
-		edgeAggWG.Wait()
 		return nil, FirstPacketInfo{}, nil
 	}
+
+	edgeBatches := make([][]connectivity.Edge, totalFiles)
+	var edgeAggWG sync.WaitGroup
+	edgeAggWG.Add(1)
+	go func() {
+		defer edgeAggWG.Done()
+		for b := range edgeCh {
+			edgeBatches[b.fileIdx] = b.edges
+		}
+	}()
 
 	workers := runtime.GOMAXPROCS(0)
 	if workers > totalFiles {
@@ -608,7 +605,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 			}
 
 			// NEW: emit per-file unique edges to global edge aggregator.
-			edgeCh <- edgeBatch{edges: coll.Edges()}
+			edgeCh <- edgeBatch{fileIdx: idx, edges: coll.EdgesByFirstSeen()}
 
 			// Progress update (files completed)
 			done := int(atomic.AddInt64(&filesDone, 1))
@@ -655,10 +652,31 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 		tx.Candidates = nil
 	}
 
-	// Convert merged edge set to slice (deterministic ordering handled later where needed).
-	out := make([]connectivity.Edge, 0, len(mergedEdges))
-	for e := range mergedEdges {
-		out = append(out, e)
+	type edgeKey struct {
+		issuer string
+		dst    string
+		proto  connectivity.L4Proto
+		port   uint16
+	}
+
+	// Flatten per-file edges in discovered file order and preserve the first
+	// occurrence of each endpoint tuple.
+	seenEdges := make(map[edgeKey]struct{}, 65536)
+	var out []connectivity.Edge
+	for _, batch := range edgeBatches {
+		for _, e := range batch {
+			k := edgeKey{
+				issuer: e.IssuerIP,
+				dst:    e.DstIP,
+				proto:  e.Protocol,
+				port:   e.Port,
+			}
+			if _, ok := seenEdges[k]; ok {
+				continue
+			}
+			seenEdges[k] = struct{}{}
+			out = append(out, e)
+		}
 	}
 	return out, firstPkt, nil
 }
@@ -777,17 +795,20 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 				proto   L4Proto
 				srcPort uint16
 				dstPort uint16
+				payload []byte
 			)
 			if udpL := packet.Layer(layers.LayerTypeUDP); udpL != nil {
 				udp := udpL.(*layers.UDP)
 				proto = L4ProtoUDP
 				srcPort = uint16(udp.SrcPort)
 				dstPort = uint16(udp.DstPort)
+				payload = udp.Payload
 			} else if tcpL := packet.Layer(layers.LayerTypeTCP); tcpL != nil {
 				tcp := tcpL.(*layers.TCP)
 				proto = L4ProtoTCP
 				srcPort = uint16(tcp.SrcPort)
 				dstPort = uint16(tcp.DstPort)
+				payload = tcp.Payload
 			} else {
 				continue
 			}
@@ -813,6 +834,8 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 			if srcIP == nil || dstIP == nil {
 				continue
 			}
+
+			captureTruncated := md.Truncated || (md.CaptureInfo.Length > 0 && md.CaptureInfo.CaptureLength < md.CaptureInfo.Length)
 
 			// --- Queries ---
 			if !d.QR && len(d.Questions) > 0 {
@@ -851,13 +874,37 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 
 			// --- Responses ---
 			if d.QR {
-				var answers []net.IP
+				var (
+					answers  []net.IP
+					respName string
+					respID   uint16
+				)
+
+				respID = d.ID
+				if len(d.Questions) > 0 {
+					respName = canonicalDNSName(string(d.Questions[0].Name))
+				}
+
 				for _, ans := range d.Answers {
 					if ans.Type == layers.DNSTypeA && len(ans.IP) > 0 {
 						answers = append(answers, append(net.IP(nil), ans.IP...))
 					}
 				}
-				if len(answers) == 0 {
+
+				if captureTruncated && srcPort == 53 {
+					rawID, rawName, rawAnswers, ok := extractDNSResponseFromRaw(payload, proto, true)
+					if ok {
+						if respID == 0 {
+							respID = rawID
+						}
+						if respName == "" {
+							respName = rawName
+						}
+						answers = append(answers, rawAnswers...)
+					}
+				}
+
+				if respID == 0 || len(answers) == 0 {
 					continue
 				}
 
@@ -866,16 +913,11 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 					dstPort,        // original query src port
 					srcIP.String(), // original query dst
 					proto,
-					d.ID,
+					respID,
 				)
 				cands := byLookup[lk]
 				if len(cands) == 0 {
 					continue
-				}
-
-				respName := ""
-				if len(d.Questions) > 0 {
-					respName = canonicalDNSName(string(d.Questions[0].Name))
 				}
 
 				tx := pickResponseTx(cands, respName, ts.UTC())

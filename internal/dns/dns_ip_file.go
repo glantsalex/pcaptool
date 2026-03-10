@@ -131,6 +131,7 @@ func LoadIPToDNSFromFile(path string) (map[string][]string, error) {
 func MergeIPToDNSMaps(base, extra map[string][]string) (map[string][]string, []IPDNSPair) {
 	out := make(map[string][]string, len(base))
 	seen := make(map[string]map[string]struct{}, len(base))
+	baseHasIP := make(map[string]struct{}, len(base))
 
 	add := func(ip, dns string, trackNew bool, newPairs *[]IPDNSPair) {
 		ip, ok := canonicalIPv4String(ip)
@@ -161,11 +162,41 @@ func MergeIPToDNSMaps(base, extra map[string][]string) (map[string][]string, []I
 			add(ip, dns, false, nil)
 		}
 	}
+	for ip := range out {
+		baseHasIP[ip] = struct{}{}
+	}
 
 	newPairs := make([]IPDNSPair, 0, 128)
 	for ip, names := range extra {
+		canonIP, ok := canonicalIPv4String(ip)
+		if !ok {
+			continue
+		}
+		// Conservative persistence: do not add learned names for IPs already
+		// present in base CSV. Learn only previously unseen IPs.
+		if _, exists := baseHasIP[canonIP]; exists {
+			continue
+		}
+
+		// One CSV row per IP: choose a deterministic representative DNS
+		// from learned candidates (shortest FQDN, then lexical).
+		best := ""
+		seenLocal := make(map[string]struct{}, len(names))
 		for _, dns := range names {
-			add(ip, dns, true, &newPairs)
+			dns = canonicalDNSName(dns)
+			if dns == "" {
+				continue
+			}
+			if _, ok := seenLocal[dns]; ok {
+				continue
+			}
+			seenLocal[dns] = struct{}{}
+			if best == "" || len(dns) < len(best) || (len(dns) == len(best) && dns < best) {
+				best = dns
+			}
+		}
+		if best != "" {
+			add(canonIP, best, true, &newPairs)
 		}
 	}
 
@@ -180,11 +211,10 @@ func MergeIPToDNSMaps(base, extra map[string][]string) (map[string][]string, []I
 }
 
 // StrongObservedIPDNSPairsFromTransactions extracts IP->DNS pairs that have
-// DNS-answer-backed and observed-connection-backed evidence.
+// direct DNS-answer-backed and observed-connection-backed evidence.
 //
 // Effective source class:
 // - dns+synack
-// - dns+conn+synack
 //
 // Private destination IPv4s are excluded because topology fallback never attributes
 // private destinations from CSV anyway.
@@ -240,6 +270,12 @@ func StrongObservedIPDNSPairsFromTransactions(txs []*DNSTransaction) map[string]
 			}
 
 			if ev&(EvDNSAnswer|EvObservedConn) != (EvDNSAnswer | EvObservedConn) {
+				continue
+			}
+			// Do not persist connectivity-backfilled IPs into the learned CSV.
+			// They are useful as transient attribution hints, but not as durable
+			// DNS truth because the IP was not directly parsed from the answer.
+			if ev&EvConnInferred != 0 {
 				continue
 			}
 			add(ipStr, tx.DNSName)

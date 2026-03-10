@@ -1,0 +1,22 @@
+{
+  "run_id": "2026-03-10-10-19-52",
+  "net_id": "118123",
+  "run_dir": "pcaptool_output/118123/2026-03-10-10-19-52",
+  "output_root": "pcaptool_output",
+  "read_dir": "/home/alex/pcap-data/118123/118123-1/input/2026/01/05",
+  "run_started_at_utc": "2026-03-10T10:19:52.414212738Z",
+  "pcap_files_count": 1436,
+  "main_output_format": "table",
+  "first_packet_ts_utc": "2026-01-05T00:00:55.075799244Z",
+  "first_packet_pcap_file": "118123-1_20260105000055-a01.pcap",
+  "files": {
+    "dns_issuer_profile": "pcaptool_output/118123/2026-03-10-10-19-52/dns-issuer-profile.txt",
+    "dns_unresolved_dns": "pcaptool_output/118123/2026-03-10-10-19-52/dns-unresolved-dns.txt",
+    "external_endpoints": "pcaptool_output/118123/2026-03-10-10-19-52/external-endpoints.txt",
+    "main_output": "pcaptool_output/118123/2026-03-10-10-19-52/dns-table.txt",
+    "network_topology_matrix": "pcaptool_output/118123/2026-03-10-10-19-52/network-topology-matrix.txt",
+    "run_metadata": "pcaptool_output/118123/2026-03-10-10-19-52/_run-metadata.txt",
+    "service_endpoints": "pcaptool_output/118123/2026-03-10-10-19-52/service-endpoints.txt",
+    "unresolved_ip": "pcaptool_output/118123/2026-03-10-10-19-52/unresolved-ip.txt"
+  }
+}

@@ -39,6 +39,9 @@ var (
 	flagActiveResolve     bool
 	flagActiveResolvers   string
 	flagDisableSNI        bool
+	flagUnsorted          bool
+	flagDebug             bool
+	flagPostHooks         []string
 )
 
 func init() {
@@ -92,6 +95,24 @@ func init() {
 		"disable-sni",
 		false,
 		"Disable TLS SNI extraction in pass 2 (speeds up truncated/offline workloads by skipping TCP ClientHello scan).",
+	)
+	cmd.Flags().BoolVar(
+		&flagUnsorted,
+		"unsorted",
+		false,
+		"Keep network topology matrix in natural first-seen issuer order instead of sorting by endpoint count and DNS name.",
+	)
+	cmd.Flags().BoolVar(
+		&flagDebug,
+		"debug",
+		false,
+		"Write additional per-run debug artifacts, including learned IP->DNS append provenance when --dns-ip-file is used.",
+	)
+	cmd.Flags().StringArrayVar(
+		&flagPostHooks,
+		"post-hook",
+		nil,
+		"Repeatable shell command to run after dnsextract completes. Hooks receive PCAPTOOL_MANIFEST, PCAPTOOL_RUN_DIR, PCAPTOOL_RUN_ID, PCAPTOOL_NET_ID, and PCAPTOOL_OUTPUT_ROOT in the environment and execute with the run directory as cwd.",
 	)
 	cmd.Flags().DurationVar(
 		&flagTopologyDNSWindow,
@@ -238,6 +259,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// Main output
 	// ---------------------------
 	var mainName string
+	mainOutputPath := ""
 	if flagFormat == "json" {
 		mainName = "dns-table.json"
 	} else {
@@ -249,6 +271,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer mainOut.Close()
+	mainOutputPath = mainOut.Name()
 
 	switch flagFormat {
 	case "table":
@@ -270,12 +293,14 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// Extra report: per-issuer DNS profile
 	// ---------------------------
 	issuerProf := dns.ComputeIssuerProfile(txs)
+	issuerProfilePath := ""
 	if len(issuerProf) > 0 {
 		pf, err := om.Create("dns-issuer-profile.txt")
 		if err != nil {
 			return fmt.Errorf("create dns issuer profile: %w", err)
 		}
 		defer pf.Close()
+		issuerProfilePath = pf.Name()
 
 		if err := output.WriteIssuerProfileTable(pf, issuerProf); err != nil {
 			return fmt.Errorf("write dns issuer profile: %w", err)
@@ -297,6 +322,8 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		return ip
 	}
 	var ipToDNS map[string][]string
+	var learnedAudit []dns.IPDNSAppendAuditRecord
+	var learnedNewPairs []dns.IPDNSPair
 	if strings.TrimSpace(flagDNSIPFile) != "" {
 		m, err := dns.LoadIPToDNSFromFile(flagDNSIPFile)
 		if err != nil {
@@ -305,6 +332,10 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 
 		learned := dns.StrongObservedIPDNSPairsFromTransactions(txs)
 		merged, newPairs := dns.MergeIPToDNSMaps(m, learned)
+		learnedNewPairs = newPairs
+		if flagDebug {
+			learnedAudit = dns.BuildIPDNSAppendAuditRecords(txs, newPairs)
+		}
 		if len(newPairs) > 0 {
 			if err := dns.AppendIPDNSPairsToFile(flagDNSIPFile, newPairs); err != nil {
 				return fmt.Errorf("append learned IP->DNS pairs to %q: %w", flagDNSIPFile, err)
@@ -315,16 +346,19 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 
 	topoOpt := dns.DefaultTopologyBuildOptions()
 	topoOpt.MaxDNSAge = flagTopologyDNSWindow
+	topoOpt.SortOutput = !flagUnsorted
 	topo := dns.BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, issuerFn, ipToDNS, topoOpt)
 	if flagConnectivityShort {
-		topo = dns.SquashNetworkTopologyShort(topo)
+		topo = dns.SquashNetworkTopologyShortWithOptions(topo, !flagUnsorted)
 	}
+	networkTopologyPath := ""
 	if len(topo) > 0 {
 		mf, err := om.Create("network-topology-matrix.txt")
 		if err != nil {
 			return fmt.Errorf("create network topology matrix: %w", err)
 		}
 		defer mf.Close()
+		networkTopologyPath = mf.Name()
 
 		if err := output.WriteNetworkTopologyMatrix(mf, topo); err != nil {
 			return fmt.Errorf("write network topology matrix: %w", err)
@@ -341,6 +375,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create service-endpoints.txt: %w", err)
 	}
 	defer sef.Close()
+	serviceEndpointsPath := sef.Name()
 
 	if err := output.WriteServiceEndpointsJSON(sef, serviceEndpoints); err != nil {
 		return fmt.Errorf("write service-endpoints.txt: %w", err)
@@ -351,12 +386,14 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// ---------------------------
 	unresolvedFinal := dns.ComputeUnresolvedDNSFirstSeen(txs)
 	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
+	unresolvedDNSPath := ""
 	if len(unresolvedFinal) > 0 {
 		uf, err := om.Create("dns-unresolved-dns.txt")
 		if err != nil {
 			return fmt.Errorf("create unresolved dns report: %w", err)
 		}
 		defer uf.Close()
+		unresolvedDNSPath = uf.Name()
 
 		if err := output.WriteUnresolvedDNSTable(uf, unresolvedFinal); err != nil {
 			return fmt.Errorf("write unresolved dns report: %w", err)
@@ -367,6 +404,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// Extra report: external endpoints (grouped by dns_suffix)
 	// Derived from network topology matrix entries
 	// ---------------------------
+	externalEndpointsPath := ""
 	if len(topo) > 0 {
 		endpoints := dns.BuildExternalEndpoints(topo)
 		if len(endpoints) > 0 {
@@ -375,6 +413,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("create external-endpoints.txt: %w", err)
 			}
 			defer ef.Close()
+			externalEndpointsPath = ef.Name()
 
 			if err := dns.WriteExternalEndpoints(ef, endpoints); err != nil {
 				return fmt.Errorf("write external-endpoints.txt: %w", err)
@@ -385,8 +424,10 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// ---------------------------
 	// Optional CSV export (same rows as records)
 	// ---------------------------
+	exportCSVPath := ""
 	if flagExportCSV != "" {
 		csvPath := om.ResolvePath(flagExportCSV)
+		exportCSVPath = csvPath
 
 		// If ResolvePath returned a relative-under-run-dir path, ensure parent dirs exist.
 		// For absolute paths, we still create parents if missing.
@@ -403,12 +444,14 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// Extra report: unresolved public destination IPs (no DNS attribution)
 	// ---------------------------
 	unresolvedIPs := dns.PublicUnresolvedDestinationIPs(topo)
+	unresolvedIPPath := ""
 	if len(unresolvedIPs) > 0 {
 		uf, err := om.Create("unresolved-ip.txt")
 		if err != nil {
 			return fmt.Errorf("create unresolved-ip.txt: %w", err)
 		}
 		defer uf.Close()
+		unresolvedIPPath = uf.Name()
 
 		for _, ip := range unresolvedIPs {
 			if _, err := fmt.Fprintln(uf, ip); err != nil {
@@ -418,6 +461,49 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if err := writeRunMetadata(om, runStartedAt, flagReadDir, len(files), firstPktInfo); err != nil {
 		return fmt.Errorf("write run-metadata.txt: %w", err)
+	}
+	runMetadataPath := om.Path("_run-metadata.txt")
+	ipDNSAppendAuditPath := ""
+	if flagDebug && strings.TrimSpace(flagDNSIPFile) != "" {
+		if err := writeIPDNSAppendAudit(om, runStartedAt, filepath.Clean(flagDNSIPFile), firstPktInfo, learnedNewPairs, learnedAudit); err != nil {
+			return fmt.Errorf("write ip-dns append audit: %w", err)
+		}
+		ipDNSAppendAuditPath = om.Path("ip-dns-append-audit.txt")
+	}
+	if len(flagPostHooks) > 0 {
+		filesMap := map[string]string{
+			"main_output":       mainOutputPath,
+			"run_metadata":      runMetadataPath,
+			"service_endpoints": serviceEndpointsPath,
+		}
+		if issuerProfilePath != "" {
+			filesMap["dns_issuer_profile"] = issuerProfilePath
+		}
+		if networkTopologyPath != "" {
+			filesMap["network_topology_matrix"] = networkTopologyPath
+		}
+		if unresolvedDNSPath != "" {
+			filesMap["dns_unresolved_dns"] = unresolvedDNSPath
+		}
+		if externalEndpointsPath != "" {
+			filesMap["external_endpoints"] = externalEndpointsPath
+		}
+		if exportCSVPath != "" {
+			filesMap["export_csv"] = exportCSVPath
+		}
+		if unresolvedIPPath != "" {
+			filesMap["unresolved_ip"] = unresolvedIPPath
+		}
+		if ipDNSAppendAuditPath != "" {
+			filesMap["ip_dns_append_audit"] = ipDNSAppendAuditPath
+		}
+		manifestPath, err := writeRunArtifactsManifest(om, runStartedAt, flagReadDir, len(files), firstPktInfo, flagFormat, filesMap)
+		if err != nil {
+			return fmt.Errorf("write run artifacts manifest: %w", err)
+		}
+		if err := runPostHooks(ctx, om, manifestPath, flagPostHooks); err != nil {
+			return err
+		}
 	}
 
 	progress.Done("Completed dnsextract successfully.")
@@ -456,6 +542,41 @@ func writeRunMetadata(
 		return err
 	}
 	return nil
+}
+
+func writeIPDNSAppendAudit(
+	om *OutputManager,
+	runStartedAt time.Time,
+	dnsIPFile string,
+	first dns.FirstPacketInfo,
+	newPairs []dns.IPDNSPair,
+	rows []dns.IPDNSAppendAuditRecord,
+) error {
+	f, err := om.Create("ip-dns-append-audit.txt")
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	firstTS := ""
+	if !first.Timestamp.IsZero() {
+		firstTS = first.Timestamp.UTC().Format(time.RFC3339Nano)
+	}
+
+	if _, err := fmt.Fprintf(
+		f,
+		"run_id: %s\nnet_id: %s\nrun_started_at_utc: %s\ndns_ip_file: %s\nfirst_packet_ts_utc: %s\nfirst_packet_pcap_file: %s\nnew_pairs_appended: %d\n\n",
+		om.RunID(),
+		om.NetID(),
+		runStartedAt.UTC().Format(time.RFC3339Nano),
+		dnsIPFile,
+		firstTS,
+		first.PCAPFile,
+		len(newPairs),
+	); err != nil {
+		return err
+	}
+	return output.WriteIPDNSAppendAuditTable(f, rows)
 }
 
 func parseResolverServers(s string) ([]string, error) {

@@ -57,8 +57,8 @@ func TestStrongObservedIPDNSPairsFromTransactions(t *testing.T) {
 	if len(got["34.120.10.1"]) != 1 || got["34.120.10.1"][0] != "api.example.com" {
 		t.Fatalf("expected strong dns+synack pair for 34.120.10.1, got %#v", got["34.120.10.1"])
 	}
-	if len(got["34.120.10.2"]) != 1 || got["34.120.10.2"][0] != "api.example.com" {
-		t.Fatalf("expected strong dns+conn+synack pair for 34.120.10.2, got %#v", got["34.120.10.2"])
+	if _, ok := got["34.120.10.2"]; ok {
+		t.Fatalf("unexpected conn-inferred pair 34.120.10.2 present: %#v", got["34.120.10.2"])
 	}
 	if _, ok := got["34.120.10.3"]; ok {
 		t.Fatalf("unexpected weak pair 34.120.10.3 present: %#v", got["34.120.10.3"])
@@ -77,18 +77,21 @@ func TestMergeIPToDNSMaps_ReturnsOnlyNewPairs(t *testing.T) {
 	}
 	extra := map[string][]string{
 		"34.120.10.1": {"api.example.com", "alt.example.com"},
-		"34.120.10.2": {"new.example.com"},
+		"34.120.10.2": {"new.example.com", "very-long.subdomain.new.example.com"},
 	}
 
 	merged, newPairs := MergeIPToDNSMaps(base, extra)
-	if len(merged["34.120.10.1"]) != 2 {
-		t.Fatalf("expected 2 names for 34.120.10.1, got %#v", merged["34.120.10.1"])
+	if len(merged["34.120.10.1"]) != 1 || merged["34.120.10.1"][0] != "api.example.com" {
+		t.Fatalf("expected existing IP to stay unchanged, got %#v", merged["34.120.10.1"])
 	}
-	if len(merged["34.120.10.2"]) != 1 {
-		t.Fatalf("expected 1 name for 34.120.10.2, got %#v", merged["34.120.10.2"])
+	if len(merged["34.120.10.2"]) != 1 || merged["34.120.10.2"][0] != "new.example.com" {
+		t.Fatalf("expected single deterministic name for 34.120.10.2, got %#v", merged["34.120.10.2"])
 	}
-	if len(newPairs) != 2 {
-		t.Fatalf("expected 2 new pairs, got %#v", newPairs)
+	if len(newPairs) != 1 {
+		t.Fatalf("expected only unseen-IP pair to be new, got %#v", newPairs)
+	}
+	if newPairs[0].IP != "34.120.10.2" || newPairs[0].DNS != "new.example.com" {
+		t.Fatalf("unexpected new pair %#v", newPairs[0])
 	}
 }
 

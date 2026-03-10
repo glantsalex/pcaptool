@@ -165,6 +165,37 @@ func (c *Collector) Edges() []Edge {
 	return out
 }
 
+func (c *Collector) EdgesByFirstSeen() []Edge {
+	out := make([]Edge, 0, len(c.edges))
+	for k, ts := range c.edges {
+		out = append(out, Edge{
+			IssuerIP:  k.issuer,
+			DstIP:     k.dst,
+			Protocol:  k.proto,
+			Port:      k.port,
+			FirstSeen: ts,
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].FirstSeen.Equal(out[j].FirstSeen) {
+			return out[i].FirstSeen.Before(out[j].FirstSeen)
+		}
+		if out[i].IssuerIP != out[j].IssuerIP {
+			return out[i].IssuerIP < out[j].IssuerIP
+		}
+		if out[i].DstIP != out[j].DstIP {
+			return out[i].DstIP < out[j].DstIP
+		}
+		if out[i].Protocol != out[j].Protocol {
+			return out[i].Protocol < out[j].Protocol
+		}
+		return out[i].Port < out[j].Port
+	})
+
+	return out
+}
+
 func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 	sport := uint16(tcp.SrcPort)
 	dport := uint16(tcp.DstPort)

@@ -141,6 +141,8 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 	dnsLayer := pkt.Layer(layers.LayerTypeDNS)
 	d, _ := dnsLayer.(*layers.DNS)
 
+	captureTruncated := md.Truncated || (md.CaptureInfo.Length > 0 && md.CaptureInfo.CaptureLength < md.CaptureInfo.Length)
+
 	// --- Queries ---
 	if d != nil && !d.QR && len(d.Questions) > 0 {
 		q := d.Questions[0]
@@ -177,7 +179,6 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 	// Truncated-query fallback:
 	// If normal DNS question parsing is unavailable (or empty) on a capture-truncated
 	// client->resolver query packet, decode the first QNAME from raw bytes.
-	captureTruncated := md.Truncated || (md.CaptureInfo.Length > 0 && md.CaptureInfo.CaptureLength < md.CaptureInfo.Length)
 	if captureTruncated && dstPort == 53 && (d == nil || (!d.QR && len(d.Questions) == 0)) {
 		if id, dnsName, ok := extractDNSQueryNameFromRaw(payload, proto, true); ok {
 			key := TxKey{
@@ -203,19 +204,43 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 		}
 	}
 
-	if d == nil {
-		return
-	}
-
 	// --- Responses ---
-	if d.QR {
-		var answers []net.IP
-		for _, ans := range d.Answers {
-			if ans.Type == layers.DNSTypeA && len(ans.IP) > 0 {
-				answers = append(answers, append(net.IP(nil), ans.IP...))
+	if (d != nil && d.QR) || (captureTruncated && srcPort == 53) {
+		var (
+			answers  []net.IP
+			respName string
+			respID   uint16
+		)
+
+		if d != nil && d.QR {
+			respID = d.ID
+			if len(d.Questions) > 0 {
+				respName = canonicalDNSName(string(d.Questions[0].Name))
 			}
 		}
-		if len(answers) == 0 {
+
+		if d != nil && d.QR {
+			for _, ans := range d.Answers {
+				if ans.Type == layers.DNSTypeA && len(ans.IP) > 0 {
+					answers = append(answers, append(net.IP(nil), ans.IP...))
+				}
+			}
+		}
+
+		if captureTruncated && srcPort == 53 {
+			rawID, rawName, rawAnswers, ok := extractDNSResponseFromRaw(payload, proto, true)
+			if ok {
+				if respID == 0 {
+					respID = rawID
+				}
+				if respName == "" {
+					respName = rawName
+				}
+				answers = append(answers, rawAnswers...)
+			}
+		}
+
+		if respID == 0 || len(answers) == 0 {
 			return
 		}
 
@@ -224,17 +249,13 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 			dstPort,        // original query src port
 			srcIP.String(), // original query dst
 			proto,
-			d.ID,
+			respID,
 		)
 		cands := e.byLookup[lk]
 		if len(cands) == 0 {
 			return
 		}
 
-		respName := ""
-		if len(d.Questions) > 0 {
-			respName = canonicalDNSName(string(d.Questions[0].Name))
-		}
 		tx := pickResponseTx(cands, respName, ts.UTC())
 		if tx == nil {
 			return
@@ -256,24 +277,9 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 }
 
 func extractDNSQueryNameFromRaw(payload []byte, proto L4Proto, captureTruncated bool) (uint16, string, bool) {
-	msg := payload
-	if len(msg) == 0 {
+	msg, ok := dnsMessageFromPayload(payload, proto)
+	if !ok {
 		return 0, "", false
-	}
-
-	if proto == L4ProtoTCP {
-		// DNS over TCP starts with 2-byte message length prefix.
-		if len(msg) < 2 {
-			return 0, "", false
-		}
-		dnsLen := int(binary.BigEndian.Uint16(msg[:2]))
-		msg = msg[2:]
-		if dnsLen <= 0 {
-			return 0, "", false
-		}
-		if dnsLen < len(msg) {
-			msg = msg[:dnsLen]
-		}
 	}
 
 	if len(msg) < 12 {
@@ -309,6 +315,104 @@ func extractDNSQueryNameFromRaw(payload []byte, proto L4Proto, captureTruncated 
 	}
 
 	return id, canonicalDNSName(name), true
+}
+
+func extractDNSResponseFromRaw(payload []byte, proto L4Proto, captureTruncated bool) (uint16, string, []net.IP, bool) {
+	msg, ok := dnsMessageFromPayload(payload, proto)
+	if !ok || len(msg) < 12 {
+		return 0, "", nil, false
+	}
+
+	id := binary.BigEndian.Uint16(msg[:2])
+	flags := binary.BigEndian.Uint16(msg[2:4])
+	if flags&0x8000 == 0 {
+		return 0, "", nil, false
+	}
+
+	qdCount := int(binary.BigEndian.Uint16(msg[4:6]))
+	anCount := int(binary.BigEndian.Uint16(msg[6:8]))
+	if anCount == 0 {
+		return 0, "", nil, false
+	}
+
+	off := 12
+	respName := ""
+	for i := 0; i < qdCount; i++ {
+		name, next, _, ok := parseRawDNSQuestionName(msg, off)
+		if !ok {
+			if i == 0 && captureTruncated {
+				break
+			}
+			return 0, "", nil, false
+		}
+		if i == 0 {
+			respName = canonicalDNSName(name)
+		}
+		off = next
+		if off+4 > len(msg) {
+			return 0, "", nil, false
+		}
+		off += 4
+	}
+
+	answers := make([]net.IP, 0, anCount)
+	for i := 0; i < anCount; i++ {
+		next, ok := skipRawDNSName(msg, off)
+		if !ok {
+			break
+		}
+		off = next
+
+		if off+10 > len(msg) {
+			break
+		}
+
+		rrType := binary.BigEndian.Uint16(msg[off : off+2])
+		rrClass := binary.BigEndian.Uint16(msg[off+2 : off+4])
+		rdLength := int(binary.BigEndian.Uint16(msg[off+8 : off+10]))
+		off += 10
+
+		if rdLength < 0 || off+rdLength > len(msg) {
+			break
+		}
+
+		if rrClass == 1 && rrType == uint16(layers.DNSTypeA) && rdLength == 4 {
+			ip := net.IPv4(msg[off], msg[off+1], msg[off+2], msg[off+3]).To4()
+			if ip != nil {
+				answers = append(answers, append(net.IP(nil), ip...))
+			}
+		}
+		off += rdLength
+	}
+
+	if len(answers) == 0 {
+		return 0, "", nil, false
+	}
+	return id, respName, answers, true
+}
+
+func dnsMessageFromPayload(payload []byte, proto L4Proto) ([]byte, bool) {
+	msg := payload
+	if len(msg) == 0 {
+		return nil, false
+	}
+
+	if proto == L4ProtoTCP {
+		// DNS over TCP starts with 2-byte message length prefix.
+		if len(msg) < 2 {
+			return nil, false
+		}
+		dnsLen := int(binary.BigEndian.Uint16(msg[:2]))
+		msg = msg[2:]
+		if dnsLen <= 0 {
+			return nil, false
+		}
+		if dnsLen < len(msg) {
+			msg = msg[:dnsLen]
+		}
+	}
+
+	return msg, true
 }
 
 func parseRawDNSQuestionName(msg []byte, off int) (name string, next int, complete bool, ok bool) {
@@ -362,6 +466,40 @@ func parseRawDNSQuestionName(msg []byte, off int) (name string, next int, comple
 	}
 
 	return "", off, false, false
+}
+
+func skipRawDNSName(msg []byte, off int) (int, bool) {
+	for steps := 0; steps < 128; steps++ {
+		if off >= len(msg) {
+			return off, false
+		}
+
+		l := int(msg[off])
+		off++
+
+		if l == 0 {
+			return off, true
+		}
+
+		if l&0xC0 == 0xC0 {
+			if off >= len(msg) {
+				return off, false
+			}
+			return off + 1, true
+		}
+		if l&0xC0 != 0 {
+			return off, false
+		}
+		if l > 63 {
+			return off, false
+		}
+		if off+l > len(msg) {
+			return off, false
+		}
+		off += l
+	}
+
+	return off, false
 }
 
 func parseDNSLabelASCII(b []byte) (string, bool) {
