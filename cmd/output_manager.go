@@ -48,9 +48,12 @@ func NewOutputManager(netID, outputRoot string) (*OutputManager, error) {
 	if outputRoot == "" {
 		outputRoot = "pcaptool_output"
 	}
+	rootDir, err := filepath.Abs(filepath.Clean(outputRoot))
+	if err != nil {
+		return nil, fmt.Errorf("resolve output root %q: %w", outputRoot, err)
+	}
 
 	runID := time.Now().UTC().Format("2006-01-02-15-04-05")
-	rootDir := filepath.Clean(outputRoot)
 	netDir := filepath.Join(rootDir, filepath.Clean(netID))
 	runDir := filepath.Join(netDir, runID)
 

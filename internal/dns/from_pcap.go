@@ -216,7 +216,7 @@ func pickFallbackTxUniq(txs []*DNSTransaction, ts time.Time, win time.Duration) 
 		eligibleCount++
 		lastEligible = tx
 
-		if len(tx.ResolvedIPs) == 0 {
+		if tx.ResolvedIPCount() == 0 {
 			unresCount++
 			chosenUnresolved = tx
 			if unresCount > 1 {
@@ -557,7 +557,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 					fromFallback = true
 					if debugDNSFallback {
 						debugDNSFallbackf("fallback-selected issuer=%s name=%q resolver=%v dst=%s:%d proto=%s dt=%s eligible=%d unresolved=%d resolvedIPs=%d",
-							srcIPStr, tx.DNSName, tx.ResolverIP, dstIPStr, dstPort, proto, ts.Sub(tx.RequestTime), eligibleCnt, unresCnt, len(tx.ResolvedIPs))
+							srcIPStr, tx.DNSName, tx.ResolverIP, dstIPStr, dstPort, proto, ts.Sub(tx.RequestTime), eligibleCnt, unresCnt, tx.ResolvedIPCount())
 					}
 				}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,7 +38,7 @@ func writeRunArtifactsManifest(
 	mainOutputFormat string,
 	files map[string]string,
 ) (string, error) {
-	path := om.Path("_run-artifacts.json")
+	path := absolutePathOrClean(om.Path("_run-artifacts.json"))
 
 	firstTS := ""
 	if !first.Timestamp.IsZero() {
@@ -50,7 +51,7 @@ func writeRunArtifactsManifest(
 		if v == "" {
 			continue
 		}
-		cleanFiles[k] = filepath.Clean(v)
+		cleanFiles[k] = absolutePathOrClean(v)
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -62,9 +63,9 @@ func writeRunArtifactsManifest(
 	manifest := RunArtifactsManifest{
 		RunID:               om.RunID(),
 		NetID:               om.NetID(),
-		RunDir:              om.RunDir(),
-		OutputRoot:          om.OutputRoot(),
-		ReadDir:             filepath.Clean(readDir),
+		RunDir:              absolutePathOrClean(om.RunDir()),
+		OutputRoot:          absolutePathOrClean(om.OutputRoot()),
+		ReadDir:             absolutePathOrClean(readDir),
 		RunStartedAtUTC:     runStartedAt.UTC().Format(time.RFC3339Nano),
 		PCAPFilesCount:      pcapFilesCount,
 		MainOutputFormat:    mainOutputFormat,
@@ -93,19 +94,64 @@ func runPostHooks(ctx context.Context, om *OutputManager, manifestPath string, h
 
 		cmd := exec.CommandContext(ctx, "sh", "-c", hook)
 		cmd.Dir = om.RunDir()
-		cmd.Env = append(os.Environ(),
-			"PCAPTOOL_MANIFEST="+manifestPath,
-			"PCAPTOOL_RUN_DIR="+om.RunDir(),
-			"PCAPTOOL_RUN_ID="+om.RunID(),
-			"PCAPTOOL_NET_ID="+om.NetID(),
-			"PCAPTOOL_OUTPUT_ROOT="+om.OutputRoot(),
-		)
+		hookEnv := postHookEnv(manifestPath)
+		cmd.Env = append(os.Environ(), hookEnv...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+
+		if flagDebug {
+			debugPrintPostHook(os.Stderr, i+1, len(hooks), hook, cmd.Dir, hookEnv)
+		}
 
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("post-hook %d failed: %w", i+1, err)
 		}
 	}
 	return nil
+}
+
+func postHookEnv(manifestPath string) []string {
+	return []string{
+		"PCAPTOOL_MANIFEST=" + absolutePathOrClean(manifestPath),
+	}
+}
+
+func absolutePathOrClean(path string) string {
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
+}
+
+func copyFile(src, dst string) error {
+	src = absolutePathOrClean(src)
+	dst = absolutePathOrClean(dst)
+	if src == dst {
+		return nil
+	}
+
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o644)
+}
+
+func debugPrintPostHook(w io.Writer, idx, total int, hook, cwd string, env []string) {
+	if w == nil {
+		return
+	}
+	fmt.Fprintf(w, "[pcaptool debug] post-hook %d/%d\n", idx, total)
+	fmt.Fprintf(w, "  cmd: %q\n", hook)
+	fmt.Fprintf(w, "  cwd: %q\n", cwd)
+	for _, kv := range env {
+		fmt.Fprintf(w, "  env: %s\n", kv)
+	}
 }

@@ -10,6 +10,7 @@ package dns
 import (
 	"net"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,7 @@ const (
 )
 
 type DNSTransaction struct {
+	mu              sync.RWMutex
 	RequestTime     time.Time
 	IssuerIP        net.IP
 	DNSName         string
@@ -105,8 +107,7 @@ func (tx *DNSTransaction) ensureEvidenceMap() {
 	}
 }
 
-// AddResolvedIP adds ip to ResolvedIPs if missing and ORs evidence flags.
-func (tx *DNSTransaction) AddResolvedIP(ip net.IP, ev Evidence) {
+func (tx *DNSTransaction) addResolvedIPLocked(ip net.IP, ev Evidence) {
 	if ip == nil {
 		return
 	}
@@ -116,7 +117,6 @@ func (tx *DNSTransaction) AddResolvedIP(ip net.IP, ev Evidence) {
 	}
 	s := ip4.String()
 
-	// add if missing
 	for _, existing := range tx.ResolvedIPs {
 		if existing != nil && existing.To4() != nil && existing.Equal(ip4) {
 			tx.ensureEvidenceMap()
@@ -129,8 +129,18 @@ func (tx *DNSTransaction) AddResolvedIP(ip net.IP, ev Evidence) {
 	tx.ResolvedIPEvidence[s] |= ev
 }
 
+// AddResolvedIP adds ip to ResolvedIPs if missing and ORs evidence flags.
+func (tx *DNSTransaction) AddResolvedIP(ip net.IP, ev Evidence) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	tx.addResolvedIPLocked(ip, ev)
+}
+
 // MarkObservedConn ORs EvObservedConn for ip if present; if ip missing and allowAdd is true, it will add it.
 func (tx *DNSTransaction) MarkObservedConn(ip net.IP, allowAdd bool) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
 	if ip == nil {
 		return
 	}
@@ -148,8 +158,14 @@ func (tx *DNSTransaction) MarkObservedConn(ip net.IP, allowAdd bool) {
 		}
 	}
 	if allowAdd {
-		tx.AddResolvedIP(ip4, EvConnInferred|EvObservedConn|tx.NameEvidence)
+		tx.addResolvedIPLocked(ip4, EvConnInferred|EvObservedConn|tx.NameEvidence)
 	}
+}
+
+func (tx *DNSTransaction) ResolvedIPCount() int {
+	tx.mu.RLock()
+	defer tx.mu.RUnlock()
+	return len(tx.ResolvedIPs)
 }
 
 // Simple index: (issuer,dst) -> []*DNSTransaction

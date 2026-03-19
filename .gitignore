@@ -22,4 +22,7 @@ vendor/
 tmp/
 *.txt
 pcaptool
-./pcaptool_output
+pcaptool_output/
+data/
+
+

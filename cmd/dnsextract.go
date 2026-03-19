@@ -41,6 +41,7 @@ var (
 	flagDisableSNI        bool
 	flagUnsorted          bool
 	flagDebug             bool
+	flagManifestOut       string
 	flagPostHooks         []string
 )
 
@@ -108,11 +109,17 @@ func init() {
 		false,
 		"Write additional per-run debug artifacts, including learned IP->DNS append provenance when --dns-ip-file is used.",
 	)
+	cmd.Flags().StringVar(
+		&flagManifestOut,
+		"manifest-out",
+		"",
+		"Optional extra path to write a copy of _run-artifacts.json. Relative paths are placed under the run output directory.",
+	)
 	cmd.Flags().StringArrayVar(
 		&flagPostHooks,
 		"post-hook",
 		nil,
-		"Repeatable shell command to run after dnsextract completes. Hooks receive PCAPTOOL_MANIFEST, PCAPTOOL_RUN_DIR, PCAPTOOL_RUN_ID, PCAPTOOL_NET_ID, and PCAPTOOL_OUTPUT_ROOT in the environment and execute with the run directory as cwd.",
+		"Repeatable shell command to run after dnsextract completes. Hooks receive PCAPTOOL_MANIFEST in the environment and execute with the run directory as cwd.",
 	)
 	cmd.Flags().DurationVar(
 		&flagTopologyDNSWindow,
@@ -129,6 +136,8 @@ func init() {
 }
 
 func runDNSExtract(cmd *cobra.Command, args []string) error {
+	cmd.SilenceUsage = true
+
 	ctx := context.Background()
 	runStartedAt := time.Now().UTC()
 
@@ -459,10 +468,6 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
-	if err := writeRunMetadata(om, runStartedAt, flagReadDir, len(files), firstPktInfo); err != nil {
-		return fmt.Errorf("write run-metadata.txt: %w", err)
-	}
-	runMetadataPath := om.Path("_run-metadata.txt")
 	ipDNSAppendAuditPath := ""
 	if flagDebug && strings.TrimSpace(flagDNSIPFile) != "" {
 		if err := writeIPDNSAppendAudit(om, runStartedAt, filepath.Clean(flagDNSIPFile), firstPktInfo, learnedNewPairs, learnedAudit); err != nil {
@@ -470,77 +475,48 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		}
 		ipDNSAppendAuditPath = om.Path("ip-dns-append-audit.txt")
 	}
+	filesMap := map[string]string{
+		"main_output":       mainOutputPath,
+		"service_endpoints": serviceEndpointsPath,
+	}
+	if issuerProfilePath != "" {
+		filesMap["dns_issuer_profile"] = issuerProfilePath
+	}
+	if networkTopologyPath != "" {
+		filesMap["network_topology_matrix"] = networkTopologyPath
+	}
+	if unresolvedDNSPath != "" {
+		filesMap["dns_unresolved_dns"] = unresolvedDNSPath
+	}
+	if externalEndpointsPath != "" {
+		filesMap["external_endpoints"] = externalEndpointsPath
+	}
+	if exportCSVPath != "" {
+		filesMap["export_csv"] = exportCSVPath
+	}
+	if unresolvedIPPath != "" {
+		filesMap["unresolved_ip"] = unresolvedIPPath
+	}
+	if ipDNSAppendAuditPath != "" {
+		filesMap["ip_dns_append_audit"] = ipDNSAppendAuditPath
+	}
+	manifestPath, err := writeRunArtifactsManifest(om, runStartedAt, flagReadDir, len(files), firstPktInfo, flagFormat, filesMap)
+	if err != nil {
+		return fmt.Errorf("write run artifacts manifest: %w", err)
+	}
+	if strings.TrimSpace(flagManifestOut) != "" {
+		manifestOutPath := om.ResolvePath(flagManifestOut)
+		if err := copyFile(manifestPath, manifestOutPath); err != nil {
+			return fmt.Errorf("write manifest copy %q: %w", manifestOutPath, err)
+		}
+	}
 	if len(flagPostHooks) > 0 {
-		filesMap := map[string]string{
-			"main_output":       mainOutputPath,
-			"run_metadata":      runMetadataPath,
-			"service_endpoints": serviceEndpointsPath,
-		}
-		if issuerProfilePath != "" {
-			filesMap["dns_issuer_profile"] = issuerProfilePath
-		}
-		if networkTopologyPath != "" {
-			filesMap["network_topology_matrix"] = networkTopologyPath
-		}
-		if unresolvedDNSPath != "" {
-			filesMap["dns_unresolved_dns"] = unresolvedDNSPath
-		}
-		if externalEndpointsPath != "" {
-			filesMap["external_endpoints"] = externalEndpointsPath
-		}
-		if exportCSVPath != "" {
-			filesMap["export_csv"] = exportCSVPath
-		}
-		if unresolvedIPPath != "" {
-			filesMap["unresolved_ip"] = unresolvedIPPath
-		}
-		if ipDNSAppendAuditPath != "" {
-			filesMap["ip_dns_append_audit"] = ipDNSAppendAuditPath
-		}
-		manifestPath, err := writeRunArtifactsManifest(om, runStartedAt, flagReadDir, len(files), firstPktInfo, flagFormat, filesMap)
-		if err != nil {
-			return fmt.Errorf("write run artifacts manifest: %w", err)
-		}
 		if err := runPostHooks(ctx, om, manifestPath, flagPostHooks); err != nil {
 			return err
 		}
 	}
 
 	progress.Done("Completed dnsextract successfully.")
-	return nil
-}
-
-func writeRunMetadata(
-	om *OutputManager,
-	runStartedAt time.Time,
-	readDir string,
-	pcapFilesCount int,
-	first dns.FirstPacketInfo,
-) error {
-	f, err := om.Create("_run-metadata.txt")
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	firstTS := ""
-	if !first.Timestamp.IsZero() {
-		firstTS = first.Timestamp.UTC().Format(time.RFC3339Nano)
-	}
-
-	if _, err := fmt.Fprintf(
-		f,
-		"run_id: %s\nnet_id: %s\nrun_started_at_utc: %s\nread_dir: %s\npcap_files_count: %d\nfirst_packet_ts_utc: %s\nfirst_packet_pcap_file: %s\n",
-		om.RunID(),
-		om.NetID(),
-		runStartedAt.UTC().Format(time.RFC3339Nano),
-		filepath.Clean(readDir),
-		pcapFilesCount,
-		firstTS,
-		first.PCAPFile,
-	); err != nil {
-		return err
-	}
 	return nil
 }
 

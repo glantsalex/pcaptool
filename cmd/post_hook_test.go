@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -83,7 +84,7 @@ func TestRunPostHooks(t *testing.T) {
 	}
 
 	target := filepath.Join(runDir, "hook.out")
-	hook := "printf '%s|%s|%s' \"$PCAPTOOL_NET_ID\" \"$PCAPTOOL_RUN_ID\" \"$PCAPTOOL_MANIFEST\" > " + filepath.Base(target)
+	hook := "printf '%s' \"$PCAPTOOL_MANIFEST\" > " + filepath.Base(target)
 	if err := runPostHooks(context.Background(), om, manifestPath, []string{hook}); err != nil {
 		t.Fatalf("runPostHooks: %v", err)
 	}
@@ -93,8 +94,61 @@ func TestRunPostHooks(t *testing.T) {
 		t.Fatalf("read hook output: %v", err)
 	}
 	got := string(b)
-	want := "net|run|" + manifestPath
+	want := manifestPath
 	if got != want {
 		t.Fatalf("unexpected hook output %q, want %q", got, want)
+	}
+}
+
+func TestDebugPrintPostHook(t *testing.T) {
+	var buf bytes.Buffer
+
+	debugPrintPostHook(
+		&buf,
+		1,
+		2,
+		"/opt/hooks/push-bq --mode append",
+		"/tmp/run",
+		[]string{
+			"PCAPTOOL_MANIFEST=/tmp/run/_run-artifacts.json",
+		},
+	)
+
+	got := buf.String()
+	for _, want := range []string{
+		"[pcaptool debug] post-hook 1/2",
+		`cmd: "/opt/hooks/push-bq --mode append"`,
+		`cwd: "/tmp/run"`,
+		"env: PCAPTOOL_MANIFEST=/tmp/run/_run-artifacts.json",
+	} {
+		if !bytes.Contains([]byte(got), []byte(want)) {
+			t.Fatalf("debug output missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestCopyFile(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "a", "manifest.json")
+	dst := filepath.Join(root, "b", "copied.json")
+
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatalf("mkdir src dir: %v", err)
+	}
+	want := []byte(`{"ok":true}`)
+	if err := os.WriteFile(src, want, 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+
+	if err := copyFile(src, dst); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("copied contents = %q, want %q", got, want)
 	}
 }
