@@ -2,7 +2,7 @@
 
 `pcaptool` is an offline PCAP analysis CLI focused on DNS, endpoint attribution, and topology extraction.
 
-It is built for the case where you need machine-readable artifacts from packet captures, not just manual Wireshark inspection. The tool scans PCAPs, correlates DNS answers to observed connections, optionally uses TLS SNI, and emits a stable set of output files that can be consumed by downstream systems such as `pulse-topology-ingest`.
+It is built for the case where you need machine-readable artifacts from packet captures, not just manual Wireshark inspection. The tool scans PCAPs, correlates DNS answers to observed connections, optionally uses TLS SNI, and emits a stable set of output files that can be consumed by downstream systems.
 
 ## What It Is For
 
