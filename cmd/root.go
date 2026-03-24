@@ -10,6 +10,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -21,6 +22,7 @@ var flagNetID string
 var flagOutputRoot string
 
 var flagEnforcePrivateAsSource bool
+var flagNoBanner bool
 
 var rootCmd = &cobra.Command{
 	Use:   "pcaptool",
@@ -33,6 +35,22 @@ func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// SuppressBannerFromArgs reports whether the raw CLI args request suppressing
+// the startup banner before Cobra parses flags.
+func SuppressBannerFromArgs(args []string) bool {
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		switch {
+		case arg == "--no-banner":
+			return true
+		case strings.HasPrefix(arg, "--no-banner="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--no-banner="))
+			return value == "" || value == "true" || value == "1"
+		}
+	}
+	return false
 }
 
 func init() {
@@ -54,6 +72,12 @@ func init() {
 		"enforce-private-as-source",
 		false,
 		"For UDP only: if one side is private/local, always treat it as the source (swap direction when needed)",
+	)
+	rootCmd.PersistentFlags().BoolVar(
+		&flagNoBanner,
+		"no-banner",
+		false,
+		"Suppress the startup banner",
 	)
 
 	if err := rootCmd.MarkPersistentFlagRequired("net-id"); err != nil {

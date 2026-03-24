@@ -9,12 +9,15 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/aglants/pcaptool/cmd"
 )
 
 func main() {
-	printBanner()
+	if !cmd.SuppressBannerFromArgs(os.Args[1:]) {
+		printBanner()
+	}
 	cmd.Execute()
 }
 
