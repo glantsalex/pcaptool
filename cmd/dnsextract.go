@@ -224,7 +224,14 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("--exclude-ports: %w", err)
 	}
-	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, flagOnlyTCP, excludeSet, flagEnforcePrivateAsSource)
+	var ipToDNS map[string][]string
+	if strings.TrimSpace(flagDNSIPFile) != "" {
+		ipToDNS, err = dns.LoadIPToDNSFromFile(flagDNSIPFile)
+		if err != nil {
+			return fmt.Errorf("load --dns-ip-file: %w", err)
+		}
+	}
+	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, flagOnlyTCP, excludeSet, flagEnforcePrivateAsSource, ipToDNS)
 	if err != nil {
 		return err
 	}
@@ -330,17 +337,11 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		}
 		return ip
 	}
-	var ipToDNS map[string][]string
 	var learnedAudit []dns.IPDNSAppendAuditRecord
 	var learnedNewPairs []dns.IPDNSPair
 	if strings.TrimSpace(flagDNSIPFile) != "" {
-		m, err := dns.LoadIPToDNSFromFile(flagDNSIPFile)
-		if err != nil {
-			return fmt.Errorf("load --dns-ip-file: %w", err)
-		}
-
 		learned := dns.StrongObservedIPDNSPairsFromTransactions(txs)
-		merged, newPairs := dns.MergeIPToDNSMaps(m, learned)
+		merged, newPairs := dns.MergeIPToDNSMaps(ipToDNS, learned)
 		learnedNewPairs = newPairs
 		if flagDebug {
 			learnedAudit = dns.BuildIPDNSAppendAuditRecords(txs, newPairs)

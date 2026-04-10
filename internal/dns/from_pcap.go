@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -251,6 +252,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 	onlyTCP bool,
 	excludePorts map[uint16]struct{},
 	enforcePrivateAsSource bool,
+	ipToDNS map[string][]string,
 ) ([]connectivity.Edge, FirstPacketInfo, error) {
 	index := BuildTxnIndex(txs)
 
@@ -580,6 +582,17 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 					usedDst4 = ip.To4()
 				}
 
+				if fromFallback && usedDst4 != nil {
+					allow, csvDNS := allowConnectionInferredDNSBackfill(tx.DNSName, usedDst4.String(), ipToDNS)
+					if !allow {
+						if debugDNSFallback {
+							debugDNSFallbackf("fallback-suppressed-by-csv issuer=%s candidate_name=%q dst=%s:%d proto=%s csv_dns=%q",
+								srcIPStr, tx.DNSName, dstIPStr, dstPort, proto, csvDNS)
+						}
+						continue
+					}
+				}
+
 				// Send candidate to aggregator
 				select {
 				case <-ctx.Done():
@@ -681,8 +694,62 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 	return out, firstPkt, nil
 }
 
+// allowConnectionInferredDNSBackfill checks whether an issuer-only TCP fallback
+// may attach an observed destination IP to the candidate DNS transaction.
+// Direct DNS-answer mappings do not use this guard; it is only for inferred
+// conn-backed mappings where chatty DNS traffic can select the wrong query.
+func allowConnectionInferredDNSBackfill(candidateDNS string, ipStr string, ipToDNS map[string][]string) (bool, string) {
+	if len(ipToDNS) == 0 {
+		return true, ""
+	}
+	ip, ok := canonicalIPv4String(ipStr)
+	if !ok {
+		return true, ""
+	}
+
+	names := ipToDNS[ip]
+	if len(names) == 0 {
+		for k, v := range ipToDNS {
+			if strings.TrimSpace(k) == ip {
+				names = v
+				break
+			}
+		}
+	}
+	if len(names) == 0 {
+		return true, ""
+	}
+
+	candidate := canonicalDNSName(candidateDNS)
+	unique := make(map[string]struct{}, len(names))
+	canonicalNames := make([]string, 0, len(names))
+	for _, name := range names {
+		name = canonicalDNSName(name)
+		if name == "" {
+			continue
+		}
+		if _, exists := unique[name]; exists {
+			continue
+		}
+		unique[name] = struct{}{}
+		canonicalNames = append(canonicalNames, name)
+	}
+	if len(canonicalNames) == 0 {
+		return true, ""
+	}
+	for _, name := range canonicalNames {
+		if candidate != "" && name == candidate {
+			return true, name
+		}
+	}
+	if len(canonicalNames) == 1 {
+		return false, canonicalNames[0]
+	}
+	return false, ""
+}
+
 func AttachConnectionsFromPCAPs(ctx context.Context, files []string, txs []*DNSTransaction, onlyTCP bool) error {
-	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, onlyTCP, nil, false)
+	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, onlyTCP, nil, false, nil)
 	return err
 }
 
