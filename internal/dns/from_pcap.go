@@ -691,7 +691,43 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 			out = append(out, e)
 		}
 	}
+	out = suppressMergedFTPPassiveEdges(out, connectivity.DefaultOptions().FTPPassiveMinPort)
 	return out, firstPkt, nil
+}
+
+func suppressMergedFTPPassiveEdges(edges []connectivity.Edge, minPassivePort uint16) []connectivity.Edge {
+	if len(edges) == 0 || minPassivePort == 0 {
+		return edges
+	}
+
+	type pairKey struct {
+		issuer string
+		dst    string
+	}
+
+	ftpControlSeen := make(map[pairKey]struct{}, 128)
+	for _, e := range edges {
+		if e.Protocol != connectivity.ProtoTCP {
+			continue
+		}
+		if e.Port == 21 || e.Port == 990 {
+			ftpControlSeen[pairKey{issuer: e.IssuerIP, dst: e.DstIP}] = struct{}{}
+		}
+	}
+	if len(ftpControlSeen) == 0 {
+		return edges
+	}
+
+	filtered := make([]connectivity.Edge, 0, len(edges))
+	for _, e := range edges {
+		if e.Protocol == connectivity.ProtoTCP && e.Port >= minPassivePort {
+			if _, ok := ftpControlSeen[pairKey{issuer: e.IssuerIP, dst: e.DstIP}]; ok {
+				continue
+			}
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
 }
 
 // allowConnectionInferredDNSBackfill checks whether an issuer-only TCP fallback

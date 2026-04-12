@@ -10,6 +10,8 @@ package connectivity
 import (
 	"net"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/gopacket"
@@ -66,6 +68,8 @@ type Collector struct {
 	lastSweep time.Time
 
 	ftpControlSeen map[pairKey]struct{}
+	ftpPassivePend map[pairKey]time.Time
+	ftpPassivePort map[edgeKey]time.Time
 }
 
 type tcpKey struct {
@@ -100,6 +104,8 @@ func NewCollector(opt Options) *Collector {
 		udpFirst:       make(map[udpKey]time.Time, 8192),
 		edges:          make(map[edgeKey]time.Time, 32768),
 		ftpControlSeen: make(map[pairKey]struct{}, 1024),
+		ftpPassivePend: make(map[pairKey]time.Time, 256),
+		ftpPassivePort: make(map[edgeKey]time.Time, 512),
 	}
 }
 
@@ -202,6 +208,7 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 	if sport == 0 || dport == 0 {
 		return
 	}
+	c.observeFTPPassiveControl(srcIP, dstIP, sport, dport, tcp.Payload, ts)
 
 	if tcp.SYN && !tcp.ACK {
 		if c.isExcludedPort(dport) {
@@ -225,6 +232,12 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 		}
 
 		ek := edgeKey{k.cip, k.sip, ProtoTCP, k.spt}
+
+		if c.opt.CollapseFTPPassive {
+			if _, ok := c.ftpPassivePort[ek]; ok {
+				return
+			}
+		}
 
 		if c.opt.CollapseFTPPassive && ek.port >= c.opt.FTPPassiveMinPort {
 			if _, ok := c.ftpControlSeen[pairKey{ek.issuer, ek.dst}]; ok {
@@ -278,6 +291,12 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 		dst:    destIP.String(),
 		proto:  ProtoTCP,
 		port:   destPort,
+	}
+
+	if c.opt.CollapseFTPPassive {
+		if _, ok := c.ftpPassivePort[ek]; ok {
+			return
+		}
 	}
 
 	if c.opt.CollapseFTPPassive && ek.port >= c.opt.FTPPassiveMinPort {
@@ -351,6 +370,121 @@ func (c *Collector) sweep(now time.Time) {
 			delete(c.udpFirst, k)
 		}
 	}
+	for k, t := range c.ftpPassivePend {
+		if t.Before(cut) {
+			delete(c.ftpPassivePend, k)
+		}
+	}
+	for k, t := range c.ftpPassivePort {
+		if t.Before(cut) {
+			delete(c.ftpPassivePort, k)
+		}
+	}
+}
+
+func (c *Collector) observeFTPPassiveControl(srcIP, dstIP net.IP, sport, dport uint16, payload []byte, ts time.Time) {
+	if !c.opt.CollapseFTPPassive || len(payload) == 0 {
+		return
+	}
+
+	issuer := srcIP.String()
+	dst := dstIP.String()
+	if dport == 21 || dport == 990 {
+		if isFTPPassiveCommand(payload) {
+			c.ftpPassivePend[pairKey{issuer: issuer, dst: dst}] = ts
+		}
+		return
+	}
+
+	if sport != 21 && sport != 990 {
+		return
+	}
+
+	port, ok := parseFTPPassiveReplyPort(payload)
+	if !ok {
+		return
+	}
+
+	pair := pairKey{issuer: dst, dst: issuer}
+	if _, pending := c.ftpPassivePend[pair]; pending {
+		delete(c.ftpPassivePend, pair)
+	}
+	c.ftpPassivePort[edgeKey{
+		issuer: pair.issuer,
+		dst:    pair.dst,
+		proto:  ProtoTCP,
+		port:   port,
+	}] = ts
+}
+
+func isFTPPassiveCommand(payload []byte) bool {
+	line := strings.ToUpper(strings.TrimSpace(string(payload)))
+	return strings.HasPrefix(line, "PASV") || strings.HasPrefix(line, "EPSV")
+}
+
+func parseFTPPassiveReplyPort(payload []byte) (uint16, bool) {
+	line := strings.TrimSpace(string(payload))
+	if line == "" {
+		return 0, false
+	}
+	upper := strings.ToUpper(line)
+	switch {
+	case strings.HasPrefix(upper, "227"):
+		return parseFTP227PassivePort(line)
+	case strings.HasPrefix(upper, "229"):
+		return parseFTP229PassivePort(line)
+	default:
+		return 0, false
+	}
+}
+
+func parseFTP227PassivePort(line string) (uint16, bool) {
+	start := strings.IndexByte(line, '(')
+	if start < 0 {
+		return 0, false
+	}
+	end := strings.IndexByte(line[start+1:], ')')
+	segment := line[start+1:]
+	if end >= 0 {
+		segment = line[start+1 : start+1+end]
+	}
+	parts := strings.Split(segment, ",")
+	if len(parts) < 6 {
+		return 0, false
+	}
+	p1, err1 := strconv.Atoi(strings.TrimSpace(parts[len(parts)-2]))
+	p2, err2 := strconv.Atoi(strings.TrimSpace(parts[len(parts)-1]))
+	if err1 != nil || err2 != nil || p1 < 0 || p1 > 255 || p2 < 0 || p2 > 255 {
+		return 0, false
+	}
+	port := p1*256 + p2
+	if port <= 0 || port > 65535 {
+		return 0, false
+	}
+	return uint16(port), true
+}
+
+func parseFTP229PassivePort(line string) (uint16, bool) {
+	start := strings.IndexByte(line, '(')
+	if start < 0 {
+		return 0, false
+	}
+	end := strings.IndexByte(line[start+1:], ')')
+	segment := line[start+1:]
+	if end >= 0 {
+		segment = line[start+1 : start+1+end]
+	}
+	fields := strings.FieldsFunc(segment, func(r rune) bool {
+		return r < '0' || r > '9'
+	})
+	if len(fields) == 0 {
+		return 0, false
+	}
+	port, err := strconv.Atoi(fields[len(fields)-1])
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, false
+	}
+	return uint16(port), true
 }
 
 func (c *Collector) isExcludedPort(port uint16) bool {

@@ -117,7 +117,67 @@ func TestCollector_EdgesByFirstSeenOrdersNaturally(t *testing.T) {
 	}
 }
 
+func TestCollector_FTPPassiveReplySuppressesExactDataPort(t *testing.T) {
+	opt := DefaultOptions()
+	opt.FTPPassiveMinPort = 30000
+	c := NewCollector(opt)
+
+	ts := time.Unix(1700000300, 0).UTC()
+
+	// Control channel to FTP server.
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "10.119.163.201", "185.5.124.52", 35762, 21, true, false, nil), ts)
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "185.5.124.52", "10.119.163.201", 21, 35762, true, true, nil), ts.Add(10*time.Millisecond))
+
+	// FTP passive negotiation on control channel.
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "10.119.163.201", "185.5.124.52", 35762, 21, false, true, []byte("PASV\r\n")), ts.Add(20*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "185.5.124.52", "10.119.163.201", 21, 35762, false, true, []byte("227 Entering Passive Mode (185,5,124,52,8,174)\r\n")), ts.Add(30*time.Millisecond))
+
+	// Data channel to announced passive port 2222 should be suppressed even though
+	// it is below the heuristic FTP passive threshold.
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "10.119.163.201", "185.5.124.52", 35763, 2222, true, false, nil), ts.Add(40*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "185.5.124.52", "10.119.163.201", 2222, 35763, true, true, nil), ts.Add(50*time.Millisecond))
+
+	// Unannounced low port should still appear.
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "10.119.163.201", "185.5.124.52", 35764, 2223, true, false, nil), ts.Add(60*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "185.5.124.52", "10.119.163.201", 2223, 35764, true, true, nil), ts.Add(70*time.Millisecond))
+
+	edges := c.Edges()
+	if len(edges) != 2 {
+		t.Fatalf("expected ftp control edge and one non-passive edge, got %#v", edges)
+	}
+	if edges[0].Port != 21 || edges[1].Port != 2223 {
+		t.Fatalf("expected ports 21 and 2223 only, got %#v", edges)
+	}
+}
+
+func TestCollector_FTPEPSVReplySuppressesExactDataPort(t *testing.T) {
+	opt := DefaultOptions()
+	opt.FTPPassiveMinPort = 30000
+	c := NewCollector(opt)
+
+	ts := time.Unix(1700000400, 0).UTC()
+
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "10.119.163.201", "185.5.124.52", 35762, 21, true, false, nil), ts)
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "185.5.124.52", "10.119.163.201", 21, 35762, true, true, nil), ts.Add(10*time.Millisecond))
+
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "10.119.163.201", "185.5.124.52", 35762, 21, false, true, []byte("EPSV\r\n")), ts.Add(20*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "185.5.124.52", "10.119.163.201", 21, 35762, false, true, []byte("229 Entering Extended Passive Mode (|||2121|)\r\n")), ts.Add(30*time.Millisecond))
+
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "10.119.163.201", "185.5.124.52", 35763, 2121, true, false, nil), ts.Add(40*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "185.5.124.52", "10.119.163.201", 2121, 35763, true, true, nil), ts.Add(50*time.Millisecond))
+
+	edges := c.Edges()
+	if len(edges) != 1 || edges[0].Port != 21 {
+		t.Fatalf("expected only ftp control edge after EPSV suppression, got %#v", edges)
+	}
+}
+
 func mustPacketIPv4TCP(t *testing.T, srcIP string, dstIP string, srcPort uint16, dstPort uint16, syn bool, ack bool) gopacket.Packet {
+	t.Helper()
+	return mustPacketIPv4TCPWithPayload(t, srcIP, dstIP, srcPort, dstPort, syn, ack, nil)
+}
+
+func mustPacketIPv4TCPWithPayload(t *testing.T, srcIP string, dstIP string, srcPort uint16, dstPort uint16, syn bool, ack bool, payload []byte) gopacket.Packet {
 	t.Helper()
 
 	ip := &layers.IPv4{
@@ -143,7 +203,7 @@ func mustPacketIPv4TCP(t *testing.T, srcIP string, dstIP string, srcPort uint16,
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
-	if err := gopacket.SerializeLayers(buf, opts, ip, tcp); err != nil {
+	if err := gopacket.SerializeLayers(buf, opts, ip, tcp, gopacket.Payload(payload)); err != nil {
 		t.Fatalf("serialize packet: %v", err)
 	}
 	return gopacket.NewPacket(buf.Bytes(), layers.LayerTypeIPv4, gopacket.Default)
