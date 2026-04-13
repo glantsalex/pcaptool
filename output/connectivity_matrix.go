@@ -8,11 +8,13 @@
 package output
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aglants/pcaptool/internal/dns"
 )
@@ -102,6 +104,47 @@ func WriteNetworkTopologyMatrix(w io.Writer, entries []dns.TopologyEntry) error 
 		sep(sourceWidth), sep(protoWidth), sep(portWidth))
 
 	return nil
+}
+
+type networkTopologyMatrixJSON struct {
+	Version int                              `json:"version"`
+	Entries []networkTopologyMatrixJSONEntry `json:"entries"`
+}
+
+type networkTopologyMatrixJSONEntry struct {
+	IssuerIP      string `json:"issuer_ip"`
+	DestinationIP string `json:"destination_ip"`
+	DNSName       string `json:"dns_name"`
+	DNSSource     string `json:"dns_source"`
+	Protocol      string `json:"protocol"`
+	Port          uint16 `json:"port"`
+	ObservedAtUTC string `json:"observed_at_utc,omitempty"`
+}
+
+// WriteNetworkTopologyMatrixJSON writes the topology matrix in machine-readable JSON.
+func WriteNetworkTopologyMatrixJSON(w io.Writer, entries []dns.TopologyEntry) error {
+	payload := networkTopologyMatrixJSON{
+		Version: 1,
+		Entries: make([]networkTopologyMatrixJSONEntry, 0, len(entries)),
+	}
+	for _, entry := range entries {
+		row := networkTopologyMatrixJSONEntry{
+			IssuerIP:      entry.IssuerIP,
+			DestinationIP: entry.DestinationIP,
+			DNSName:       entry.DNSName,
+			DNSSource:     entry.DNSSource,
+			Protocol:      entry.Protocol,
+			Port:          entry.Port,
+		}
+		if !entry.ObservedAt.IsZero() {
+			row.ObservedAtUTC = entry.ObservedAt.UTC().Format(time.RFC3339Nano)
+		}
+		payload.Entries = append(payload.Entries, row)
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(payload)
 }
 
 // WriteTCPEgressEndpoints writes unique public destination IPs with protocol port lists.

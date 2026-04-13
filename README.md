@@ -200,6 +200,27 @@ Columns are effectively:
 
 This is the main artifact for reasoning about who talks to what.
 
+#### `network-topology-matrix.json`
+
+Machine-readable JSON sibling of `network-topology-matrix.txt`.
+
+Top-level shape:
+
+- `version`
+- `entries`
+
+Each entry includes:
+
+- `issuer_ip`
+- `destination_ip`
+- `dns_name`
+- `dns_source`
+- `protocol`
+- `port`
+- `observed_at_utc`
+
+This file is intended for downstream tooling that should not parse the human-formatted text matrix.
+
 #### `dns-issuer-profile.txt`
 
 Per-issuer DNS activity summary:

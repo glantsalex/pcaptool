@@ -362,6 +362,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		topo = dns.SquashNetworkTopologyShortWithOptions(topo, !flagUnsorted)
 	}
 	networkTopologyPath := ""
+	networkTopologyJSONPath := ""
 	if len(topo) > 0 {
 		mf, err := om.Create("network-topology-matrix.txt")
 		if err != nil {
@@ -372,6 +373,17 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 
 		if err := output.WriteNetworkTopologyMatrix(mf, topo); err != nil {
 			return fmt.Errorf("write network topology matrix: %w", err)
+		}
+
+		mjf, err := om.Create("network-topology-matrix.json")
+		if err != nil {
+			return fmt.Errorf("create network topology matrix json: %w", err)
+		}
+		defer mjf.Close()
+		networkTopologyJSONPath = mjf.Name()
+
+		if err := output.WriteNetworkTopologyMatrixJSON(mjf, topo); err != nil {
+			return fmt.Errorf("write network topology matrix json: %w", err)
 		}
 	}
 
@@ -485,6 +497,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if networkTopologyPath != "" {
 		filesMap["network_topology_matrix"] = networkTopologyPath
+	}
+	if networkTopologyJSONPath != "" {
+		filesMap["network_topology_matrix_json"] = networkTopologyJSONPath
 	}
 	if unresolvedDNSPath != "" {
 		filesMap["dns_unresolved_dns"] = unresolvedDNSPath
