@@ -248,9 +248,15 @@ Useful as a higher-level service inventory view with:
 Unresolved DNS names that remained unresolved after attribution.
 Includes issuer and first PCAP file seen.
 
-#### `unresolved-ip.txt`
+#### `unresolved-ip.json`
 
-Sorted list of public destination IPs that ended up with no DNS attribution in the final topology.
+JSON array of unresolved public destination endpoints that ended up with no DNS attribution in the final topology.
+Each entry contains:
+
+- `ip`
+- `port`
+- `proto`
+- `count`
 
 #### `export_csv` target
 

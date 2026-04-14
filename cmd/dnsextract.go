@@ -463,22 +463,20 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 
 	// ---------------------------
-	// Extra report: unresolved public destination IPs (no DNS attribution)
+	// Extra report: unresolved public destination endpoints (no DNS attribution)
 	// ---------------------------
-	unresolvedIPs := dns.PublicUnresolvedDestinationIPs(topo)
+	unresolvedEndpoints := dns.PublicUnresolvedDestinationEndpoints(topo)
 	unresolvedIPPath := ""
-	if len(unresolvedIPs) > 0 {
-		uf, err := om.Create("unresolved-ip.txt")
+	if len(unresolvedEndpoints) > 0 {
+		uf, err := om.Create("unresolved-ip.json")
 		if err != nil {
-			return fmt.Errorf("create unresolved-ip.txt: %w", err)
+			return fmt.Errorf("create unresolved-ip.json: %w", err)
 		}
 		defer uf.Close()
 		unresolvedIPPath = uf.Name()
 
-		for _, ip := range unresolvedIPs {
-			if _, err := fmt.Fprintln(uf, ip); err != nil {
-				return fmt.Errorf("write unresolved-ip.txt: %w", err)
-			}
+		if err := dns.WriteUnresolvedIPEndpointsJSON(uf, unresolvedEndpoints); err != nil {
+			return fmt.Errorf("write unresolved-ip.json: %w", err)
 		}
 	}
 	ipDNSAppendAuditPath := ""

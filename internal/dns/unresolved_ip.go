@@ -8,17 +8,32 @@
 package dns
 
 import (
+	"encoding/json"
+	"io"
 	"net/netip"
 	"sort"
 	"strings"
 )
 
-// PublicUnresolvedDestinationIPs returns a sorted list of unique destination IPv4 addresses
-// that have no DNS name attribution (DNSName == "").
+// UnresolvedIPEndpoint describes one unresolved destination endpoint observed in the current run.
+type UnresolvedIPEndpoint struct {
+	IP    string `json:"ip"`
+	Port  uint16 `json:"port"`
+	Proto string `json:"proto"`
+	Count int    `json:"count"`
+}
+
+// PublicUnresolvedDestinationEndpoints returns unresolved public destination endpoints
+// grouped by (ip, port, protocol), with occurrence counts.
 //
 // Input is expected to be the final topology entries (post-join).
-func PublicUnresolvedDestinationIPs(entries []TopologyEntry) []string {
-	set := make(map[string]struct{}, 1024)
+func PublicUnresolvedDestinationEndpoints(entries []TopologyEntry) []UnresolvedIPEndpoint {
+	type key struct {
+		ip    string
+		port  uint16
+		proto string
+	}
+	counts := make(map[key]int, 1024)
 
 	for _, e := range entries {
 		if strings.TrimSpace(e.DNSName) != "" {
@@ -36,19 +51,45 @@ func PublicUnresolvedDestinationIPs(entries []TopologyEntry) []string {
 		if !isPublicIPv4(addr) {
 			continue
 		}
-		set[ipStr] = struct{}{}
+		proto := strings.ToLower(strings.TrimSpace(e.Protocol))
+		if proto == "" {
+			continue
+		}
+		counts[key{ip: ipStr, port: e.Port, proto: proto}]++
 	}
 
-	if len(set) == 0 {
+	if len(counts) == 0 {
 		return nil
 	}
 
-	out := make([]string, 0, len(set))
-	for ip := range set {
-		out = append(out, ip)
+	out := make([]UnresolvedIPEndpoint, 0, len(counts))
+	for k, count := range counts {
+		out = append(out, UnresolvedIPEndpoint{
+			IP:    k.ip,
+			Port:  k.port,
+			Proto: k.proto,
+			Count: count,
+		})
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		if out[i].IP != out[j].IP {
+			return out[i].IP < out[j].IP
+		}
+		if out[i].Port != out[j].Port {
+			return out[i].Port < out[j].Port
+		}
+		return out[i].Proto < out[j].Proto
+	})
 	return out
+}
+
+func WriteUnresolvedIPEndpointsJSON(w io.Writer, entries []UnresolvedIPEndpoint) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(entries)
 }
 
 func isPublicIPv4(a netip.Addr) bool {

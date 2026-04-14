@@ -8,8 +8,8 @@ set -euo pipefail
 #
 # Rules:
 # - Input: root directory containing run subdirectories
-# - Recursively find every unresolved-ip.txt under the root
-# - For each IP in each unresolved-ip.txt:
+# - Recursively find every unresolved-ip.json under the root
+# - For each unresolved endpoint object in each unresolved-ip.json:
 #   1) look in dns-table.txt from the same directory
 #   2) if not found there, scan dns-table.txt files under the root in sorted order
 #      and stop at the first directory that contains that IP
@@ -58,6 +58,8 @@ root="${1:-}"
 [[ -d "$root" ]] || { echo "ERROR: root directory not found: $root" >&2; exit 2; }
 root="$(cd "$root" && pwd)"
 
+command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required" >&2; exit 2; }
+
 out="${2:-$root/recovered-unresolved-ip-dns.txt}"
 
 tmp_candidates="$(mktemp)"
@@ -66,10 +68,10 @@ tmp_missing="$(mktemp)"
 trap 'rm -f "$tmp_candidates" "$tmp_pairs" "$tmp_missing"' EXIT
 
 mapfile -t dns_tables < <(find "$root" -type f -name 'dns-table.txt' | LC_ALL=C sort)
-mapfile -t unresolved_files < <(find "$root" -type f -name 'unresolved-ip.txt' | LC_ALL=C sort)
+mapfile -t unresolved_files < <(find "$root" -type f -name 'unresolved-ip.json' | LC_ALL=C sort)
 
 if [[ ${#unresolved_files[@]} -eq 0 ]]; then
-  echo "ERROR: no unresolved-ip.txt files found under $root" >&2
+  echo "ERROR: no unresolved-ip.json files found under $root" >&2
   exit 1
 fi
 
@@ -77,18 +79,7 @@ total_unresolved_files=${#unresolved_files[@]}
 total_dns_tables=${#dns_tables[@]}
 total_ips=0
 for uf in "${unresolved_files[@]}"; do
-  count="$(
-    awk '
-      {
-        line=$0
-        sub(/^[ \t\r\n]+/, "", line)
-        sub(/[ \t\r\n]+$/, "", line)
-        if (line == "" || line ~ /^#/) next
-        c++
-      }
-      END { print c + 0 }
-    ' "$uf"
-  )"
+  count="$(jq 'length' "$uf")"
   total_ips=$((total_ips + count))
 done
 
@@ -202,10 +193,9 @@ processed_files=0
 for uf in "${unresolved_files[@]}"; do
   processed_files=$((processed_files + 1))
   dir="$(dirname "$uf")"
-  while IFS= read -r raw || [[ -n "$raw" ]]; do
-    ip="$(trim "$raw")"
+  while IFS= read -r ip || [[ -n "$ip" ]]; do
+    ip="$(trim "$ip")"
     [[ -n "$ip" ]] || continue
-    [[ "$ip" == \#* ]] && continue
     processed_ips=$((processed_ips + 1))
 
     dns="$(pick_best_in_dir "$dir" "$ip")"
@@ -230,7 +220,7 @@ for uf in "${unresolved_files[@]}"; do
     unresolved_still=$((unresolved_still + 1))
     show_progress "Recover unresolved IPs" "$processed_ips" "$total_ips" \
       "files=${processed_files}/${total_unresolved_files} local=${resolved_local} root=${resolved_global} missing=${unresolved_still}"
-  done < "$uf"
+  done < <(jq -r '.[].ip' "$uf")
 done
 
 if (( total_ips > 0 )); then
