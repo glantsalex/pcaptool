@@ -1,0 +1,26 @@
+# Glossary
+
+- `active resolve`: Optional mid-run DNS lookup of still-unresolved names. Used conservatively to enrich `DNSTransaction` records when static packet evidence is missing.
+- `contract-bearing type`: A type whose fields directly shape emitted files, persisted state, or other external behavior. In this repo, `OutputRecord`, `TopologyEntry`, and `RunArtifactsManifest` are the main examples.
+- `csv+conn`: A topology source label meaning the destination name came from `dns-ip.csv` as a fallback for a public connection when no direct DNS attribution was available.
+- `csv+mid`: A topology source label meaning a private-issuer to public-destination row was attributed from `dns-ip.csv` during mid-session fallback rather than from direct DNS evidence.
+- `DNSTransaction`: The central in-memory working record for one DNS or SNI-derived name observation. It accumulates names, resolved IPs, evidence bits, and optional observed-connection metadata.
+- `dns-ip.csv` / `fallback map`: The persisted IP-to-DNS mapping file used as a last-resort attribution source and optionally extended with newly learned strong pairs.
+- `Evidence`: Bitmask state describing how a name/IP association was obtained, such as direct DNS, SNI, active resolve, or observed connection.
+- `heuristic-state`: Mutable working state whose later mutations change attribution semantics. `DNSTransaction`, `ConnCandidate`, and `IMSIIndex` are the most important examples.
+- `issuer-only fallback`: TCP-only correlation fallback that can attach a connection to a DNS transaction by issuer and time window when direct `(issuer,dstIP)` matching failed. Ambiguous candidates are dropped.
+- `OutputRecord`: The flattened main-table row derived from `DNSTransaction` state for `dns-table.txt/json/csv`.
+- `peer completion`: Topology-only backfill that copies a DNS name from a unique donor row with the same `(dstIP, protocol, port)` when an unresolved row has no safer attribution.
+- `strong DNS evidence`: High-confidence direct DNS attribution, usually response-backed and connection-observed, that outranks weaker fallback sources and is eligible for learned persistence.
+- `TopologyEntry`: The final issuer-to-destination attribution row used by topology, service-endpoint, unresolved-IP, and related downstream outputs.
+- `unresolved row`: An intentionally preserved row whose destination could not be safely named. It is kept so output consumers can see unresolved endpoints instead of losing them silently.
+- `RunArtifactsManifest`: The machine-readable manifest written near the end of a run that records output file paths and other run metadata for post-hooks or downstream automation.
+- `Edge`: Connectivity tuple gathered from packet observation and later joined against DNS/SNI evidence during correlation.
+- `FirstPacketInfo`: Early packet metadata carried on a `DNSTransaction`, mainly used for chronology-sensitive fallback and reporting logic.
+- `ConnCandidate`: Temporary per-transaction connection candidate collected during correlation before best-match selection or suppression.
+- `IPDNSPair`: Working and persisted representation of an IP-to-DNS fallback mapping, especially for `dns-ip.csv` reuse and append-audit generation.
+- `SessionWindow`: RADIUS-derived time window used to relabel issuer IPs to IMSI identities when `--radius-imsi` is enabled.
+- `IMSIIndex`: Lookup structure built from RADIUS session windows and used to translate issuer IPs into IMSI labels during the main run.
+- `service endpoint`: A stable downstream-facing endpoint row derived from `TopologyEntry`, including synthetic placeholders like `[no-dns-attribution]` when no safe DNS name exists.
+- `mid-session`: A topology situation where a private issuer talks to a public destination without a directly attached DNS transaction for that connection, allowing special fallback rules such as `csv+mid`.
+- `private destination`: A destination IP in private address space. These rows are handled more conservatively and are not given invented public-DNS attribution.

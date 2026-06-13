@@ -26,3 +26,10 @@ pcaptool_output/
 data/
 
 
+.agents/
+.codex
+AGENTS.md
+
+data/dns-ip.csv
+
+.gitignore
