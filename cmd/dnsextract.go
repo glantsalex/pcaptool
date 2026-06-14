@@ -27,6 +27,7 @@ import (
 
 var (
 	flagReadDir           string
+	flagFleet             string
 	flagFormat            string
 	flagExportCSV         string
 	flagConnectivityShort bool
@@ -53,6 +54,12 @@ func init() {
 	}
 
 	cmd.Flags().StringVarP(&flagReadDir, "read-dir", "r", "", "Directory containing .pcap files")
+	cmd.Flags().StringVar(
+		&flagFleet,
+		"fleet",
+		"",
+		"Optional fleet IPv4 list path; when set, writes packet-level TCP SYN evidence artifacts.",
+	)
 	cmd.Flags().StringVar(&flagFormat, "format", "table", "Output format: table|json")
 	cmd.Flags().StringVar(&flagExportCSV, "export-csv", "", "Optional CSV export path (relative paths are placed under the run output directory)")
 	cmd.Flags().BoolVarP(&flagConnectivityShort, "short", "s", false,
@@ -160,6 +167,11 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if len(files) == 0 {
 		return fmt.Errorf("no .pcap files found in %q", flagReadDir)
+	}
+
+	synTrailArtifacts, err := runSYNTrailSidecar(ctx, om, files, flagFleet)
+	if err != nil {
+		return fmt.Errorf("run SYN trail sidecar: %w", err)
 	}
 
 	// --------------------------------------------------------------------
@@ -513,6 +525,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if ipDNSAppendAuditPath != "" {
 		filesMap["ip_dns_append_audit"] = ipDNSAppendAuditPath
+	}
+	for key, path := range synTrailArtifacts {
+		filesMap[key] = path
 	}
 	manifestPath, err := writeRunArtifactsManifest(om, runStartedAt, flagReadDir, len(files), firstPktInfo, flagFormat, filesMap)
 	if err != nil {
