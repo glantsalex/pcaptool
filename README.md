@@ -276,9 +276,82 @@ This records provenance for newly learned CSV rows appended during the run.
 
 If `--manifest-out` is set, a copy of `_run-artifacts.json` is written to the requested path.
 
+#### TCP SYN trail sidecar artifacts
+
+Produced only when `--fleet <path>` is set.
+
+`--fleet` points to a fleet IPv4 list:
+
+- one IPv4 address per line
+- blank lines are ignored
+- lines beginning with `#` are ignored
+- malformed IPv4 entries are errors
+- IPv6 entries are errors
+
+The SYN trail is packet-level initiator evidence from raw IPv4 TCP SYN packets.
+It is sidecar-only:
+
+- it does not change DNS attribution
+- it does not change topology matrix output
+- it does not change service-endpoints output
+- it does not change connection inference
+- `--exclude-ports` does not apply to SYN evidence artifacts
+
+The generated files are:
+
+- `fleet-tcp-syn-trail.csv`
+- `fleet-tcp-syn-unique.csv`
+- `fleet-to-fleet-tcp-syn-trail.csv`
+- `fleet-to-fleet-tcp-syn-unique.csv`
+- `private-nonfleet-to-fleet-tcp-syn-trail.csv`
+- `private-nonfleet-to-fleet-tcp-syn-unique.csv`
+
+Bucket meanings:
+
+- fleet to non-fleet
+  - `src_ip` is in fleet
+  - `dst_ip` is not in fleet
+- fleet to fleet
+  - `src_ip` is in fleet
+  - `dst_ip` is in fleet
+  - high-interest evidence because SIM-to-SIM communication should normally not happen
+- private non-fleet to fleet
+  - `src_ip` is private/local
+  - `src_ip` is not in fleet
+  - `dst_ip` is in fleet
+
+Trail files use this header:
+
+```text
+src_ip,dst_ip,dst_port,syn_timestamp_utc
+```
+
+Unique files use this header:
+
+```text
+src_ip,dst_ip,dst_port
+```
+
+`syn_timestamp_utc` uses this format:
+
+```text
+2006-01-02 15:04:05.000
+```
+
+Timestamp rules:
+
+- UTC
+- millisecond precision
+
 ## How `dnsextract` Works
 
 The command is a multi-pass offline pipeline.
+
+### Optional TCP SYN trail sidecar
+
+If `--fleet` is set, the PCAP corpus is also scanned for packet-level IPv4 TCP SYN evidence and the SYN trail sidecar artifacts are written.
+
+This sidecar does not feed DNS attribution, connection inference, topology generation, or service endpoint generation.
 
 ### Pass 1: optional RADIUS/IP-to-IMSI index
 
@@ -442,6 +515,7 @@ This policy is designed to reduce CSV contamination from:
 | Flag | Type | Default | Meaning |
 |---|---|---:|---|
 | `--read-dir`, `-r` | string | required | directory containing PCAP files; walked recursively |
+| `--fleet` | string | empty | optional fleet IPv4 list; when set, writes packet-level TCP SYN evidence artifacts |
 | `--format` | string | `table` | main output format: `table` or `json` |
 | `--export-csv` | string | empty | optional CSV export path for main records |
 | `--short`, `-s` | bool | `false` | squash topology to one row per issuer/DNS/port |
