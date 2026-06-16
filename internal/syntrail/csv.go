@@ -122,6 +122,32 @@ func WriteUniqueCSV(w io.Writer, records []Record) error {
 	return nil
 }
 
+// WriteTCPUniqueCSV writes deduplicated TCP SYN trail tuples as CSV, including a header row.
+func WriteTCPUniqueCSV(w io.Writer, records []Record) error {
+	cw := csv.NewWriter(w)
+
+	if err := cw.Write([]string{"src_ip", "dst_ip", "dst_port", "protocol"}); err != nil {
+		return fmt.Errorf("write unique TCP SYN trail CSV header: %w", err)
+	}
+
+	for _, record := range Unique(records) {
+		if err := cw.Write([]string{
+			record.SrcIP.String(),
+			record.DstIP.String(),
+			strconv.FormatUint(uint64(record.DstPort), 10),
+			"tcp",
+		}); err != nil {
+			return fmt.Errorf("write unique TCP SYN trail CSV record: %w", err)
+		}
+	}
+
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		return fmt.Errorf("flush unique TCP SYN trail CSV: %w", err)
+	}
+	return nil
+}
+
 type recordKey struct {
 	srcIP   netip.Addr
 	dstIP   netip.Addr

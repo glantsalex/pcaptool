@@ -75,10 +75,12 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	assertSYNTrailFile(t, om, "fleet-to-private-nonfleet-syn-trail.csv", ""+
 		"src_ip,dst_ip,dst_port,syn_timestamp_utc\n"+
 		"10.0.0.1,192.168.1.20,8443,2024-03-05 12:00:01.123\n")
-	assertSYNTrailFile(t, om, "fleet-tcp-syn-unique.csv", ""+
-		"src_ip,dst_ip,dst_port\n"+
-		"10.0.0.1,192.168.1.20,8443\n"+
-		"10.0.0.1,203.0.113.10,443\n")
+	assertSYNTrailFile(t, om, "fleet-to-public-syn-unique.csv", ""+
+		"src_ip,dst_ip,dst_port,protocol\n"+
+		"10.0.0.1,203.0.113.10,443,tcp\n")
+	assertSYNTrailFile(t, om, "fleet-to-private-nonfleet-syn-unique.csv", ""+
+		"src_ip,dst_ip,dst_port,protocol\n"+
+		"10.0.0.1,192.168.1.20,8443,tcp\n")
 	assertSYNTrailFile(t, om, "fleet-to-fleet-tcp-syn-trail.csv", ""+
 		"src_ip,dst_ip,dst_port,syn_timestamp_utc\n"+
 		"10.0.0.1,10.0.0.2,9443,2024-03-05 12:00:02.123\n")
@@ -95,8 +97,14 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	if _, ok := artifacts["fleet_tcp_syn_trail"]; ok {
 		t.Fatalf("artifacts contains removed key fleet_tcp_syn_trail")
 	}
+	if _, ok := artifacts["fleet_tcp_syn_unique"]; ok {
+		t.Fatalf("artifacts contains removed key fleet_tcp_syn_unique")
+	}
 	if _, err := os.Stat(om.Path("fleet-tcp-syn-trail.csv")); !os.IsNotExist(err) {
 		t.Fatalf("fleet-tcp-syn-trail.csv stat error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(om.Path("fleet-tcp-syn-unique.csv")); !os.IsNotExist(err) {
+		t.Fatalf("fleet-tcp-syn-unique.csv stat error = %v, want not exist", err)
 	}
 }
 
@@ -116,6 +124,9 @@ func TestWriteSYNTrailArtifactsEmptyBucketsWriteHeaderOnlyFiles(t *testing.T) {
 		if artifact.trail {
 			want = "src_ip,dst_ip,dst_port,syn_timestamp_utc\n"
 		}
+		if artifact.tcpUnique {
+			want = "src_ip,dst_ip,dst_port,protocol\n"
+		}
 		assertSYNTrailFile(t, om, artifact.filename, want)
 		if got := artifacts[artifact.key]; got != om.Path(artifact.filename) {
 			t.Fatalf("artifact %q path = %q, want %q", artifact.key, got, om.Path(artifact.filename))
@@ -124,15 +135,17 @@ func TestWriteSYNTrailArtifactsEmptyBucketsWriteHeaderOnlyFiles(t *testing.T) {
 }
 
 type expectedSYNTrailArtifact struct {
-	filename string
-	key      string
-	trail    bool
+	filename  string
+	key       string
+	trail     bool
+	tcpUnique bool
 }
 
 var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
 	{filename: "fleet-to-public-syn-trail.csv", key: "fleet_to_public_syn_trail", trail: true},
 	{filename: "fleet-to-private-nonfleet-syn-trail.csv", key: "fleet_to_private_nonfleet_syn_trail", trail: true},
-	{filename: "fleet-tcp-syn-unique.csv", key: "fleet_tcp_syn_unique"},
+	{filename: "fleet-to-public-syn-unique.csv", key: "fleet_to_public_syn_unique", tcpUnique: true},
+	{filename: "fleet-to-private-nonfleet-syn-unique.csv", key: "fleet_to_private_nonfleet_syn_unique", tcpUnique: true},
 	{filename: "fleet-to-fleet-tcp-syn-trail.csv", key: "fleet_to_fleet_tcp_syn_trail", trail: true},
 	{filename: "fleet-to-fleet-tcp-syn-unique.csv", key: "fleet_to_fleet_tcp_syn_unique"},
 	{filename: "private-nonfleet-to-fleet-tcp-syn-trail.csv", key: "private_nonfleet_to_fleet_tcp_syn_trail", trail: true},
