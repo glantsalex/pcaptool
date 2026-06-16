@@ -34,7 +34,7 @@ func writeSYNTrailArtifacts(om *OutputManager, buckets syntrail.BucketedRecords)
 	artifacts := make(map[string]string, len(synTrailArtifactSpecs))
 
 	for _, spec := range synTrailArtifactSpecs {
-		records := append([]syntrail.Record(nil), buckets[spec.bucket]...)
+		records := spec.records(buckets)
 		path, err := writeSYNTrailArtifact(om, spec.filename, records, spec.writer)
 		if err != nil {
 			return nil, err
@@ -46,49 +46,75 @@ func writeSYNTrailArtifacts(om *OutputManager, buckets syntrail.BucketedRecords)
 }
 
 type synTrailArtifactSpec struct {
-	bucket   syntrail.Bucket
 	filename string
 	key      string
+	records  func(syntrail.BucketedRecords) []syntrail.Record
 	writer   func(io.Writer, []syntrail.Record) error
 }
 
 var synTrailArtifactSpecs = []synTrailArtifactSpec{
 	{
-		bucket:   syntrail.BucketFleetToNonFleet,
-		filename: "fleet-tcp-syn-trail.csv",
-		key:      "fleet_tcp_syn_trail",
-		writer:   syntrail.WriteTrailCSV,
+		filename: "fleet-to-public-syn-trail.csv",
+		key:      "fleet_to_public_syn_trail",
+		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
+			public, _ := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
+			return public
+		},
+		writer: syntrail.WriteTrailCSV,
 	},
 	{
-		bucket:   syntrail.BucketFleetToNonFleet,
+		filename: "fleet-to-private-nonfleet-syn-trail.csv",
+		key:      "fleet_to_private_nonfleet_syn_trail",
+		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
+			_, privateNonFleet := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
+			return privateNonFleet
+		},
+		writer: syntrail.WriteTrailCSV,
+	},
+	{
 		filename: "fleet-tcp-syn-unique.csv",
 		key:      "fleet_tcp_syn_unique",
-		writer:   syntrail.WriteUniqueCSV,
+		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
+			return bucketRecords(buckets, syntrail.BucketFleetToNonFleet)
+		},
+		writer: syntrail.WriteUniqueCSV,
 	},
 	{
-		bucket:   syntrail.BucketFleetToFleet,
 		filename: "fleet-to-fleet-tcp-syn-trail.csv",
 		key:      "fleet_to_fleet_tcp_syn_trail",
-		writer:   syntrail.WriteTrailCSV,
+		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
+			return bucketRecords(buckets, syntrail.BucketFleetToFleet)
+		},
+		writer: syntrail.WriteTrailCSV,
 	},
 	{
-		bucket:   syntrail.BucketFleetToFleet,
 		filename: "fleet-to-fleet-tcp-syn-unique.csv",
 		key:      "fleet_to_fleet_tcp_syn_unique",
-		writer:   syntrail.WriteUniqueCSV,
+		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
+			return bucketRecords(buckets, syntrail.BucketFleetToFleet)
+		},
+		writer: syntrail.WriteUniqueCSV,
 	},
 	{
-		bucket:   syntrail.BucketPrivateNonFleetToFleet,
 		filename: "private-nonfleet-to-fleet-tcp-syn-trail.csv",
 		key:      "private_nonfleet_to_fleet_tcp_syn_trail",
-		writer:   syntrail.WriteTrailCSV,
+		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
+			return bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet)
+		},
+		writer: syntrail.WriteTrailCSV,
 	},
 	{
-		bucket:   syntrail.BucketPrivateNonFleetToFleet,
 		filename: "private-nonfleet-to-fleet-tcp-syn-unique.csv",
 		key:      "private_nonfleet_to_fleet_tcp_syn_unique",
-		writer:   syntrail.WriteUniqueCSV,
+		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
+			return bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet)
+		},
+		writer: syntrail.WriteUniqueCSV,
 	},
+}
+
+func bucketRecords(buckets syntrail.BucketedRecords, bucket syntrail.Bucket) []syntrail.Record {
+	return append([]syntrail.Record(nil), buckets[bucket]...)
 }
 
 func writeSYNTrailArtifact(om *OutputManager, filename string, records []syntrail.Record, write func(io.Writer, []syntrail.Record) error) (string, error) {
