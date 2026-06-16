@@ -81,6 +81,9 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	assertSYNTrailFile(t, om, "fleet-to-private-nonfleet-syn-unique.csv", ""+
 		"src_ip,dst_ip,dst_port,protocol\n"+
 		"10.0.0.1,192.168.1.20,8443,tcp\n")
+	assertSYNTrailFile(t, om, "private-servers-syn-unique.csv", ""+
+		"dst_ip,dst_port,protocol\n"+
+		"192.168.1.20,8443,tcp\n")
 	assertSYNTrailFile(t, om, "fleet-to-fleet-tcp-syn-trail.csv", ""+
 		"src_ip,dst_ip,dst_port,syn_timestamp_utc\n"+
 		"10.0.0.1,10.0.0.2,9443,2024-03-05 12:00:02.123\n")
@@ -93,6 +96,9 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	assertSYNTrailFile(t, om, "private-nonfleet-to-fleet-tcp-syn-unique.csv", ""+
 		"src_ip,dst_ip,dst_port\n"+
 		"192.168.1.10,10.0.0.2,22\n")
+	assertSYNTrailFile(t, om, "private-probes-syn-unique.csv", ""+
+		"src_ip,dst_port,protocol\n"+
+		"192.168.1.10,22,tcp\n")
 
 	if _, ok := artifacts["fleet_tcp_syn_trail"]; ok {
 		t.Fatalf("artifacts contains removed key fleet_tcp_syn_trail")
@@ -120,14 +126,7 @@ func TestWriteSYNTrailArtifactsEmptyBucketsWriteHeaderOnlyFiles(t *testing.T) {
 	}
 
 	for _, artifact := range expectedSYNTrailArtifacts {
-		want := "src_ip,dst_ip,dst_port\n"
-		if artifact.trail {
-			want = "src_ip,dst_ip,dst_port,syn_timestamp_utc\n"
-		}
-		if artifact.tcpUnique {
-			want = "src_ip,dst_ip,dst_port,protocol\n"
-		}
-		assertSYNTrailFile(t, om, artifact.filename, want)
+		assertSYNTrailFile(t, om, artifact.filename, artifact.header)
 		if got := artifacts[artifact.key]; got != om.Path(artifact.filename) {
 			t.Fatalf("artifact %q path = %q, want %q", artifact.key, got, om.Path(artifact.filename))
 		}
@@ -135,21 +134,62 @@ func TestWriteSYNTrailArtifactsEmptyBucketsWriteHeaderOnlyFiles(t *testing.T) {
 }
 
 type expectedSYNTrailArtifact struct {
-	filename  string
-	key       string
-	trail     bool
-	tcpUnique bool
+	filename string
+	key      string
+	header   string
 }
 
 var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
-	{filename: "fleet-to-public-syn-trail.csv", key: "fleet_to_public_syn_trail", trail: true},
-	{filename: "fleet-to-private-nonfleet-syn-trail.csv", key: "fleet_to_private_nonfleet_syn_trail", trail: true},
-	{filename: "fleet-to-public-syn-unique.csv", key: "fleet_to_public_syn_unique", tcpUnique: true},
-	{filename: "fleet-to-private-nonfleet-syn-unique.csv", key: "fleet_to_private_nonfleet_syn_unique", tcpUnique: true},
-	{filename: "fleet-to-fleet-tcp-syn-trail.csv", key: "fleet_to_fleet_tcp_syn_trail", trail: true},
-	{filename: "fleet-to-fleet-tcp-syn-unique.csv", key: "fleet_to_fleet_tcp_syn_unique"},
-	{filename: "private-nonfleet-to-fleet-tcp-syn-trail.csv", key: "private_nonfleet_to_fleet_tcp_syn_trail", trail: true},
-	{filename: "private-nonfleet-to-fleet-tcp-syn-unique.csv", key: "private_nonfleet_to_fleet_tcp_syn_unique"},
+	{
+		filename: "fleet-to-public-syn-trail.csv",
+		key:      "fleet_to_public_syn_trail",
+		header:   "src_ip,dst_ip,dst_port,syn_timestamp_utc\n",
+	},
+	{
+		filename: "fleet-to-private-nonfleet-syn-trail.csv",
+		key:      "fleet_to_private_nonfleet_syn_trail",
+		header:   "src_ip,dst_ip,dst_port,syn_timestamp_utc\n",
+	},
+	{
+		filename: "fleet-to-public-syn-unique.csv",
+		key:      "fleet_to_public_syn_unique",
+		header:   "src_ip,dst_ip,dst_port,protocol\n",
+	},
+	{
+		filename: "fleet-to-private-nonfleet-syn-unique.csv",
+		key:      "fleet_to_private_nonfleet_syn_unique",
+		header:   "src_ip,dst_ip,dst_port,protocol\n",
+	},
+	{
+		filename: "private-servers-syn-unique.csv",
+		key:      "private_servers_syn_unique",
+		header:   "dst_ip,dst_port,protocol\n",
+	},
+	{
+		filename: "fleet-to-fleet-tcp-syn-trail.csv",
+		key:      "fleet_to_fleet_tcp_syn_trail",
+		header:   "src_ip,dst_ip,dst_port,syn_timestamp_utc\n",
+	},
+	{
+		filename: "fleet-to-fleet-tcp-syn-unique.csv",
+		key:      "fleet_to_fleet_tcp_syn_unique",
+		header:   "src_ip,dst_ip,dst_port\n",
+	},
+	{
+		filename: "private-nonfleet-to-fleet-tcp-syn-trail.csv",
+		key:      "private_nonfleet_to_fleet_tcp_syn_trail",
+		header:   "src_ip,dst_ip,dst_port,syn_timestamp_utc\n",
+	},
+	{
+		filename: "private-nonfleet-to-fleet-tcp-syn-unique.csv",
+		key:      "private_nonfleet_to_fleet_tcp_syn_unique",
+		header:   "src_ip,dst_ip,dst_port\n",
+	},
+	{
+		filename: "private-probes-syn-unique.csv",
+		key:      "private_probes_syn_unique",
+		header:   "src_ip,dst_port,protocol\n",
+	},
 }
 
 func newSYNTrailTestOutputManager(t *testing.T) *OutputManager {

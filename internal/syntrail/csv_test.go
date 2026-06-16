@@ -115,6 +115,30 @@ func TestWriteTCPUniqueCSVEmptyWritesHeaderOnly(t *testing.T) {
 	}
 }
 
+func TestWritePrivateServersCSVEmptyWritesHeaderOnly(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WritePrivateServersCSV(&buf, nil); err != nil {
+		t.Fatalf("WritePrivateServersCSV() error = %v", err)
+	}
+
+	want := "dst_ip,dst_port,protocol\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WritePrivateServersCSV() = %q, want %q", got, want)
+	}
+}
+
+func TestWritePrivateProbesCSVEmptyWritesHeaderOnly(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WritePrivateProbesCSV(&buf, nil); err != nil {
+		t.Fatalf("WritePrivateProbesCSV() error = %v", err)
+	}
+
+	want := "src_ip,dst_port,protocol\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WritePrivateProbesCSV() = %q, want %q", got, want)
+	}
+}
+
 func TestWriteTrailCSVIncludesAllRecords(t *testing.T) {
 	early := time.Date(2024, 3, 5, 12, 0, 0, 123_000_000, time.UTC)
 	late := early.Add(time.Second)
@@ -161,6 +185,56 @@ func TestWriteUniqueCSVIncludesDedupedRecordsOnly(t *testing.T) {
 		"10.0.0.2,10.0.0.9,443\n"
 	if got := buf.String(); got != want {
 		t.Fatalf("WriteUniqueCSV() = %q, want %q", got, want)
+	}
+}
+
+func TestWritePrivateServersCSVIncludesProtocolDedupesAndSortsByTuple(t *testing.T) {
+	early := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	late := early.Add(time.Second)
+	records := []Record{
+		testCSVRecord("10.0.0.1", "10.0.0.10", 443, late),
+		testCSVRecord("10.0.0.2", "10.0.0.2", 8443, late),
+		testCSVRecord("10.0.0.3", "10.0.0.2", 443, early),
+		testCSVRecord("10.0.0.4", "10.0.0.2", 443, late),
+	}
+
+	var buf bytes.Buffer
+	if err := WritePrivateServersCSV(&buf, records); err != nil {
+		t.Fatalf("WritePrivateServersCSV() error = %v", err)
+	}
+
+	want := "" +
+		"dst_ip,dst_port,protocol\n" +
+		"10.0.0.2,443,tcp\n" +
+		"10.0.0.2,8443,tcp\n" +
+		"10.0.0.10,443,tcp\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WritePrivateServersCSV() = %q, want %q", got, want)
+	}
+}
+
+func TestWritePrivateProbesCSVIncludesProtocolDedupesAndSortsByTuple(t *testing.T) {
+	early := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	late := early.Add(time.Second)
+	records := []Record{
+		testCSVRecord("10.0.0.10", "10.0.0.1", 443, late),
+		testCSVRecord("10.0.0.2", "10.0.0.10", 443, early),
+		testCSVRecord("10.0.0.2", "10.0.0.2", 8443, late),
+		testCSVRecord("10.0.0.2", "10.0.0.3", 443, late),
+	}
+
+	var buf bytes.Buffer
+	if err := WritePrivateProbesCSV(&buf, records); err != nil {
+		t.Fatalf("WritePrivateProbesCSV() error = %v", err)
+	}
+
+	want := "" +
+		"src_ip,dst_port,protocol\n" +
+		"10.0.0.2,443,tcp\n" +
+		"10.0.0.2,8443,tcp\n" +
+		"10.0.0.10,443,tcp\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WritePrivateProbesCSV() = %q, want %q", got, want)
 	}
 }
 
