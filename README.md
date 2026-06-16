@@ -299,7 +299,8 @@ It is sidecar-only:
 
 The generated files are:
 
-- `fleet-tcp-syn-trail.csv`
+- `fleet-to-public-syn-trail.csv`
+- `fleet-to-private-nonfleet-syn-trail.csv`
 - `fleet-tcp-syn-unique.csv`
 - `fleet-to-fleet-tcp-syn-trail.csv`
 - `fleet-to-fleet-tcp-syn-unique.csv`
@@ -308,9 +309,18 @@ The generated files are:
 
 Bucket meanings:
 
-- fleet to non-fleet
+- fleet to public
   - `src_ip` is in fleet
+  - `dst_ip` is public / not private-local
+  - manifest key: `fleet_to_public_syn_trail`
+- fleet to private non-fleet
+  - `src_ip` is in fleet
+  - `dst_ip` is private/local
   - `dst_ip` is not in fleet
+  - manifest key: `fleet_to_private_nonfleet_syn_trail`
+- fleet to non-fleet unique
+  - `fleet-tcp-syn-unique.csv` remains the unique tuple file for all fleet to non-fleet destinations
+  - manifest key: `fleet_tcp_syn_unique`
 - fleet to fleet
   - `src_ip` is in fleet
   - `dst_ip` is in fleet
