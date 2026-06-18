@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -33,6 +34,7 @@ func TestScanFilesExtractsIPv4TCPSYNRecords(t *testing.T) {
 		SrcIP:     netip.MustParseAddr("10.1.2.3"),
 		DstIP:     netip.MustParseAddr("203.0.113.10"),
 		DstPort:   443,
+		Protocol:  ProtocolTCP,
 		Timestamp: ts.UTC(),
 	}
 	if records[0] != want {
@@ -43,14 +45,124 @@ func TestScanFilesExtractsIPv4TCPSYNRecords(t *testing.T) {
 	}
 }
 
-func TestScanFilesExcludesNonMatchingPackets(t *testing.T) {
+func TestScanFilesExtractsEligibleIPv4UDPRecord(t *testing.T) {
+	ts := time.Date(2026, 6, 14, 12, 0, 0, 123456789, time.FixedZone("capture", 2*60*60))
+	path := writePCAP(t, []testPacket{
+		udp4Packet(ts, "10.1.2.3", "203.0.113.10", 53),
+	})
+
+	records, err := ScanFiles(context.Background(), []string{path})
+	if err != nil {
+		t.Fatalf("ScanFiles() error = %v", err)
+	}
+	want := []Record{{
+		SrcIP:     netip.MustParseAddr("10.1.2.3"),
+		DstIP:     netip.MustParseAddr("203.0.113.10"),
+		DstPort:   53,
+		Protocol:  ProtocolUDP,
+		Timestamp: ts.UTC(),
+	}}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("ScanFiles() = %+v, want %+v", records, want)
+	}
+}
+
+func TestScanFilesAcceptsIPv4LinkLocalUDPDestination(t *testing.T) {
+	ts := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	path := writePCAP(t, []testPacket{
+		udp4Packet(ts, "10.1.2.3", "169.254.1.2", 5353),
+	})
+
+	records, err := ScanFiles(context.Background(), []string{path})
+	if err != nil {
+		t.Fatalf("ScanFiles() error = %v", err)
+	}
+	want := []Record{{
+		SrcIP:     netip.MustParseAddr("10.1.2.3"),
+		DstIP:     netip.MustParseAddr("169.254.1.2"),
+		DstPort:   5353,
+		Protocol:  ProtocolUDP,
+		Timestamp: ts,
+	}}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("ScanFiles() = %+v, want %+v", records, want)
+	}
+}
+
+func TestScanFilesDedupesUDPAtEarliestTimestampAcrossPacketsAndFiles(t *testing.T) {
+	base := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	first := writePCAP(t, []testPacket{
+		udp4Packet(base.Add(3*time.Second), "10.1.2.3", "203.0.113.10", 53),
+		udp4Packet(base.Add(2*time.Second), "10.1.2.3", "203.0.113.10", 53),
+		udp4Packet(base.Add(4*time.Second), "10.1.2.3", "203.0.113.10", 5353),
+		udp4Packet(base.Add(5*time.Second), "10.1.2.3", "203.0.113.11", 53),
+	})
+	second := writePCAP(t, []testPacket{
+		udp4Packet(base, "10.1.2.3", "203.0.113.10", 53),
+	})
+
+	records, err := ScanFiles(context.Background(), []string{first, second})
+	if err != nil {
+		t.Fatalf("ScanFiles() error = %v", err)
+	}
+	want := []Record{
+		{
+			SrcIP:     netip.MustParseAddr("10.1.2.3"),
+			DstIP:     netip.MustParseAddr("203.0.113.10"),
+			DstPort:   53,
+			Protocol:  ProtocolUDP,
+			Timestamp: base,
+		},
+		{
+			SrcIP:     netip.MustParseAddr("10.1.2.3"),
+			DstIP:     netip.MustParseAddr("203.0.113.10"),
+			DstPort:   5353,
+			Protocol:  ProtocolUDP,
+			Timestamp: base.Add(4 * time.Second),
+		},
+		{
+			SrcIP:     netip.MustParseAddr("10.1.2.3"),
+			DstIP:     netip.MustParseAddr("203.0.113.11"),
+			DstPort:   53,
+			Protocol:  ProtocolUDP,
+			Timestamp: base.Add(5 * time.Second),
+		},
+	}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("ScanFiles() = %+v, want %+v", records, want)
+	}
+}
+
+func TestScanFileDedupesUDPWithinOneFile(t *testing.T) {
+	base := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	path := writePCAP(t, []testPacket{
+		udp4Packet(base.Add(time.Second), "10.1.2.3", "203.0.113.10", 53),
+		udp4Packet(base, "10.1.2.3", "203.0.113.10", 53),
+	})
+
+	records, err := scanFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("scanFile() error = %v", err)
+	}
+	if len(records) != 1 || !records[0].Timestamp.Equal(base) {
+		t.Fatalf("scanFile() = %+v, want one UDP record at %v", records, base)
+	}
+}
+
+func TestScanFilesExcludesIneligiblePackets(t *testing.T) {
 	ts := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
 	path := writePCAP(t, []testPacket{
 		tcp4Packet(ts, "10.1.2.3", "203.0.113.10", 443, true, true),
-		udp4Packet(ts.Add(time.Second), "10.1.2.3", "203.0.113.10", 443),
-		tcp6Packet(ts.Add(2*time.Second), "fd00::1", "2001:db8::10", 443, true, false),
-		tcp4Packet(ts.Add(3*time.Second), "198.51.100.20", "203.0.113.10", 443, true, false),
-		tcp4Packet(ts.Add(4*time.Second), "10.1.2.3", "203.0.113.10", 0, true, false),
+		tcp6Packet(ts.Add(time.Second), "fd00::1", "2001:db8::10", 443, true, false),
+		tcp4Packet(ts.Add(2*time.Second), "198.51.100.20", "203.0.113.10", 443, true, false),
+		tcp4Packet(ts.Add(3*time.Second), "10.1.2.3", "203.0.113.10", 0, true, false),
+		udp4Packet(ts.Add(4*time.Second), "198.51.100.20", "203.0.113.10", 53),
+		udp4Packet(ts.Add(5*time.Second), "10.1.2.3", "224.0.0.1", 53),
+		udp4Packet(ts.Add(6*time.Second), "10.1.2.3", "255.255.255.255", 53),
+		udp4Packet(ts.Add(7*time.Second), "10.1.2.3", "0.0.0.0", 53),
+		udp4Packet(ts.Add(8*time.Second), "10.1.2.3", "10.1.2.3", 53),
+		udp4Packet(ts.Add(9*time.Second), "10.1.2.3", "203.0.113.10", 0),
+		udp6Packet(ts.Add(10*time.Second), "fd00::1", "2001:db8::10", 53),
 	})
 
 	records, err := ScanFiles(context.Background(), []string{path})
@@ -62,7 +174,7 @@ func TestScanFilesExcludesNonMatchingPackets(t *testing.T) {
 	}
 }
 
-func TestScanFilesPreservesFileOrder(t *testing.T) {
+func TestScanFilesPreservesTCPFilePacketOrderAndDuplicates(t *testing.T) {
 	firstTS := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
 	secondTS := firstTS.Add(time.Second)
 
@@ -71,18 +183,21 @@ func TestScanFilesPreservesFileOrder(t *testing.T) {
 	})
 	second := writePCAP(t, []testPacket{
 		tcp4Packet(secondTS, "10.0.0.2", "203.0.113.2", 8443, true, false),
+		tcp4Packet(secondTS.Add(time.Second), "10.0.0.2", "203.0.113.2", 8443, true, false),
 	})
 
 	records, err := ScanFiles(context.Background(), []string{second, first})
 	if err != nil {
 		t.Fatalf("ScanFiles() error = %v", err)
 	}
-	if len(records) != 2 {
-		t.Fatalf("ScanFiles() returned %d records, want 2", len(records))
+	if len(records) != 3 {
+		t.Fatalf("ScanFiles() returned %d records, want 3", len(records))
 	}
 
-	if records[0].SrcIP != netip.MustParseAddr("10.0.0.2") || records[1].SrcIP != netip.MustParseAddr("10.0.0.1") {
-		t.Fatalf("records are out of file order: %+v", records)
+	if records[0].SrcIP != netip.MustParseAddr("10.0.0.2") ||
+		records[1].SrcIP != netip.MustParseAddr("10.0.0.2") ||
+		records[2].SrcIP != netip.MustParseAddr("10.0.0.1") {
+		t.Fatalf("TCP records are out of file/packet order: %+v", records)
 	}
 }
 
@@ -174,6 +289,25 @@ func udp4Packet(ts time.Time, src, dst string, dstPort uint16) testPacket {
 		Protocol: layers.IPProtocolUDP,
 		SrcIP:    net.ParseIP(src).To4(),
 		DstIP:    net.ParseIP(dst).To4(),
+	}
+	udp := &layers.UDP{
+		SrcPort: 49152,
+		DstPort: layers.UDPPort(dstPort),
+	}
+	if err := udp.SetNetworkLayerForChecksum(ip); err != nil {
+		panic(err)
+	}
+	return testPacket{ts: ts, data: serializePacket(eth, ip, udp, gopacket.Payload([]byte{0x01}))}
+}
+
+func udp6Packet(ts time.Time, src, dst string, dstPort uint16) testPacket {
+	eth := ethernetLayer(layers.EthernetTypeIPv6)
+	ip := &layers.IPv6{
+		Version:    6,
+		HopLimit:   64,
+		NextHeader: layers.IPProtocolUDP,
+		SrcIP:      net.ParseIP(src),
+		DstIP:      net.ParseIP(dst),
 	}
 	udp := &layers.UDP{
 		SrcPort: 49152,

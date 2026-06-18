@@ -104,12 +104,33 @@ func TestWriteTCPProtocolTrailCSVEmptyWritesHeaderOnly(t *testing.T) {
 	}
 }
 
+func TestWriteProtocolTrailCSVEmptyWritesHeaderOnly(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteProtocolTrailCSV(&buf, nil); err != nil {
+		t.Fatalf("WriteProtocolTrailCSV() error = %v", err)
+	}
+
+	want := "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WriteProtocolTrailCSV() = %q, want %q", got, want)
+	}
+}
+
 func TestWriteTCPProtocolTrailCSVReturnsWriterError(t *testing.T) {
 	writeErr := errors.New("write failed")
 
 	err := WriteTCPProtocolTrailCSV(testCSVErrorWriter{err: writeErr}, nil)
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("WriteTCPProtocolTrailCSV() error = %v, want wrapped %v", err, writeErr)
+	}
+}
+
+func TestWriteProtocolTrailCSVReturnsWriterError(t *testing.T) {
+	writeErr := errors.New("write failed")
+
+	err := WriteProtocolTrailCSV(testCSVErrorWriter{err: writeErr}, nil)
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("WriteProtocolTrailCSV() error = %v, want wrapped %v", err, writeErr)
 	}
 }
 
@@ -236,6 +257,56 @@ func TestWriteTCPProtocolTrailCSVIncludesProtocolSortsDeterministicallyAndPreser
 	}
 }
 
+func TestWriteProtocolTrailCSVWritesActualProtocolSortsTCPBeforeUDPAndPreservesInput(t *testing.T) {
+	early := time.Date(2024, 3, 5, 12, 0, 0, 123_000_000, time.UTC)
+	late := early.Add(time.Second)
+	records := []Record{
+		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.3", 123, late, Protocol("sctp")),
+		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 53, early, ProtocolUDP),
+		testCSVRecordWithProtocol("10.0.0.10", "10.0.0.1", 443, early, ProtocolTCP),
+		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.9", 8443, late, ""),
+	}
+	original := append([]Record(nil), records...)
+
+	var buf bytes.Buffer
+	if err := WriteProtocolTrailCSV(&buf, records); err != nil {
+		t.Fatalf("WriteProtocolTrailCSV() error = %v", err)
+	}
+
+	want := "" +
+		"src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n" +
+		"10.0.0.2,10.0.0.9,8443,tcp,2024-03-05 12:00:01.123\n" +
+		"10.0.0.10,10.0.0.1,443,tcp,2024-03-05 12:00:00.123\n" +
+		"10.0.0.2,10.0.0.2,53,udp,2024-03-05 12:00:00.123\n" +
+		"10.0.0.1,10.0.0.3,123,sctp,2024-03-05 12:00:01.123\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WriteProtocolTrailCSV() = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(records, original) {
+		t.Fatalf("WriteProtocolTrailCSV() mutated records: got %+v, want %+v", records, original)
+	}
+}
+
+func TestWriteTCPProtocolTrailCSVExcludesUDPAndTreatsEmptyProtocolAsTCP(t *testing.T) {
+	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	records := []Record{
+		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.2", 443, ts, ""),
+		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.3", 53, ts, ProtocolUDP),
+	}
+
+	var buf bytes.Buffer
+	if err := WriteTCPProtocolTrailCSV(&buf, records); err != nil {
+		t.Fatalf("WriteTCPProtocolTrailCSV() error = %v", err)
+	}
+
+	want := "" +
+		"src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n" +
+		"10.0.0.1,10.0.0.2,443,tcp,2024-03-05 12:00:00.000\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WriteTCPProtocolTrailCSV() = %q, want %q", got, want)
+	}
+}
+
 func TestWriteUniqueCSVIncludesDedupedRecordsOnly(t *testing.T) {
 	early := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
 	late := early.Add(time.Second)
@@ -339,10 +410,15 @@ func TestWriteTCPUniqueCSVIncludesProtocolDedupesAndSortsByTuple(t *testing.T) {
 }
 
 func testCSVRecord(src, dst string, dstPort uint16, timestamp time.Time) Record {
+	return testCSVRecordWithProtocol(src, dst, dstPort, timestamp, ProtocolTCP)
+}
+
+func testCSVRecordWithProtocol(src, dst string, dstPort uint16, timestamp time.Time, protocol Protocol) Record {
 	return Record{
 		SrcIP:     netip.MustParseAddr(src),
 		DstIP:     netip.MustParseAddr(dst),
 		DstPort:   dstPort,
+		Protocol:  protocol,
 		Timestamp: timestamp,
 	}
 }

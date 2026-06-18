@@ -14,9 +14,13 @@ import (
 	"github.com/google/gopacket/pcapgo"
 )
 
-// ScanFiles scans packet captures for raw observed IPv4 TCP SYN evidence.
+// ScanFiles scans packet captures for raw observed IPv4 TCP SYN and eligible
+// UDP trail evidence.
 func ScanFiles(ctx context.Context, files []string) ([]Record, error) {
-	var records []Record
+	var tcpRecords []Record
+	udpRecords := make(map[observedRecordKey]Record)
+	var udpOrder []observedRecordKey
+
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -26,9 +30,16 @@ func ScanFiles(ctx context.Context, files []string) ([]Record, error) {
 		if err != nil {
 			return nil, err
 		}
-		records = append(records, fileRecords...)
+		for _, record := range fileRecords {
+			if record.Protocol != ProtocolUDP {
+				tcpRecords = append(tcpRecords, record)
+				continue
+			}
+			addEarliestRecord(udpRecords, &udpOrder, record)
+		}
 	}
-	return records, nil
+
+	return appendOrderedRecords(tcpRecords, udpRecords, udpOrder), nil
 }
 
 func scanFile(ctx context.Context, path string) ([]Record, error) {
@@ -48,7 +59,10 @@ func scanFile(ctx context.Context, path string) ([]Record, error) {
 	}
 	src.NoCopy = true
 
-	var records []Record
+	var tcpRecords []Record
+	udpRecords := make(map[observedRecordKey]Record)
+	var udpOrder []observedRecordKey
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -56,17 +70,18 @@ func scanFile(ctx context.Context, path string) ([]Record, error) {
 
 		packet, err := src.NextPacket()
 		if err == io.EOF {
-			return records, nil
+			return appendOrderedRecords(tcpRecords, udpRecords, udpOrder), nil
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read packet from %q: %w", path, err)
 		}
 
-		record, ok := synRecord(packet)
-		if !ok {
-			continue
+		if record, ok := synRecord(packet); ok {
+			tcpRecords = append(tcpRecords, record)
 		}
-		records = append(records, record)
+		if record, ok := udpRecord(packet); ok {
+			addEarliestRecord(udpRecords, &udpOrder, record)
+		}
 	}
 }
 
@@ -133,8 +148,100 @@ func synRecord(packet gopacket.Packet) (Record, bool) {
 		SrcIP:     srcIP,
 		DstIP:     dstIP,
 		DstPort:   dstPort,
+		Protocol:  ProtocolTCP,
 		Timestamp: md.Timestamp.UTC(),
 	}, true
+}
+
+func udpRecord(packet gopacket.Packet) (Record, bool) {
+	ip4Layer := packet.Layer(layers.LayerTypeIPv4)
+	if ip4Layer == nil {
+		return Record{}, false
+	}
+	ip4, ok := ip4Layer.(*layers.IPv4)
+	if !ok {
+		return Record{}, false
+	}
+
+	udpLayer := packet.Layer(layers.LayerTypeUDP)
+	if udpLayer == nil {
+		return Record{}, false
+	}
+	udp, ok := udpLayer.(*layers.UDP)
+	if !ok {
+		return Record{}, false
+	}
+
+	dstPort := uint16(udp.DstPort)
+	if dstPort == 0 {
+		return Record{}, false
+	}
+
+	srcIP, ok := netipAddrFromIPv4(ip4.SrcIP)
+	if !ok || !isLocalIPv4(srcIP) {
+		return Record{}, false
+	}
+	dstIP, ok := netipAddrFromIPv4(ip4.DstIP)
+	if !ok || !isEligibleUDPDestination(dstIP) || srcIP == dstIP {
+		return Record{}, false
+	}
+
+	md := packet.Metadata()
+	if md == nil {
+		return Record{}, false
+	}
+
+	return Record{
+		SrcIP:     srcIP,
+		DstIP:     dstIP,
+		DstPort:   dstPort,
+		Protocol:  ProtocolUDP,
+		Timestamp: md.Timestamp.UTC(),
+	}, true
+}
+
+type observedRecordKey struct {
+	srcIP    netip.Addr
+	dstIP    netip.Addr
+	dstPort  uint16
+	protocol Protocol
+}
+
+func addEarliestRecord(records map[observedRecordKey]Record, order *[]observedRecordKey, record Record) {
+	key := observedRecordKey{
+		srcIP:    record.SrcIP,
+		dstIP:    record.DstIP,
+		dstPort:  record.DstPort,
+		protocol: record.Protocol,
+	}
+	current, ok := records[key]
+	if !ok {
+		records[key] = record
+		*order = append(*order, key)
+		return
+	}
+	if record.Timestamp.Before(current.Timestamp) {
+		records[key] = record
+	}
+}
+
+func appendOrderedRecords(prefix []Record, records map[observedRecordKey]Record, order []observedRecordKey) []Record {
+	if len(order) == 0 {
+		return prefix
+	}
+	combined := make([]Record, 0, len(prefix)+len(order))
+	combined = append(combined, prefix...)
+	for _, key := range order {
+		combined = append(combined, records[key])
+	}
+	return combined
+}
+
+func isEligibleUDPDestination(ip netip.Addr) bool {
+	if !ip.Is4() || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	return ip != netip.AddrFrom4([4]byte{255, 255, 255, 255})
 }
 
 func netipAddrFromIPv4(ip net.IP) (netip.Addr, bool) {

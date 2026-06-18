@@ -97,19 +97,20 @@ func WriteTrailCSV(w io.Writer, records []Record) error {
 	return nil
 }
 
-// WriteTCPProtocolTrailCSV writes all records as TCP protocol trail CSV, including a header row.
-func WriteTCPProtocolTrailCSV(w io.Writer, records []Record) error {
+// WriteProtocolTrailCSV writes all records as protocol trail CSV, including a
+// header row. An empty protocol is normalized to TCP for compatibility.
+func WriteProtocolTrailCSV(w io.Writer, records []Record) error {
 	cw := csv.NewWriter(w)
 
 	if err := cw.Write([]string{"src_ip", "dst_ip", "dst_port", "protocol", "trail_timestamp_utc"}); err != nil {
-		return fmt.Errorf("write TCP protocol trail CSV header: %w", err)
+		return fmt.Errorf("write protocol trail CSV header: %w", err)
 	}
 
 	rows := make([]protocolTrailRow, len(records))
 	for i, record := range records {
 		rows[i] = protocolTrailRow{
 			record:   record,
-			protocol: "tcp",
+			protocol: normalizedProtocol(record.Protocol),
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -121,18 +122,24 @@ func WriteTCPProtocolTrailCSV(w io.Writer, records []Record) error {
 			row.record.SrcIP.String(),
 			row.record.DstIP.String(),
 			strconv.FormatUint(uint64(row.record.DstPort), 10),
-			row.protocol,
+			string(row.protocol),
 			FormatTimestampUTC(row.record.Timestamp),
 		}); err != nil {
-			return fmt.Errorf("write TCP protocol trail CSV record: %w", err)
+			return fmt.Errorf("write protocol trail CSV record: %w", err)
 		}
 	}
 
 	cw.Flush()
 	if err := cw.Error(); err != nil {
-		return fmt.Errorf("flush TCP protocol trail CSV: %w", err)
+		return fmt.Errorf("flush protocol trail CSV: %w", err)
 	}
 	return nil
+}
+
+// WriteTCPProtocolTrailCSV writes TCP records as protocol trail CSV, including
+// a header row. Records with an empty protocol are treated as TCP.
+func WriteTCPProtocolTrailCSV(w io.Writer, records []Record) error {
+	return WriteProtocolTrailCSV(w, tcpRecords(records))
 }
 
 // WriteUniqueCSV writes deduplicated SYN trail tuples as CSV, including a header row.
@@ -244,7 +251,7 @@ type recordKey struct {
 
 type protocolTrailRow struct {
 	record   Record
-	protocol string
+	protocol Protocol
 }
 
 type privateServerRow struct {
@@ -277,15 +284,34 @@ func protocolTrailRowLess(left, right protocolTrailRow) bool {
 	return left.record.DstPort < right.record.DstPort
 }
 
-func protocolRank(protocol string) int {
+func protocolRank(protocol Protocol) int {
 	switch protocol {
-	case "tcp":
+	case ProtocolTCP:
 		return 0
-	case "udp":
+	case ProtocolUDP:
 		return 1
 	default:
 		return 2
 	}
+}
+
+func normalizedProtocol(protocol Protocol) Protocol {
+	if protocol == "" {
+		return ProtocolTCP
+	}
+	return protocol
+}
+
+func tcpRecords(records []Record) []Record {
+	filtered := make([]Record, 0, len(records))
+	for _, record := range records {
+		if normalizedProtocol(record.Protocol) != ProtocolTCP {
+			continue
+		}
+		record.Protocol = ProtocolTCP
+		filtered = append(filtered, record)
+	}
+	return filtered
 }
 
 func uniquePrivateServerRows(records []Record) []privateServerRow {

@@ -40,13 +40,17 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	buckets := syntrail.BucketedRecords{
 		syntrail.BucketFleetToNonFleet: {
 			testSYNTrailRecord("10.0.0.1", "203.0.113.10", 443, ts),
+			testSYNTrailRecordWithProtocol("10.0.0.1", "203.0.113.11", 53, ts.Add(-time.Second), syntrail.ProtocolUDP),
 			testSYNTrailRecord("10.0.0.1", "192.168.1.20", 8443, ts.Add(time.Second)),
+			testSYNTrailRecordWithProtocol("10.0.0.1", "192.168.1.21", 5353, ts, syntrail.ProtocolUDP),
 		},
 		syntrail.BucketFleetToFleet: {
-			testSYNTrailRecord("10.0.0.1", "10.0.0.2", 9443, ts.Add(2*time.Second)),
+			testSYNTrailRecordWithProtocol("10.0.0.1", "10.0.0.2", 9443, ts.Add(2*time.Second), ""),
+			testSYNTrailRecordWithProtocol("10.0.0.1", "10.0.0.3", 53, ts.Add(time.Second), syntrail.ProtocolUDP),
 		},
 		syntrail.BucketPrivateNonFleetToFleet: {
 			testSYNTrailRecord("192.168.1.10", "10.0.0.2", 22, ts.Add(3*time.Second)),
+			testSYNTrailRecordWithProtocol("192.168.1.11", "10.0.0.2", 53, ts.Add(2*time.Second), syntrail.ProtocolUDP),
 		},
 	}
 
@@ -71,10 +75,12 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 
 	assertSYNTrailFile(t, om, "fleet-to-public-trail.csv", ""+
 		"src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n"+
-		"10.0.0.1,203.0.113.10,443,tcp,2024-03-05 12:00:00.123\n")
+		"10.0.0.1,203.0.113.10,443,tcp,2024-03-05 12:00:00.123\n"+
+		"10.0.0.1,203.0.113.11,53,udp,2024-03-05 11:59:59.123\n")
 	assertSYNTrailFile(t, om, "fleet-to-private-nonfleet-trail.csv", ""+
 		"src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n"+
-		"10.0.0.1,192.168.1.20,8443,tcp,2024-03-05 12:00:01.123\n")
+		"10.0.0.1,192.168.1.20,8443,tcp,2024-03-05 12:00:01.123\n"+
+		"10.0.0.1,192.168.1.21,5353,udp,2024-03-05 12:00:00.123\n")
 	assertSYNTrailFile(t, om, "fleet-to-public-syn-unique.csv", ""+
 		"src_ip,dst_ip,dst_port,protocol\n"+
 		"10.0.0.1,203.0.113.10,443,tcp\n")
@@ -92,7 +98,8 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 		"10.0.0.1,10.0.0.2,9443\n")
 	assertSYNTrailFile(t, om, "private-nonfleet-to-fleet-trail.csv", ""+
 		"src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n"+
-		"192.168.1.10,10.0.0.2,22,tcp,2024-03-05 12:00:03.123\n")
+		"192.168.1.10,10.0.0.2,22,tcp,2024-03-05 12:00:03.123\n"+
+		"192.168.1.11,10.0.0.2,53,udp,2024-03-05 12:00:02.123\n")
 	assertSYNTrailFile(t, om, "private-nonfleet-to-fleet-tcp-syn-unique.csv", ""+
 		"src_ip,dst_ip,dst_port\n"+
 		"192.168.1.10,10.0.0.2,22\n")
@@ -229,10 +236,15 @@ func assertSYNTrailFile(t *testing.T, om *OutputManager, filename, want string) 
 }
 
 func testSYNTrailRecord(src, dst string, dstPort uint16, timestamp time.Time) syntrail.Record {
+	return testSYNTrailRecordWithProtocol(src, dst, dstPort, timestamp, syntrail.ProtocolTCP)
+}
+
+func testSYNTrailRecordWithProtocol(src, dst string, dstPort uint16, timestamp time.Time, protocol syntrail.Protocol) syntrail.Record {
 	return syntrail.Record{
 		SrcIP:     netip.MustParseAddr(src),
 		DstIP:     netip.MustParseAddr(dst),
 		DstPort:   dstPort,
+		Protocol:  protocol,
 		Timestamp: timestamp,
 	}
 }

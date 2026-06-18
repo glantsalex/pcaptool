@@ -5,11 +5,23 @@ import (
 	"time"
 )
 
-// Record represents a single observed SYN trail connection attempt.
+// Protocol identifies the transport protocol observed for a trail record.
+type Protocol string
+
+const (
+	// ProtocolTCP identifies TCP traffic.
+	ProtocolTCP Protocol = "tcp"
+	// ProtocolUDP identifies UDP traffic.
+	ProtocolUDP Protocol = "udp"
+)
+
+// Record represents observed TCP SYN attempt evidence or inferred UDP edge
+// evidence from captured traffic.
 type Record struct {
 	SrcIP     netip.Addr
 	DstIP     netip.Addr
 	DstPort   uint16
+	Protocol  Protocol
 	Timestamp time.Time
 }
 

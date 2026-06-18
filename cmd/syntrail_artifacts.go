@@ -60,7 +60,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 			public, _ := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
 			return public
 		},
-		writer: syntrail.WriteTCPProtocolTrailCSV,
+		writer: syntrail.WriteProtocolTrailCSV,
 	},
 	{
 		filename: "fleet-to-private-nonfleet-trail.csv",
@@ -69,14 +69,14 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 			_, privateNonFleet := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
 			return privateNonFleet
 		},
-		writer: syntrail.WriteTCPProtocolTrailCSV,
+		writer: syntrail.WriteProtocolTrailCSV,
 	},
 	{
 		filename: "fleet-to-public-syn-unique.csv",
 		key:      "fleet_to_public_syn_unique",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
 			public, _ := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
-			return public
+			return tcpSYNTrailRecords(public)
 		},
 		writer: syntrail.WriteTCPUniqueCSV,
 	},
@@ -85,7 +85,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		key:      "fleet_to_private_nonfleet_syn_unique",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
 			_, privateNonFleet := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
-			return privateNonFleet
+			return tcpSYNTrailRecords(privateNonFleet)
 		},
 		writer: syntrail.WriteTCPUniqueCSV,
 	},
@@ -94,7 +94,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		key:      "private_servers_syn_unique",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
 			_, privateNonFleet := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
-			return privateNonFleet
+			return tcpSYNTrailRecords(privateNonFleet)
 		},
 		writer: syntrail.WritePrivateServersCSV,
 	},
@@ -102,7 +102,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		filename: "fleet-to-fleet-tcp-syn-trail.csv",
 		key:      "fleet_to_fleet_tcp_syn_trail",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			return bucketRecords(buckets, syntrail.BucketFleetToFleet)
+			return tcpSYNTrailRecords(bucketRecords(buckets, syntrail.BucketFleetToFleet))
 		},
 		writer: syntrail.WriteTrailCSV,
 	},
@@ -110,7 +110,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		filename: "fleet-to-fleet-tcp-syn-unique.csv",
 		key:      "fleet_to_fleet_tcp_syn_unique",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			return bucketRecords(buckets, syntrail.BucketFleetToFleet)
+			return tcpSYNTrailRecords(bucketRecords(buckets, syntrail.BucketFleetToFleet))
 		},
 		writer: syntrail.WriteUniqueCSV,
 	},
@@ -120,13 +120,13 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
 			return bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet)
 		},
-		writer: syntrail.WriteTCPProtocolTrailCSV,
+		writer: syntrail.WriteProtocolTrailCSV,
 	},
 	{
 		filename: "private-nonfleet-to-fleet-tcp-syn-unique.csv",
 		key:      "private_nonfleet_to_fleet_tcp_syn_unique",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			return bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet)
+			return tcpSYNTrailRecords(bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet))
 		},
 		writer: syntrail.WriteUniqueCSV,
 	},
@@ -134,7 +134,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		filename: "private-probes-syn-unique.csv",
 		key:      "private_probes_syn_unique",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			return bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet)
+			return tcpSYNTrailRecords(bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet))
 		},
 		writer: syntrail.WritePrivateProbesCSV,
 	},
@@ -142,6 +142,17 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 
 func bucketRecords(buckets syntrail.BucketedRecords, bucket syntrail.Bucket) []syntrail.Record {
 	return append([]syntrail.Record(nil), buckets[bucket]...)
+}
+
+func tcpSYNTrailRecords(records []syntrail.Record) []syntrail.Record {
+	filtered := make([]syntrail.Record, 0, len(records))
+	for _, record := range records {
+		if record.Protocol != "" && record.Protocol != syntrail.ProtocolTCP {
+			continue
+		}
+		filtered = append(filtered, record)
+	}
+	return filtered
 }
 
 func writeSYNTrailArtifact(om *OutputManager, filename string, records []syntrail.Record, write func(io.Writer, []syntrail.Record) error) (string, error) {
