@@ -69,12 +69,12 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 		}
 	}
 
-	assertSYNTrailFile(t, om, "fleet-to-public-syn-trail.csv", ""+
-		"src_ip,dst_ip,dst_port,syn_timestamp_utc\n"+
-		"10.0.0.1,203.0.113.10,443,2024-03-05 12:00:00.123\n")
-	assertSYNTrailFile(t, om, "fleet-to-private-nonfleet-syn-trail.csv", ""+
-		"src_ip,dst_ip,dst_port,syn_timestamp_utc\n"+
-		"10.0.0.1,192.168.1.20,8443,2024-03-05 12:00:01.123\n")
+	assertSYNTrailFile(t, om, "fleet-to-public-trail.csv", ""+
+		"src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n"+
+		"10.0.0.1,203.0.113.10,443,tcp,2024-03-05 12:00:00.123\n")
+	assertSYNTrailFile(t, om, "fleet-to-private-nonfleet-trail.csv", ""+
+		"src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n"+
+		"10.0.0.1,192.168.1.20,8443,tcp,2024-03-05 12:00:01.123\n")
 	assertSYNTrailFile(t, om, "fleet-to-public-syn-unique.csv", ""+
 		"src_ip,dst_ip,dst_port,protocol\n"+
 		"10.0.0.1,203.0.113.10,443,tcp\n")
@@ -90,9 +90,9 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	assertSYNTrailFile(t, om, "fleet-to-fleet-tcp-syn-unique.csv", ""+
 		"src_ip,dst_ip,dst_port\n"+
 		"10.0.0.1,10.0.0.2,9443\n")
-	assertSYNTrailFile(t, om, "private-nonfleet-to-fleet-tcp-syn-trail.csv", ""+
-		"src_ip,dst_ip,dst_port,syn_timestamp_utc\n"+
-		"192.168.1.10,10.0.0.2,22,2024-03-05 12:00:03.123\n")
+	assertSYNTrailFile(t, om, "private-nonfleet-to-fleet-trail.csv", ""+
+		"src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n"+
+		"192.168.1.10,10.0.0.2,22,tcp,2024-03-05 12:00:03.123\n")
 	assertSYNTrailFile(t, om, "private-nonfleet-to-fleet-tcp-syn-unique.csv", ""+
 		"src_ip,dst_ip,dst_port\n"+
 		"192.168.1.10,10.0.0.2,22\n")
@@ -111,6 +111,20 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	}
 	if _, err := os.Stat(om.Path("fleet-tcp-syn-unique.csv")); !os.IsNotExist(err) {
 		t.Fatalf("fleet-tcp-syn-unique.csv stat error = %v, want not exist", err)
+	}
+
+	oldArtifacts := []expectedSYNTrailArtifact{
+		{filename: "fleet-to-public-syn-trail.csv", key: "fleet_to_public_syn_trail"},
+		{filename: "fleet-to-private-nonfleet-syn-trail.csv", key: "fleet_to_private_nonfleet_syn_trail"},
+		{filename: "private-nonfleet-to-fleet-tcp-syn-trail.csv", key: "private_nonfleet_to_fleet_tcp_syn_trail"},
+	}
+	for _, artifact := range oldArtifacts {
+		if _, ok := artifacts[artifact.key]; ok {
+			t.Fatalf("artifacts contains old key %q", artifact.key)
+		}
+		if _, err := os.Stat(om.Path(artifact.filename)); !os.IsNotExist(err) {
+			t.Fatalf("%s stat error = %v, want not exist", artifact.filename, err)
+		}
 	}
 }
 
@@ -141,14 +155,14 @@ type expectedSYNTrailArtifact struct {
 
 var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
 	{
-		filename: "fleet-to-public-syn-trail.csv",
-		key:      "fleet_to_public_syn_trail",
-		header:   "src_ip,dst_ip,dst_port,syn_timestamp_utc\n",
+		filename: "fleet-to-public-trail.csv",
+		key:      "fleet_to_public_trail",
+		header:   "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n",
 	},
 	{
-		filename: "fleet-to-private-nonfleet-syn-trail.csv",
-		key:      "fleet_to_private_nonfleet_syn_trail",
-		header:   "src_ip,dst_ip,dst_port,syn_timestamp_utc\n",
+		filename: "fleet-to-private-nonfleet-trail.csv",
+		key:      "fleet_to_private_nonfleet_trail",
+		header:   "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n",
 	},
 	{
 		filename: "fleet-to-public-syn-unique.csv",
@@ -176,9 +190,9 @@ var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
 		header:   "src_ip,dst_ip,dst_port\n",
 	},
 	{
-		filename: "private-nonfleet-to-fleet-tcp-syn-trail.csv",
-		key:      "private_nonfleet_to_fleet_tcp_syn_trail",
-		header:   "src_ip,dst_ip,dst_port,syn_timestamp_utc\n",
+		filename: "private-nonfleet-to-fleet-trail.csv",
+		key:      "private_nonfleet_to_fleet_trail",
+		header:   "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n",
 	},
 	{
 		filename: "private-nonfleet-to-fleet-tcp-syn-unique.csv",

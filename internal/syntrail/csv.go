@@ -97,6 +97,44 @@ func WriteTrailCSV(w io.Writer, records []Record) error {
 	return nil
 }
 
+// WriteTCPProtocolTrailCSV writes all records as TCP protocol trail CSV, including a header row.
+func WriteTCPProtocolTrailCSV(w io.Writer, records []Record) error {
+	cw := csv.NewWriter(w)
+
+	if err := cw.Write([]string{"src_ip", "dst_ip", "dst_port", "protocol", "trail_timestamp_utc"}); err != nil {
+		return fmt.Errorf("write TCP protocol trail CSV header: %w", err)
+	}
+
+	rows := make([]protocolTrailRow, len(records))
+	for i, record := range records {
+		rows[i] = protocolTrailRow{
+			record:   record,
+			protocol: "tcp",
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return protocolTrailRowLess(rows[i], rows[j])
+	})
+
+	for _, row := range rows {
+		if err := cw.Write([]string{
+			row.record.SrcIP.String(),
+			row.record.DstIP.String(),
+			strconv.FormatUint(uint64(row.record.DstPort), 10),
+			row.protocol,
+			FormatTimestampUTC(row.record.Timestamp),
+		}); err != nil {
+			return fmt.Errorf("write TCP protocol trail CSV record: %w", err)
+		}
+	}
+
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		return fmt.Errorf("flush TCP protocol trail CSV: %w", err)
+	}
+	return nil
+}
+
 // WriteUniqueCSV writes deduplicated SYN trail tuples as CSV, including a header row.
 func WriteUniqueCSV(w io.Writer, records []Record) error {
 	cw := csv.NewWriter(w)
@@ -204,6 +242,11 @@ type recordKey struct {
 	dstPort uint16
 }
 
+type protocolTrailRow struct {
+	record   Record
+	protocol string
+}
+
 type privateServerRow struct {
 	dstIP    netip.Addr
 	dstPort  uint16
@@ -214,6 +257,35 @@ type privateProbeRow struct {
 	srcIP    netip.Addr
 	dstPort  uint16
 	protocol string
+}
+
+func protocolTrailRowLess(left, right protocolTrailRow) bool {
+	leftRank := protocolRank(left.protocol)
+	rightRank := protocolRank(right.protocol)
+	if leftRank != rightRank {
+		return leftRank < rightRank
+	}
+	if cmp := compareAddr(left.record.SrcIP, right.record.SrcIP); cmp != 0 {
+		return cmp < 0
+	}
+	if !left.record.Timestamp.Equal(right.record.Timestamp) {
+		return left.record.Timestamp.Before(right.record.Timestamp)
+	}
+	if cmp := compareAddr(left.record.DstIP, right.record.DstIP); cmp != 0 {
+		return cmp < 0
+	}
+	return left.record.DstPort < right.record.DstPort
+}
+
+func protocolRank(protocol string) int {
+	switch protocol {
+	case "tcp":
+		return 0
+	case "udp":
+		return 1
+	default:
+		return 2
+	}
 }
 
 func uniquePrivateServerRows(records []Record) []privateServerRow {

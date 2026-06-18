@@ -2,6 +2,7 @@ package syntrail
 
 import (
 	"bytes"
+	"errors"
 	"net/netip"
 	"reflect"
 	"testing"
@@ -91,6 +92,46 @@ func TestWriteTrailCSVEmptyWritesHeaderOnly(t *testing.T) {
 	}
 }
 
+func TestWriteTCPProtocolTrailCSVEmptyWritesHeaderOnly(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteTCPProtocolTrailCSV(&buf, nil); err != nil {
+		t.Fatalf("WriteTCPProtocolTrailCSV() error = %v", err)
+	}
+
+	want := "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WriteTCPProtocolTrailCSV() = %q, want %q", got, want)
+	}
+}
+
+func TestWriteTCPProtocolTrailCSVReturnsWriterError(t *testing.T) {
+	writeErr := errors.New("write failed")
+
+	err := WriteTCPProtocolTrailCSV(testCSVErrorWriter{err: writeErr}, nil)
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("WriteTCPProtocolTrailCSV() error = %v, want wrapped %v", err, writeErr)
+	}
+}
+
+func TestProtocolTrailRowLessRanksTCPBeforeUDP(t *testing.T) {
+	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	tcp := protocolTrailRow{
+		record:   testCSVRecord("10.0.0.10", "10.0.0.10", 8443, ts),
+		protocol: "tcp",
+	}
+	udp := protocolTrailRow{
+		record:   testCSVRecord("10.0.0.1", "10.0.0.1", 53, ts.Add(-time.Hour)),
+		protocol: "udp",
+	}
+
+	if !protocolTrailRowLess(tcp, udp) {
+		t.Fatal("protocolTrailRowLess(tcp, udp) = false, want true")
+	}
+	if protocolTrailRowLess(udp, tcp) {
+		t.Fatal("protocolTrailRowLess(udp, tcp) = true, want false")
+	}
+}
+
 func TestWriteUniqueCSVEmptyWritesHeaderOnly(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WriteUniqueCSV(&buf, nil); err != nil {
@@ -160,6 +201,38 @@ func TestWriteTrailCSVIncludesAllRecords(t *testing.T) {
 		"10.0.0.2,10.0.0.9,443,2024-03-05 12:00:01.123\n"
 	if got := buf.String(); got != want {
 		t.Fatalf("WriteTrailCSV() = %q, want %q", got, want)
+	}
+}
+
+func TestWriteTCPProtocolTrailCSVIncludesProtocolSortsDeterministicallyAndPreservesInput(t *testing.T) {
+	early := time.Date(2024, 3, 5, 12, 0, 0, 123_000_000, time.UTC)
+	late := early.Add(time.Second)
+	records := []Record{
+		testCSVRecord("10.0.0.10", "10.0.0.1", 443, early),
+		testCSVRecord("10.0.0.2", "10.0.0.10", 443, late),
+		testCSVRecord("10.0.0.2", "10.0.0.2", 8443, late),
+		testCSVRecord("10.0.0.2", "10.0.0.2", 443, late),
+		testCSVRecord("10.0.0.2", "10.0.0.9", 443, early),
+	}
+	original := append([]Record(nil), records...)
+
+	var buf bytes.Buffer
+	if err := WriteTCPProtocolTrailCSV(&buf, records); err != nil {
+		t.Fatalf("WriteTCPProtocolTrailCSV() error = %v", err)
+	}
+
+	want := "" +
+		"src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n" +
+		"10.0.0.2,10.0.0.9,443,tcp,2024-03-05 12:00:00.123\n" +
+		"10.0.0.2,10.0.0.2,443,tcp,2024-03-05 12:00:01.123\n" +
+		"10.0.0.2,10.0.0.2,8443,tcp,2024-03-05 12:00:01.123\n" +
+		"10.0.0.2,10.0.0.10,443,tcp,2024-03-05 12:00:01.123\n" +
+		"10.0.0.10,10.0.0.1,443,tcp,2024-03-05 12:00:00.123\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WriteTCPProtocolTrailCSV() = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(records, original) {
+		t.Fatalf("WriteTCPProtocolTrailCSV() mutated records: got %+v, want %+v", records, original)
 	}
 }
 
@@ -272,4 +345,12 @@ func testCSVRecord(src, dst string, dstPort uint16, timestamp time.Time) Record 
 		DstPort:   dstPort,
 		Timestamp: timestamp,
 	}
+}
+
+type testCSVErrorWriter struct {
+	err error
+}
+
+func (w testCSVErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

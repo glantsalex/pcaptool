@@ -54,22 +54,22 @@ type synTrailArtifactSpec struct {
 
 var synTrailArtifactSpecs = []synTrailArtifactSpec{
 	{
-		filename: "fleet-to-public-syn-trail.csv",
-		key:      "fleet_to_public_syn_trail",
+		filename: "fleet-to-public-trail.csv",
+		key:      "fleet_to_public_trail",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
 			public, _ := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
 			return public
 		},
-		writer: syntrail.WriteTrailCSV,
+		writer: syntrail.WriteTCPProtocolTrailCSV,
 	},
 	{
-		filename: "fleet-to-private-nonfleet-syn-trail.csv",
-		key:      "fleet_to_private_nonfleet_syn_trail",
+		filename: "fleet-to-private-nonfleet-trail.csv",
+		key:      "fleet_to_private_nonfleet_trail",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
 			_, privateNonFleet := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
 			return privateNonFleet
 		},
-		writer: syntrail.WriteTrailCSV,
+		writer: syntrail.WriteTCPProtocolTrailCSV,
 	},
 	{
 		filename: "fleet-to-public-syn-unique.csv",
@@ -115,12 +115,12 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		writer: syntrail.WriteUniqueCSV,
 	},
 	{
-		filename: "private-nonfleet-to-fleet-tcp-syn-trail.csv",
-		key:      "private_nonfleet_to_fleet_tcp_syn_trail",
+		filename: "private-nonfleet-to-fleet-trail.csv",
+		key:      "private_nonfleet_to_fleet_trail",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
 			return bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet)
 		},
-		writer: syntrail.WriteTrailCSV,
+		writer: syntrail.WriteTCPProtocolTrailCSV,
 	},
 	{
 		filename: "private-nonfleet-to-fleet-tcp-syn-unique.csv",
