@@ -88,11 +88,33 @@ func TestSuppressMergedFTPPassiveEdges(t *testing.T) {
 		{IssuerIP: "10.94.234.132", DstIP: "194.30.98.208", Protocol: connectivity.ProtoTCP, Port: 6915, FirstSeen: ts.Add(4 * time.Second)},
 	}
 
-	got := suppressMergedFTPPassiveEdges(edges, connectivity.DefaultOptions().FTPPassiveMinPort)
+	got := suppressMergedFTPPassiveEdges(edges, connectivity.DefaultOptions().FTPPassiveMinPort, nil)
 	if len(got) != 3 {
 		t.Fatalf("expected 3 edges after ftp passive suppression, got %#v", got)
 	}
 	if got[0].Port != 21 || got[1].Port != 1882 || got[2].Port != 6915 {
 		t.Fatalf("expected ports 21, 1882, 6915 after suppression, got %#v", got)
+	}
+}
+
+func TestSuppressMergedFTPPassiveEdgesCustomControlPort(t *testing.T) {
+	ts := time.Unix(1700000100, 0).UTC()
+	edges := []connectivity.Edge{
+		{IssuerIP: "10.94.234.132", DstIP: "185.5.124.52", Protocol: connectivity.ProtoTCP, Port: 21000, FirstSeen: ts},
+		{IssuerIP: "10.94.234.132", DstIP: "185.5.124.52", Protocol: connectivity.ProtoTCP, Port: 49824, FirstSeen: ts.Add(time.Second)},
+		{IssuerIP: "10.94.234.132", DstIP: "194.30.98.208", Protocol: connectivity.ProtoTCP, Port: 21, FirstSeen: ts.Add(2 * time.Second)},
+		{IssuerIP: "10.94.234.132", DstIP: "194.30.98.208", Protocol: connectivity.ProtoTCP, Port: 50081, FirstSeen: ts.Add(3 * time.Second)},
+	}
+
+	got := suppressMergedFTPPassiveEdges(
+		edges,
+		connectivity.DefaultOptions().FTPPassiveMinPort,
+		map[uint16]struct{}{21000: {}},
+	)
+	if len(got) != 3 {
+		t.Fatalf("expected custom control suppression only, got %#v", got)
+	}
+	if got[0].Port != 21000 || got[1].Port != 21 || got[2].Port != 50081 {
+		t.Fatalf("expected ports 21000, 21, 50081 after suppression, got %#v", got)
 	}
 }

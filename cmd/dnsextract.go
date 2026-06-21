@@ -35,6 +35,7 @@ var (
 	flagOnlyTCP           bool
 	flagIgnoreNTP         bool
 	flagExcludePorts      string
+	flagFTPControlPorts   string
 	flagDNSIPFile         string
 	flagTopologyDNSWindow time.Duration
 	flagActiveResolve     bool
@@ -85,6 +86,12 @@ func init() {
 		"exclude-ports",
 		"53",
 		"Comma-separated server/destination ports to exclude from network topology matrix (e.g. 53,123). Default: 53",
+	)
+	cmd.Flags().StringVar(
+		&flagFTPControlPorts,
+		"ftp-control-ports",
+		"21,990",
+		"Comma-separated passive FTP/FTPS control ports; replaces the default set (21,990).",
 	)
 	cmd.Flags().BoolVar(
 		&flagActiveResolve,
@@ -153,6 +160,10 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if flagTopologyDNSWindow < 0 {
 		return fmt.Errorf("--topology-dns-window must be >= 0")
+	}
+	ftpControlPorts, err := parseStrictPortSet(flagFTPControlPorts)
+	if err != nil {
+		return fmt.Errorf("--ftp-control-ports: %w", err)
 	}
 
 	om, err := NewOutputManager(flagNetID, flagOutputRoot)
@@ -243,7 +254,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("load --dns-ip-file: %w", err)
 		}
 	}
-	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, flagOnlyTCP, excludeSet, flagEnforcePrivateAsSource, ipToDNS)
+	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, flagOnlyTCP, excludeSet, flagEnforcePrivateAsSource, ipToDNS, ftpControlPorts)
 	if err != nil {
 		return err
 	}

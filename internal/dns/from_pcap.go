@@ -253,6 +253,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 	excludePorts map[uint16]struct{},
 	enforcePrivateAsSource bool,
 	ipToDNS map[string][]string,
+	ftpControlPorts map[uint16]struct{},
 ) ([]connectivity.Edge, FirstPacketInfo, error) {
 	index := BuildTxnIndex(txs)
 
@@ -436,6 +437,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 			opt := connectivity.DefaultOptions()
 			opt.ExcludedDstPorts = excludePorts
 			opt.EnforcePrivateAsSource = enforcePrivateAsSource
+			opt.FTPControlPorts = ftpControlPorts
 
 			coll := connectivity.NewCollector(opt)
 
@@ -691,13 +693,16 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 			out = append(out, e)
 		}
 	}
-	out = suppressMergedFTPPassiveEdges(out, connectivity.DefaultOptions().FTPPassiveMinPort)
+	out = suppressMergedFTPPassiveEdges(out, connectivity.DefaultOptions().FTPPassiveMinPort, ftpControlPorts)
 	return out, firstPkt, nil
 }
 
-func suppressMergedFTPPassiveEdges(edges []connectivity.Edge, minPassivePort uint16) []connectivity.Edge {
+func suppressMergedFTPPassiveEdges(edges []connectivity.Edge, minPassivePort uint16, ftpControlPorts map[uint16]struct{}) []connectivity.Edge {
 	if len(edges) == 0 || minPassivePort == 0 {
 		return edges
+	}
+	if ftpControlPorts == nil {
+		ftpControlPorts = connectivity.DefaultOptions().FTPControlPorts
 	}
 
 	type pairKey struct {
@@ -710,7 +715,7 @@ func suppressMergedFTPPassiveEdges(edges []connectivity.Edge, minPassivePort uin
 		if e.Protocol != connectivity.ProtoTCP {
 			continue
 		}
-		if e.Port == 21 || e.Port == 990 {
+		if _, ok := ftpControlPorts[e.Port]; ok {
 			ftpControlSeen[pairKey{issuer: e.IssuerIP, dst: e.DstIP}] = struct{}{}
 		}
 	}
@@ -785,7 +790,7 @@ func allowConnectionInferredDNSBackfill(candidateDNS string, ipStr string, ipToD
 }
 
 func AttachConnectionsFromPCAPs(ctx context.Context, files []string, txs []*DNSTransaction, onlyTCP bool) error {
-	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, onlyTCP, nil, false, nil)
+	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, onlyTCP, nil, false, nil, nil)
 	return err
 }
 

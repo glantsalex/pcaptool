@@ -400,6 +400,14 @@ This is where the tool learns:
 
 This pass also uses `--exclude-ports` and `--enforce-private-as-source`.
 
+Passive FTP data-edge suppression recognizes control channels on `--ftp-control-ports`.
+The default is `21,990`. Syntax is a strict, non-empty comma-separated list of ports in the range `1..65535`; empty entries are rejected. The supplied value replaces the default set and affects only passive FTP/FTPS edge suppression.
+
+Examples:
+
+- `--ftp-control-ports 21,990,21000` adds a custom control port while retaining the defaults.
+- `--ftp-control-ports 21000` recognizes only port `21000` as an FTP control port.
+
 ### Topology build
 
 The final topology matrix is built by joining connectivity edges back to the best DNS/SNI evidence available, with a configurable age window (`--topology-dns-window`).
@@ -534,6 +542,7 @@ This policy is designed to reduce CSV contamination from:
 | `--ignore-ntp` | bool | `true` | drop NTP-like DNS names using heuristic filtering |
 | `--dns-ip-file` | string | empty | path to fallback DNS/IP map used for last-resort attribution |
 | `--exclude-ports` | string | `53` | comma-separated destination/server ports to exclude from topology correlation |
+| `--ftp-control-ports` | string | `21,990` | strict comma-separated passive FTP/FTPS control ports; replaces the default set |
 | `--active-resolve` | bool | `false` | resolve unresolved names against external resolvers |
 | `--active-resolvers` | string | empty | comma-separated resolver IPs for active resolve |
 | `--disable-sni` | bool | `false` | skip TLS ClientHello/SNI scan |

@@ -40,6 +40,7 @@ type Options struct {
 	ExcludedDstPorts       map[uint16]struct{}
 	CollapseFTPPassive     bool
 	FTPPassiveMinPort      uint16
+	FTPControlPorts        map[uint16]struct{}
 	EnforcePrivateAsSource bool
 }
 
@@ -49,6 +50,10 @@ func DefaultOptions() Options {
 		SweepEvery:         2 * time.Second,
 		CollapseFTPPassive: true,
 		FTPPassiveMinPort:  30000,
+		FTPControlPorts: map[uint16]struct{}{
+			21:  {},
+			990: {},
+		},
 	}
 }
 
@@ -89,15 +94,24 @@ type edgeKey struct {
 }
 
 func NewCollector(opt Options) *Collector {
+	defaults := DefaultOptions()
 	if opt.PendingTTL <= 0 {
-		opt.PendingTTL = DefaultOptions().PendingTTL
+		opt.PendingTTL = defaults.PendingTTL
 	}
 	if opt.SweepEvery <= 0 {
-		opt.SweepEvery = DefaultOptions().SweepEvery
+		opt.SweepEvery = defaults.SweepEvery
 	}
 	if opt.FTPPassiveMinPort == 0 {
-		opt.FTPPassiveMinPort = DefaultOptions().FTPPassiveMinPort
+		opt.FTPPassiveMinPort = defaults.FTPPassiveMinPort
 	}
+	if opt.FTPControlPorts == nil {
+		opt.FTPControlPorts = defaults.FTPControlPorts
+	}
+	ftpControlPorts := make(map[uint16]struct{}, len(opt.FTPControlPorts))
+	for port := range opt.FTPControlPorts {
+		ftpControlPorts[port] = struct{}{}
+	}
+	opt.FTPControlPorts = ftpControlPorts
 	return &Collector{
 		opt:            opt,
 		tcpSyn:         make(map[tcpKey]time.Time, 8192),
@@ -245,7 +259,7 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 			}
 		}
 
-		if c.opt.CollapseFTPPassive && (ek.port == 21 || ek.port == 990) {
+		if c.opt.CollapseFTPPassive && c.isFTPControlPort(ek.port) {
 			c.ftpControlSeen[pairKey{ek.issuer, ek.dst}] = struct{}{}
 		}
 
@@ -305,7 +319,7 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 		}
 	}
 
-	if c.opt.CollapseFTPPassive && (ek.port == 21 || ek.port == 990) {
+	if c.opt.CollapseFTPPassive && c.isFTPControlPort(ek.port) {
 		c.ftpControlSeen[pairKey{ek.issuer, ek.dst}] = struct{}{}
 	}
 
@@ -389,14 +403,14 @@ func (c *Collector) observeFTPPassiveControl(srcIP, dstIP net.IP, sport, dport u
 
 	issuer := srcIP.String()
 	dst := dstIP.String()
-	if dport == 21 || dport == 990 {
+	if c.isFTPControlPort(dport) {
 		if isFTPPassiveCommand(payload) {
 			c.ftpPassivePend[pairKey{issuer: issuer, dst: dst}] = ts
 		}
 		return
 	}
 
-	if sport != 21 && sport != 990 {
+	if !c.isFTPControlPort(sport) {
 		return
 	}
 
@@ -492,6 +506,11 @@ func (c *Collector) isExcludedPort(port uint16) bool {
 		return false
 	}
 	_, ok := c.opt.ExcludedDstPorts[port]
+	return ok
+}
+
+func (c *Collector) isFTPControlPort(port uint16) bool {
+	_, ok := c.opt.FTPControlPorts[port]
 	return ok
 }
 
