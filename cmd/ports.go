@@ -64,3 +64,19 @@ func parseStrictPortSet(s string) (map[uint16]struct{}, error) {
 	}
 	return out, nil
 }
+
+func parseStrictPort(s string) (uint16, error) {
+	value := strings.TrimSpace(s)
+	if value == "" {
+		return 0, fmt.Errorf("invalid port value %q: must not be empty", s)
+	}
+
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid port value %q: must be numeric", value)
+	}
+	if n <= 0 || n > 65535 {
+		return 0, fmt.Errorf("invalid port value %q: must be 1..65535", value)
+	}
+	return uint16(n), nil
+}

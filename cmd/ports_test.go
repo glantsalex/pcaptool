@@ -64,3 +64,42 @@ func TestParsePortSetRemainsPermissive(t *testing.T) {
 		t.Fatalf("parsePortSet() = %#v, want port 21", got)
 	}
 }
+
+func TestParseStrictPort(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    uint16
+		wantErr string
+	}{
+		{name: "minimum", input: "1", want: 1},
+		{name: "default", input: "30000", want: 30000},
+		{name: "maximum", input: "65535", want: 65535},
+		{name: "trims whitespace", input: " 40000 ", want: 40000},
+		{name: "empty", input: "", wantErr: "must not be empty"},
+		{name: "whitespace", input: " \t ", wantErr: "must not be empty"},
+		{name: "zero", input: "0", wantErr: "must be 1..65535"},
+		{name: "negative", input: "-1", wantErr: "must be 1..65535"},
+		{name: "nonnumeric", input: "ftp", wantErr: "must be numeric"},
+		{name: "too large", input: "65536", wantErr: "must be 1..65535"},
+		{name: "multiple ports", input: "30000,40000", wantErr: "must be numeric"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseStrictPort(tt.input)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseStrictPort(%q) error = %v, want containing %q", tt.input, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseStrictPort(%q) error: %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseStrictPort(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}

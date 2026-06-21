@@ -408,6 +408,10 @@ Examples:
 - `--ftp-control-ports 21,990,21000` adds a custom control port while retaining the defaults.
 - `--ftp-control-ports 21000` recognizes only port `21000` as an FTP control port.
 
+The heuristic high-port cutoff is controlled by `--ftp-passive-min-port` and defaults to `30000`. It accepts one port in the range `1..65535`. After a configured FTP control channel is observed for an issuer/server pair, TCP destination ports at or above this value are suppressed as passive data edges. Exact ports announced by PASV/EPSV replies are still suppressed even when they are below the configured cutoff.
+
+For a network with a non-standard control channel and lower passive data range, use `--ftp-control-ports 21,990,21000 --ftp-passive-min-port 10000`.
+
 ### Topology build
 
 The final topology matrix is built by joining connectivity edges back to the best DNS/SNI evidence available, with a configurable age window (`--topology-dns-window`).
@@ -543,6 +547,7 @@ This policy is designed to reduce CSV contamination from:
 | `--dns-ip-file` | string | empty | path to fallback DNS/IP map used for last-resort attribution |
 | `--exclude-ports` | string | `53` | comma-separated destination/server ports to exclude from topology correlation |
 | `--ftp-control-ports` | string | `21,990` | strict comma-separated passive FTP/FTPS control ports; replaces the default set |
+| `--ftp-passive-min-port` | port | `30000` | minimum destination port heuristically suppressed after a configured FTP/FTPS control channel is observed |
 | `--active-resolve` | bool | `false` | resolve unresolved names against external resolvers |
 | `--active-resolvers` | string | empty | comma-separated resolver IPs for active resolve |
 | `--disable-sni` | bool | `false` | skip TLS ClientHello/SNI scan |
