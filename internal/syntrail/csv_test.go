@@ -177,6 +177,27 @@ func TestWriteTCPUniqueCSVEmptyWritesHeaderOnly(t *testing.T) {
 	}
 }
 
+func TestWriteProtocolUniqueCSVEmptyWritesHeaderOnly(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteProtocolUniqueCSV(&buf, nil); err != nil {
+		t.Fatalf("WriteProtocolUniqueCSV() error = %v", err)
+	}
+
+	want := "src_ip,dst_ip,dst_port,protocol\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WriteProtocolUniqueCSV() = %q, want %q", got, want)
+	}
+}
+
+func TestWriteProtocolUniqueCSVReturnsWriterError(t *testing.T) {
+	writeErr := errors.New("write failed")
+
+	err := WriteProtocolUniqueCSV(testCSVErrorWriter{err: writeErr}, nil)
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("WriteProtocolUniqueCSV() error = %v, want wrapped %v", err, writeErr)
+	}
+}
+
 func TestWritePrivateServersCSVEmptyWritesHeaderOnly(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WritePrivateServersCSV(&buf, nil); err != nil {
@@ -406,6 +427,42 @@ func TestWriteTCPUniqueCSVIncludesProtocolDedupesAndSortsByTuple(t *testing.T) {
 		"10.0.0.10,10.0.0.1,443,tcp\n"
 	if got := buf.String(); got != want {
 		t.Fatalf("WriteTCPUniqueCSV() = %q, want %q", got, want)
+	}
+}
+
+func TestWriteProtocolUniqueCSVNormalizesDedupesSortsAndPreservesInput(t *testing.T) {
+	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	records := []Record{
+		testCSVRecordWithProtocol("10.0.0.10", "10.0.0.2", 443, ts, ProtocolTCP),
+		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.10", 443, ts, ProtocolUDP),
+		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 8443, ts, ProtocolTCP),
+		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 443, ts, ""),
+		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 443, ts.Add(time.Second), ProtocolTCP),
+		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 443, ts, ProtocolUDP),
+		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.3", 123, ts, Protocol("sctp")),
+		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.3", 123, ts, Protocol("icmp")),
+	}
+	original := append([]Record(nil), records...)
+
+	var buf bytes.Buffer
+	if err := WriteProtocolUniqueCSV(&buf, records); err != nil {
+		t.Fatalf("WriteProtocolUniqueCSV() error = %v", err)
+	}
+
+	want := "" +
+		"src_ip,dst_ip,dst_port,protocol\n" +
+		"10.0.0.2,10.0.0.2,443,tcp\n" +
+		"10.0.0.2,10.0.0.2,8443,tcp\n" +
+		"10.0.0.10,10.0.0.2,443,tcp\n" +
+		"10.0.0.2,10.0.0.2,443,udp\n" +
+		"10.0.0.2,10.0.0.10,443,udp\n" +
+		"10.0.0.1,10.0.0.3,123,icmp\n" +
+		"10.0.0.1,10.0.0.3,123,sctp\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WriteProtocolUniqueCSV() = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(records, original) {
+		t.Fatalf("WriteProtocolUniqueCSV() mutated records: got %+v, want %+v", records, original)
 	}
 }
 

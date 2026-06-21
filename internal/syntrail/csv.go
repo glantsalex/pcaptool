@@ -193,6 +193,33 @@ func WriteTCPUniqueCSV(w io.Writer, records []Record) error {
 	return nil
 }
 
+// WriteProtocolUniqueCSV writes deduplicated protocol trail tuples as CSV,
+// including a header row. An empty protocol is normalized to TCP for compatibility.
+func WriteProtocolUniqueCSV(w io.Writer, records []Record) error {
+	cw := csv.NewWriter(w)
+
+	if err := cw.Write([]string{"src_ip", "dst_ip", "dst_port", "protocol"}); err != nil {
+		return fmt.Errorf("write unique protocol trail CSV header: %w", err)
+	}
+
+	for _, row := range uniqueProtocolRows(records) {
+		if err := cw.Write([]string{
+			row.srcIP.String(),
+			row.dstIP.String(),
+			strconv.FormatUint(uint64(row.dstPort), 10),
+			string(row.protocol),
+		}); err != nil {
+			return fmt.Errorf("write unique protocol trail CSV record: %w", err)
+		}
+	}
+
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		return fmt.Errorf("flush unique protocol trail CSV: %w", err)
+	}
+	return nil
+}
+
 // WritePrivateServersCSV writes deduplicated private server TCP SYN tuples as CSV, including a header row.
 func WritePrivateServersCSV(w io.Writer, records []Record) error {
 	cw := csv.NewWriter(w)
@@ -254,6 +281,13 @@ type protocolTrailRow struct {
 	protocol Protocol
 }
 
+type protocolUniqueRow struct {
+	srcIP    netip.Addr
+	dstIP    netip.Addr
+	dstPort  uint16
+	protocol Protocol
+}
+
 type privateServerRow struct {
 	dstIP    netip.Addr
 	dstPort  uint16
@@ -312,6 +346,45 @@ func tcpRecords(records []Record) []Record {
 		filtered = append(filtered, record)
 	}
 	return filtered
+}
+
+func uniqueProtocolRows(records []Record) []protocolUniqueRow {
+	seen := make(map[protocolUniqueRow]struct{}, len(records))
+	rows := make([]protocolUniqueRow, 0, len(records))
+	for _, record := range records {
+		row := protocolUniqueRow{
+			srcIP:    record.SrcIP,
+			dstIP:    record.DstIP,
+			dstPort:  record.DstPort,
+			protocol: normalizedProtocol(record.Protocol),
+		}
+		if _, ok := seen[row]; ok {
+			continue
+		}
+		seen[row] = struct{}{}
+		rows = append(rows, row)
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		left := rows[i]
+		right := rows[j]
+
+		if leftRank, rightRank := protocolRank(left.protocol), protocolRank(right.protocol); leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		if cmp := compareAddr(left.srcIP, right.srcIP); cmp != 0 {
+			return cmp < 0
+		}
+		if cmp := compareAddr(left.dstIP, right.dstIP); cmp != 0 {
+			return cmp < 0
+		}
+		if left.dstPort != right.dstPort {
+			return left.dstPort < right.dstPort
+		}
+		return left.protocol < right.protocol
+	})
+
+	return rows
 }
 
 func uniquePrivateServerRows(records []Record) []privateServerRow {

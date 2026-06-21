@@ -72,13 +72,13 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		writer: syntrail.WriteProtocolTrailCSV,
 	},
 	{
-		filename: "fleet-to-public-syn-unique.csv",
-		key:      "fleet_to_public_syn_unique",
+		filename: "fleet-to-public-unique.csv",
+		key:      "fleet_to_public_unique",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
 			public, _ := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
-			return tcpSYNTrailRecords(public)
+			return public
 		},
-		writer: syntrail.WriteTCPUniqueCSV,
+		writer: syntrail.WriteProtocolUniqueCSV,
 	},
 	{
 		filename: "fleet-to-private-nonfleet-syn-unique.csv",
