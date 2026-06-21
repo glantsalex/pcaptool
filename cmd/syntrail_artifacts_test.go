@@ -5,18 +5,26 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aglants/pcaptool/internal/syntrail"
 )
 
-var _ func(context.Context, *OutputManager, []string, string) (map[string]string, error) = runSYNTrailSidecar
+var _ func(context.Context, *OutputManager, []string, string, synTrailArtifactOptions) (map[string]string, error) = runSYNTrailSidecar
 
 func TestRunSYNTrailSidecarEmptyFleetPathReturnsNoArtifactsAndWritesNoFiles(t *testing.T) {
 	om := newSYNTrailTestOutputManager(t)
 
-	artifacts, err := runSYNTrailSidecar(context.Background(), om, []string{filepath.Join(t.TempDir(), "missing.pcap")}, "")
+	artifacts, err := runSYNTrailSidecar(
+		context.Background(),
+		om,
+		[]string{filepath.Join(t.TempDir(), "missing.pcap")},
+		"",
+		synTrailArtifactOptions{},
+	)
 	if err != nil {
 		t.Fatalf("runSYNTrailSidecar() error = %v", err)
 	}
@@ -54,7 +62,7 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 		},
 	}
 
-	artifacts, err := writeSYNTrailArtifacts(om, buckets)
+	artifacts, err := writeSYNTrailArtifacts(om, buckets, synTrailArtifactOptions{})
 	if err != nil {
 		t.Fatalf("writeSYNTrailArtifacts() error = %v", err)
 	}
@@ -149,7 +157,7 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 func TestWriteSYNTrailArtifactsEmptyBucketsWriteHeaderOnlyFiles(t *testing.T) {
 	om := newSYNTrailTestOutputManager(t)
 
-	artifacts, err := writeSYNTrailArtifacts(om, nil)
+	artifacts, err := writeSYNTrailArtifacts(om, nil, synTrailArtifactOptions{})
 	if err != nil {
 		t.Fatalf("writeSYNTrailArtifacts() error = %v", err)
 	}
@@ -162,6 +170,154 @@ func TestWriteSYNTrailArtifactsEmptyBucketsWriteHeaderOnlyFiles(t *testing.T) {
 		if got := artifacts[artifact.key]; got != om.Path(artifact.filename) {
 			t.Fatalf("artifact %q path = %q, want %q", artifact.key, got, om.Path(artifact.filename))
 		}
+	}
+}
+
+func TestFilterPassiveFTPServerSummaryRecords(t *testing.T) {
+	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	control := testSYNTrailRecord("10.0.0.1", "192.168.1.20", 21, ts)
+	passive := testSYNTrailRecord("10.0.0.1", "192.168.1.20", 30000, ts.Add(time.Second))
+
+	tests := []struct {
+		name    string
+		records []syntrail.Record
+		opt     synTrailArtifactOptions
+		want    []syntrail.Record
+	}{
+		{
+			name:    "same pair TCP passive port is suppressed with defaults",
+			records: []syntrail.Record{passive, control},
+			want:    []syntrail.Record{control},
+		},
+		{
+			name:    "same pair empty protocol passive port is suppressed",
+			records: []syntrail.Record{control, testSYNTrailRecordWithProtocol("10.0.0.1", "192.168.1.20", 30001, ts, "")},
+			want:    []syntrail.Record{control},
+		},
+		{
+			name:    "passive port without control is retained",
+			records: []syntrail.Record{passive},
+			want:    []syntrail.Record{passive},
+		},
+		{
+			name: "control on different source does not suppress",
+			records: []syntrail.Record{
+				control,
+				testSYNTrailRecord("10.0.0.2", "192.168.1.20", 30000, ts),
+			},
+			want: []syntrail.Record{
+				control,
+				testSYNTrailRecord("10.0.0.2", "192.168.1.20", 30000, ts),
+			},
+		},
+		{
+			name: "port below passive minimum is retained",
+			records: []syntrail.Record{
+				control,
+				testSYNTrailRecord("10.0.0.1", "192.168.1.20", 29999, ts),
+			},
+			want: []syntrail.Record{
+				control,
+				testSYNTrailRecord("10.0.0.1", "192.168.1.20", 29999, ts),
+			},
+		},
+		{
+			name: "UDP is retained",
+			records: []syntrail.Record{
+				control,
+				testSYNTrailRecordWithProtocol("10.0.0.1", "192.168.1.20", 30000, ts, syntrail.ProtocolUDP),
+			},
+			want: []syntrail.Record{
+				control,
+				testSYNTrailRecordWithProtocol("10.0.0.1", "192.168.1.20", 30000, ts, syntrail.ProtocolUDP),
+			},
+		},
+		{
+			name: "retained records preserve input order",
+			records: []syntrail.Record{
+				testSYNTrailRecordWithProtocol("10.0.0.1", "192.168.1.20", 31000, ts, syntrail.ProtocolUDP),
+				passive,
+				control,
+				testSYNTrailRecord("10.0.0.1", "192.168.1.20", 29999, ts),
+			},
+			want: []syntrail.Record{
+				testSYNTrailRecordWithProtocol("10.0.0.1", "192.168.1.20", 31000, ts, syntrail.ProtocolUDP),
+				control,
+				testSYNTrailRecord("10.0.0.1", "192.168.1.20", 29999, ts),
+			},
+		},
+		{
+			name: "configured control port is retained above passive minimum",
+			records: []syntrail.Record{
+				testSYNTrailRecord("10.0.0.1", "192.168.1.20", 21000, ts),
+				testSYNTrailRecord("10.0.0.1", "192.168.1.20", 22000, ts),
+			},
+			opt: synTrailArtifactOptions{
+				FTPControlPorts:   map[uint16]struct{}{21000: {}},
+				FTPPassiveMinPort: 20000,
+			},
+			want: []syntrail.Record{
+				testSYNTrailRecord("10.0.0.1", "192.168.1.20", 21000, ts),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := append([]syntrail.Record(nil), tt.records...)
+
+			got := filterPassiveFTPServerSummaryRecords(tt.records, tt.opt)
+
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("filterPassiveFTPServerSummaryRecords() = %+v, want %+v", got, tt.want)
+			}
+			if !reflect.DeepEqual(tt.records, original) {
+				t.Fatalf("filterPassiveFTPServerSummaryRecords() mutated input: got %+v, want %+v", tt.records, original)
+			}
+		})
+	}
+}
+
+func TestWriteSYNTrailArtifactsFiltersPassiveFTPOnlyFromServerSummaries(t *testing.T) {
+	om := newSYNTrailTestOutputManager(t)
+	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	buckets := syntrail.BucketedRecords{
+		syntrail.BucketFleetToNonFleet: {
+			testSYNTrailRecord("10.0.0.1", "203.0.113.10", 21000, ts),
+			testSYNTrailRecord("10.0.0.1", "203.0.113.10", 40000, ts.Add(time.Second)),
+			testSYNTrailRecordWithProtocol("10.0.0.1", "203.0.113.10", 41000, ts.Add(2*time.Second), syntrail.ProtocolUDP),
+			testSYNTrailRecord("10.0.0.2", "192.168.1.20", 21000, ts),
+			testSYNTrailRecord("10.0.0.2", "192.168.1.20", 17736, ts.Add(time.Second)),
+			testSYNTrailRecord("10.0.0.2", "192.168.1.20", 17845, ts.Add(2*time.Second)),
+		},
+	}
+	original := append([]syntrail.Record(nil), buckets[syntrail.BucketFleetToNonFleet]...)
+	opt := synTrailArtifactOptions{
+		FTPControlPorts:   map[uint16]struct{}{21000: {}},
+		FTPPassiveMinPort: 17000,
+	}
+
+	if _, err := writeSYNTrailArtifacts(om, buckets, opt); err != nil {
+		t.Fatalf("writeSYNTrailArtifacts() error = %v", err)
+	}
+
+	assertSYNTrailFile(t, om, "public-servers-unique.csv", ""+
+		"dst_ip,dst_port,protocol\n"+
+		"203.0.113.10,21000,tcp\n"+
+		"203.0.113.10,41000,udp\n")
+	assertSYNTrailFile(t, om, "private-servers-syn-unique.csv", ""+
+		"dst_ip,dst_port,protocol\n"+
+		"192.168.1.20,21000,tcp\n")
+
+	assertSYNTrailFileContains(t, om, "fleet-to-public-trail.csv", "10.0.0.1,203.0.113.10,40000,tcp")
+	assertSYNTrailFileContains(t, om, "fleet-to-public-unique.csv", "10.0.0.1,203.0.113.10,40000,tcp")
+	assertSYNTrailFileContains(t, om, "fleet-to-private-nonfleet-trail.csv", "10.0.0.2,192.168.1.20,17736,tcp")
+	assertSYNTrailFileContains(t, om, "fleet-to-private-nonfleet-trail.csv", "10.0.0.2,192.168.1.20,17845,tcp")
+	assertSYNTrailFileContains(t, om, "fleet-to-private-nonfleet-syn-unique.csv", "10.0.0.2,192.168.1.20,17736,tcp")
+	assertSYNTrailFileContains(t, om, "fleet-to-private-nonfleet-syn-unique.csv", "10.0.0.2,192.168.1.20,17845,tcp")
+
+	if !reflect.DeepEqual(buckets[syntrail.BucketFleetToNonFleet], original) {
+		t.Fatalf("writeSYNTrailArtifacts() mutated bucket records: got %+v, want %+v", buckets[syntrail.BucketFleetToNonFleet], original)
 	}
 }
 
@@ -248,6 +404,18 @@ func assertSYNTrailFile(t *testing.T, om *OutputManager, filename, want string) 
 	}
 	if string(got) != want {
 		t.Fatalf("%s = %q, want %q", filename, string(got), want)
+	}
+}
+
+func assertSYNTrailFileContains(t *testing.T, om *OutputManager, filename, want string) {
+	t.Helper()
+
+	got, err := os.ReadFile(om.Path(filename))
+	if err != nil {
+		t.Fatalf("read %s: %v", filename, err)
+	}
+	if !strings.Contains(string(got), want) {
+		t.Fatalf("%s = %q, want substring %q", filename, string(got), want)
 	}
 }
 

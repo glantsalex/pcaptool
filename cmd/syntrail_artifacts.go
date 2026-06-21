@@ -4,11 +4,24 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/netip"
 
+	"github.com/aglants/pcaptool/internal/connectivity"
 	"github.com/aglants/pcaptool/internal/syntrail"
 )
 
-func runSYNTrailSidecar(ctx context.Context, om *OutputManager, files []string, fleetPath string) (map[string]string, error) {
+type synTrailArtifactOptions struct {
+	FTPControlPorts   map[uint16]struct{}
+	FTPPassiveMinPort uint16
+}
+
+func runSYNTrailSidecar(
+	ctx context.Context,
+	om *OutputManager,
+	files []string,
+	fleetPath string,
+	opt synTrailArtifactOptions,
+) (map[string]string, error) {
 	if fleetPath == "" {
 		return nil, nil
 	}
@@ -23,18 +36,26 @@ func runSYNTrailSidecar(ctx context.Context, om *OutputManager, files []string, 
 		return nil, fmt.Errorf("scan SYN trail packet captures: %w", err)
 	}
 
-	artifacts, err := writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, fleet))
+	artifacts, err := writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, fleet), opt)
 	if err != nil {
 		return nil, fmt.Errorf("write SYN trail artifacts: %w", err)
 	}
 	return artifacts, nil
 }
 
-func writeSYNTrailArtifacts(om *OutputManager, buckets syntrail.BucketedRecords) (map[string]string, error) {
+func writeSYNTrailArtifacts(
+	om *OutputManager,
+	buckets syntrail.BucketedRecords,
+	opt synTrailArtifactOptions,
+) (map[string]string, error) {
 	artifacts := make(map[string]string, len(synTrailArtifactSpecs))
 
 	for _, spec := range synTrailArtifactSpecs {
 		records := spec.records(buckets)
+		switch spec.key {
+		case "private_servers_syn_unique", "public_servers_unique":
+			records = filterPassiveFTPServerSummaryRecords(records, opt)
+		}
 		path, err := writeSYNTrailArtifact(om, spec.filename, records, spec.writer)
 		if err != nil {
 			return nil, err
@@ -162,6 +183,68 @@ func tcpSYNTrailRecords(records []syntrail.Record) []syntrail.Record {
 		filtered = append(filtered, record)
 	}
 	return filtered
+}
+
+type synTrailPair struct {
+	srcIP netip.Addr
+	dstIP netip.Addr
+}
+
+func filterPassiveFTPServerSummaryRecords(
+	records []syntrail.Record,
+	opt synTrailArtifactOptions,
+) []syntrail.Record {
+	opt = normalizeSYNTrailArtifactOptions(opt)
+
+	controlSeen := make(map[synTrailPair]struct{})
+	for _, record := range records {
+		if !isTCPSYNTrailRecord(record) {
+			continue
+		}
+		if _, ok := opt.FTPControlPorts[record.DstPort]; !ok {
+			continue
+		}
+		controlSeen[synTrailPair{srcIP: record.SrcIP, dstIP: record.DstIP}] = struct{}{}
+	}
+
+	filtered := make([]syntrail.Record, 0, len(records))
+	for _, record := range records {
+		if shouldSuppressPassiveFTPRecord(record, opt, controlSeen) {
+			continue
+		}
+		filtered = append(filtered, record)
+	}
+	return filtered
+}
+
+func normalizeSYNTrailArtifactOptions(opt synTrailArtifactOptions) synTrailArtifactOptions {
+	defaults := connectivity.DefaultOptions()
+	if opt.FTPControlPorts == nil {
+		opt.FTPControlPorts = defaults.FTPControlPorts
+	}
+	if opt.FTPPassiveMinPort == 0 {
+		opt.FTPPassiveMinPort = defaults.FTPPassiveMinPort
+	}
+	return opt
+}
+
+func shouldSuppressPassiveFTPRecord(
+	record syntrail.Record,
+	opt synTrailArtifactOptions,
+	controlSeen map[synTrailPair]struct{},
+) bool {
+	if !isTCPSYNTrailRecord(record) || record.DstPort < opt.FTPPassiveMinPort {
+		return false
+	}
+	if _, ok := opt.FTPControlPorts[record.DstPort]; ok {
+		return false
+	}
+	_, ok := controlSeen[synTrailPair{srcIP: record.SrcIP, dstIP: record.DstIP}]
+	return ok
+}
+
+func isTCPSYNTrailRecord(record syntrail.Record) bool {
+	return record.Protocol == "" || record.Protocol == syntrail.ProtocolTCP
 }
 
 func writeSYNTrailArtifact(om *OutputManager, filename string, records []syntrail.Record, write func(io.Writer, []syntrail.Record) error) (string, error) {

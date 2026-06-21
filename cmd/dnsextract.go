@@ -36,6 +36,7 @@ var (
 	flagIgnoreNTP         bool
 	flagExcludePorts      string
 	flagFTPControlPorts   string
+	flagFTPPassiveMinPort string
 	flagDNSIPFile         string
 	flagTopologyDNSWindow time.Duration
 	flagActiveResolve     bool
@@ -92,6 +93,12 @@ func init() {
 		"ftp-control-ports",
 		"21,990",
 		"Comma-separated passive FTP/FTPS control ports; replaces the default set (21,990).",
+	)
+	cmd.Flags().StringVar(
+		&flagFTPPassiveMinPort,
+		"ftp-passive-min-port",
+		"30000",
+		"Minimum destination port treated as passive FTP/FTPS data after a control channel is observed (1..65535).",
 	)
 	cmd.Flags().BoolVar(
 		&flagActiveResolve,
@@ -165,6 +172,10 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("--ftp-control-ports: %w", err)
 	}
+	ftpPassiveMinPort, err := parseStrictPort(flagFTPPassiveMinPort)
+	if err != nil {
+		return fmt.Errorf("--ftp-passive-min-port: %w", err)
+	}
 
 	om, err := NewOutputManager(flagNetID, flagOutputRoot)
 	if err != nil {
@@ -180,7 +191,10 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no .pcap files found in %q", flagReadDir)
 	}
 
-	synTrailArtifacts, err := runSYNTrailSidecar(ctx, om, files, flagFleet)
+	synTrailArtifacts, err := runSYNTrailSidecar(ctx, om, files, flagFleet, synTrailArtifactOptions{
+		FTPControlPorts:   ftpControlPorts,
+		FTPPassiveMinPort: ftpPassiveMinPort,
+	})
 	if err != nil {
 		return fmt.Errorf("run SYN trail sidecar: %w", err)
 	}
@@ -254,7 +268,17 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("load --dns-ip-file: %w", err)
 		}
 	}
-	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, flagOnlyTCP, excludeSet, flagEnforcePrivateAsSource, ipToDNS, ftpControlPorts)
+	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPs(
+		ctx,
+		files,
+		txs,
+		flagOnlyTCP,
+		excludeSet,
+		flagEnforcePrivateAsSource,
+		ipToDNS,
+		ftpControlPorts,
+		ftpPassiveMinPort,
+	)
 	if err != nil {
 		return err
 	}
