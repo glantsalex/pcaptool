@@ -253,7 +253,12 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 	excludePorts map[uint16]struct{},
 	enforcePrivateAsSource bool,
 	ipToDNS map[string][]string,
+	ftpControlPorts map[uint16]struct{},
+	ftpPassiveMinPort uint16,
 ) ([]connectivity.Edge, FirstPacketInfo, error) {
+	if ftpPassiveMinPort == 0 {
+		ftpPassiveMinPort = connectivity.DefaultOptions().FTPPassiveMinPort
+	}
 	index := BuildTxnIndex(txs)
 
 	// issuer -> txs sorted by RequestTime (for conservative fallback matching)
@@ -436,6 +441,8 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 			opt := connectivity.DefaultOptions()
 			opt.ExcludedDstPorts = excludePorts
 			opt.EnforcePrivateAsSource = enforcePrivateAsSource
+			opt.FTPControlPorts = ftpControlPorts
+			opt.FTPPassiveMinPort = ftpPassiveMinPort
 
 			coll := connectivity.NewCollector(opt)
 
@@ -691,13 +698,19 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 			out = append(out, e)
 		}
 	}
-	out = suppressMergedFTPPassiveEdges(out, connectivity.DefaultOptions().FTPPassiveMinPort)
+	out = suppressMergedFTPPassiveEdges(out, ftpPassiveMinPort, ftpControlPorts)
 	return out, firstPkt, nil
 }
 
-func suppressMergedFTPPassiveEdges(edges []connectivity.Edge, minPassivePort uint16) []connectivity.Edge {
-	if len(edges) == 0 || minPassivePort == 0 {
+func suppressMergedFTPPassiveEdges(edges []connectivity.Edge, minPassivePort uint16, ftpControlPorts map[uint16]struct{}) []connectivity.Edge {
+	if len(edges) == 0 {
 		return edges
+	}
+	if minPassivePort == 0 {
+		minPassivePort = connectivity.DefaultOptions().FTPPassiveMinPort
+	}
+	if ftpControlPorts == nil {
+		ftpControlPorts = connectivity.DefaultOptions().FTPControlPorts
 	}
 
 	type pairKey struct {
@@ -710,7 +723,7 @@ func suppressMergedFTPPassiveEdges(edges []connectivity.Edge, minPassivePort uin
 		if e.Protocol != connectivity.ProtoTCP {
 			continue
 		}
-		if e.Port == 21 || e.Port == 990 {
+		if _, ok := ftpControlPorts[e.Port]; ok {
 			ftpControlSeen[pairKey{issuer: e.IssuerIP, dst: e.DstIP}] = struct{}{}
 		}
 	}
@@ -721,6 +734,10 @@ func suppressMergedFTPPassiveEdges(edges []connectivity.Edge, minPassivePort uin
 	filtered := make([]connectivity.Edge, 0, len(edges))
 	for _, e := range edges {
 		if e.Protocol == connectivity.ProtoTCP && e.Port >= minPassivePort {
+			if _, ok := ftpControlPorts[e.Port]; ok {
+				filtered = append(filtered, e)
+				continue
+			}
 			if _, ok := ftpControlSeen[pairKey{issuer: e.IssuerIP, dst: e.DstIP}]; ok {
 				continue
 			}
@@ -785,7 +802,7 @@ func allowConnectionInferredDNSBackfill(candidateDNS string, ipStr string, ipToD
 }
 
 func AttachConnectionsFromPCAPs(ctx context.Context, files []string, txs []*DNSTransaction, onlyTCP bool) error {
-	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, onlyTCP, nil, false, nil)
+	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, onlyTCP, nil, false, nil, nil, 0)
 	return err
 }
 

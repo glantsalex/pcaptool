@@ -276,9 +276,92 @@ This records provenance for newly learned CSV rows appended during the run.
 
 If `--manifest-out` is set, a copy of `_run-artifacts.json` is written to the requested path.
 
+#### TCP SYN trail sidecar artifacts
+
+Produced only when `--fleet <path>` is set.
+
+`--fleet` points to a fleet IPv4 list:
+
+- one IPv4 address per line
+- blank lines are ignored
+- lines beginning with `#` are ignored
+- malformed IPv4 entries are errors
+- IPv6 entries are errors
+
+The SYN trail is packet-level initiator evidence from raw IPv4 TCP SYN packets.
+It is sidecar-only:
+
+- it does not change DNS attribution
+- it does not change topology matrix output
+- it does not change service-endpoints output
+- it does not change connection inference
+- `--exclude-ports` does not apply to SYN evidence artifacts
+
+The generated files are:
+
+- `fleet-to-public-syn-trail.csv`
+- `fleet-to-private-nonfleet-syn-trail.csv`
+- `fleet-tcp-syn-unique.csv`
+- `fleet-to-fleet-tcp-syn-trail.csv`
+- `fleet-to-fleet-tcp-syn-unique.csv`
+- `private-nonfleet-to-fleet-tcp-syn-trail.csv`
+- `private-nonfleet-to-fleet-tcp-syn-unique.csv`
+
+Bucket meanings:
+
+- fleet to public
+  - `src_ip` is in fleet
+  - `dst_ip` is public / not private-local
+  - manifest key: `fleet_to_public_syn_trail`
+- fleet to private non-fleet
+  - `src_ip` is in fleet
+  - `dst_ip` is private/local
+  - `dst_ip` is not in fleet
+  - manifest key: `fleet_to_private_nonfleet_syn_trail`
+- fleet to non-fleet unique
+  - `fleet-tcp-syn-unique.csv` remains the unique tuple file for all fleet to non-fleet destinations
+  - manifest key: `fleet_tcp_syn_unique`
+- fleet to fleet
+  - `src_ip` is in fleet
+  - `dst_ip` is in fleet
+  - high-interest evidence because SIM-to-SIM communication should normally not happen
+- private non-fleet to fleet
+  - `src_ip` is private/local
+  - `src_ip` is not in fleet
+  - `dst_ip` is in fleet
+
+Trail files use this header:
+
+```text
+src_ip,dst_ip,dst_port,syn_timestamp_utc
+```
+
+Unique files use this header:
+
+```text
+src_ip,dst_ip,dst_port
+```
+
+`syn_timestamp_utc` uses this format:
+
+```text
+2006-01-02 15:04:05.000
+```
+
+Timestamp rules:
+
+- UTC
+- millisecond precision
+
 ## How `dnsextract` Works
 
 The command is a multi-pass offline pipeline.
+
+### Optional TCP SYN trail sidecar
+
+If `--fleet` is set, the PCAP corpus is also scanned for packet-level IPv4 TCP SYN evidence and the SYN trail sidecar artifacts are written.
+
+This sidecar does not feed DNS attribution, connection inference, topology generation, or service endpoint generation.
 
 ### Pass 1: optional RADIUS/IP-to-IMSI index
 
@@ -316,6 +399,18 @@ This is where the tool learns:
 - whether a name-to-IP mapping was actually observed in traffic
 
 This pass also uses `--exclude-ports` and `--enforce-private-as-source`.
+
+Passive FTP data-edge suppression recognizes control channels on `--ftp-control-ports`.
+The default is `21,990`. Syntax is a strict, non-empty comma-separated list of ports in the range `1..65535`; empty entries are rejected. The supplied value replaces the default set and affects only passive FTP/FTPS edge suppression.
+
+Examples:
+
+- `--ftp-control-ports 21,990,21000` adds a custom control port while retaining the defaults.
+- `--ftp-control-ports 21000` recognizes only port `21000` as an FTP control port.
+
+The heuristic high-port cutoff is controlled by `--ftp-passive-min-port` and defaults to `30000`. It accepts one port in the range `1..65535`. After a configured FTP control channel is observed for an issuer/server pair, TCP destination ports at or above this value are suppressed as passive data edges. Exact ports announced by PASV/EPSV replies are still suppressed even when they are below the configured cutoff.
+
+For a network with a non-standard control channel and lower passive data range, use `--ftp-control-ports 21,990,21000 --ftp-passive-min-port 10000`.
 
 ### Topology build
 
@@ -442,6 +537,7 @@ This policy is designed to reduce CSV contamination from:
 | Flag | Type | Default | Meaning |
 |---|---|---:|---|
 | `--read-dir`, `-r` | string | required | directory containing PCAP files; walked recursively |
+| `--fleet` | string | empty | optional fleet IPv4 list; when set, writes packet-level TCP SYN evidence artifacts |
 | `--format` | string | `table` | main output format: `table` or `json` |
 | `--export-csv` | string | empty | optional CSV export path for main records |
 | `--short`, `-s` | bool | `false` | squash topology to one row per issuer/DNS/port |
@@ -450,6 +546,8 @@ This policy is designed to reduce CSV contamination from:
 | `--ignore-ntp` | bool | `true` | drop NTP-like DNS names using heuristic filtering |
 | `--dns-ip-file` | string | empty | path to fallback DNS/IP map used for last-resort attribution |
 | `--exclude-ports` | string | `53` | comma-separated destination/server ports to exclude from topology correlation |
+| `--ftp-control-ports` | string | `21,990` | strict comma-separated passive FTP/FTPS control ports; replaces the default set |
+| `--ftp-passive-min-port` | port | `30000` | minimum destination port heuristically suppressed after a configured FTP/FTPS control channel is observed |
 | `--active-resolve` | bool | `false` | resolve unresolved names against external resolvers |
 | `--active-resolvers` | string | empty | comma-separated resolver IPs for active resolve |
 | `--disable-sni` | bool | `false` | skip TLS ClientHello/SNI scan |

@@ -27,6 +27,7 @@ import (
 
 var (
 	flagReadDir           string
+	flagFleet             string
 	flagFormat            string
 	flagExportCSV         string
 	flagConnectivityShort bool
@@ -34,6 +35,8 @@ var (
 	flagOnlyTCP           bool
 	flagIgnoreNTP         bool
 	flagExcludePorts      string
+	flagFTPControlPorts   string
+	flagFTPPassiveMinPort string
 	flagDNSIPFile         string
 	flagTopologyDNSWindow time.Duration
 	flagActiveResolve     bool
@@ -53,6 +56,12 @@ func init() {
 	}
 
 	cmd.Flags().StringVarP(&flagReadDir, "read-dir", "r", "", "Directory containing .pcap files")
+	cmd.Flags().StringVar(
+		&flagFleet,
+		"fleet",
+		"",
+		"Optional fleet IPv4 list path; when set, writes packet-level TCP SYN evidence artifacts.",
+	)
 	cmd.Flags().StringVar(&flagFormat, "format", "table", "Output format: table|json")
 	cmd.Flags().StringVar(&flagExportCSV, "export-csv", "", "Optional CSV export path (relative paths are placed under the run output directory)")
 	cmd.Flags().BoolVarP(&flagConnectivityShort, "short", "s", false,
@@ -78,6 +87,18 @@ func init() {
 		"exclude-ports",
 		"53",
 		"Comma-separated server/destination ports to exclude from network topology matrix (e.g. 53,123). Default: 53",
+	)
+	cmd.Flags().StringVar(
+		&flagFTPControlPorts,
+		"ftp-control-ports",
+		"21,990",
+		"Comma-separated passive FTP/FTPS control ports; replaces the default set (21,990).",
+	)
+	cmd.Flags().StringVar(
+		&flagFTPPassiveMinPort,
+		"ftp-passive-min-port",
+		"30000",
+		"Minimum destination port treated as passive FTP/FTPS data after a control channel is observed (1..65535).",
 	)
 	cmd.Flags().BoolVar(
 		&flagActiveResolve,
@@ -147,6 +168,14 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if flagTopologyDNSWindow < 0 {
 		return fmt.Errorf("--topology-dns-window must be >= 0")
 	}
+	ftpControlPorts, err := parseStrictPortSet(flagFTPControlPorts)
+	if err != nil {
+		return fmt.Errorf("--ftp-control-ports: %w", err)
+	}
+	ftpPassiveMinPort, err := parseStrictPort(flagFTPPassiveMinPort)
+	if err != nil {
+		return fmt.Errorf("--ftp-passive-min-port: %w", err)
+	}
 
 	om, err := NewOutputManager(flagNetID, flagOutputRoot)
 	if err != nil {
@@ -160,6 +189,14 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if len(files) == 0 {
 		return fmt.Errorf("no .pcap files found in %q", flagReadDir)
+	}
+
+	synTrailArtifacts, err := runSYNTrailSidecar(ctx, om, files, flagFleet, synTrailArtifactOptions{
+		FTPControlPorts:   ftpControlPorts,
+		FTPPassiveMinPort: ftpPassiveMinPort,
+	})
+	if err != nil {
+		return fmt.Errorf("run SYN trail sidecar: %w", err)
 	}
 
 	// --------------------------------------------------------------------
@@ -231,7 +268,17 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("load --dns-ip-file: %w", err)
 		}
 	}
-	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, flagOnlyTCP, excludeSet, flagEnforcePrivateAsSource, ipToDNS)
+	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPs(
+		ctx,
+		files,
+		txs,
+		flagOnlyTCP,
+		excludeSet,
+		flagEnforcePrivateAsSource,
+		ipToDNS,
+		ftpControlPorts,
+		ftpPassiveMinPort,
+	)
 	if err != nil {
 		return err
 	}
@@ -513,6 +560,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if ipDNSAppendAuditPath != "" {
 		filesMap["ip_dns_append_audit"] = ipDNSAppendAuditPath
+	}
+	for key, path := range synTrailArtifacts {
+		filesMap[key] = path
 	}
 	manifestPath, err := writeRunArtifactsManifest(om, runStartedAt, flagReadDir, len(files), firstPktInfo, flagFormat, filesMap)
 	if err != nil {

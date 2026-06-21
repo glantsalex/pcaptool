@@ -172,6 +172,167 @@ func TestCollector_FTPEPSVReplySuppressesExactDataPort(t *testing.T) {
 	}
 }
 
+func TestCollector_DefaultFTPSControlPortSuppressesHighDataPort(t *testing.T) {
+	c := NewCollector(DefaultOptions())
+	ts := time.Unix(1700000500, 0).UTC()
+
+	c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35762, 990, true, false), ts)
+	c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", 990, 35762, true, true), ts.Add(10*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35763, 40000, true, false), ts.Add(20*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", 40000, 35763, true, true), ts.Add(30*time.Millisecond))
+
+	edges := c.Edges()
+	if len(edges) != 1 || edges[0].Port != 990 {
+		t.Fatalf("expected only default FTPS control edge, got %#v", edges)
+	}
+}
+
+func TestCollector_FTPPassiveMinPortDefaultAndCustomValue(t *testing.T) {
+	tests := []struct {
+		name           string
+		minPassivePort uint16
+		keptDataPort   uint16
+		suppressedPort uint16
+	}{
+		{
+			name:           "zero uses default",
+			minPassivePort: 0,
+			keptDataPort:   29999,
+			suppressedPort: 30000,
+		},
+		{
+			name:           "nonzero uses exact value",
+			minPassivePort: 40000,
+			keptDataPort:   39999,
+			suppressedPort: 40000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opt := DefaultOptions()
+			opt.FTPPassiveMinPort = tt.minPassivePort
+			c := NewCollector(opt)
+			ts := time.Unix(1700000550, 0).UTC()
+
+			c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35762, 21, true, false), ts)
+			c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", 21, 35762, true, true), ts.Add(10*time.Millisecond))
+			c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35763, tt.keptDataPort, true, false), ts.Add(20*time.Millisecond))
+			c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", tt.keptDataPort, 35763, true, true), ts.Add(30*time.Millisecond))
+			c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35764, tt.suppressedPort, true, false), ts.Add(40*time.Millisecond))
+			c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", tt.suppressedPort, 35764, true, true), ts.Add(50*time.Millisecond))
+
+			edges := c.Edges()
+			if len(edges) != 2 {
+				t.Fatalf("expected control and below-threshold edges, got %#v", edges)
+			}
+			if edges[0].Port != 21 || edges[1].Port != tt.keptDataPort {
+				t.Fatalf("expected ports 21 and %d, got %#v", tt.keptDataPort, edges)
+			}
+		})
+	}
+}
+
+func TestCollector_FTPCustomControlAndPassiveMinimumWorkTogether(t *testing.T) {
+	tests := []struct {
+		name           string
+		minPassivePort uint16
+		wantDataEdge   bool
+	}{
+		{name: "data port at or above minimum is suppressed", minPassivePort: 16000},
+		{name: "data port below minimum is retained", minPassivePort: 17000, wantDataEdge: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opt := DefaultOptions()
+			opt.FTPControlPorts = map[uint16]struct{}{21000: {}}
+			opt.FTPPassiveMinPort = tt.minPassivePort
+			c := NewCollector(opt)
+			ts := time.Unix(1700000575, 0).UTC()
+
+			c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35762, 21000, true, false), ts)
+			c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", 21000, 35762, true, true), ts.Add(10*time.Millisecond))
+			c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35763, 16279, true, false), ts.Add(20*time.Millisecond))
+			c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", 16279, 35763, true, true), ts.Add(30*time.Millisecond))
+
+			edges := c.Edges()
+			wantEdges := 1
+			if tt.wantDataEdge {
+				wantEdges = 2
+			}
+			if len(edges) != wantEdges {
+				t.Fatalf("expected %d edges, got %#v", wantEdges, edges)
+			}
+			gotPorts := make(map[uint16]struct{}, len(edges))
+			for _, edge := range edges {
+				gotPorts[edge.Port] = struct{}{}
+			}
+			if _, ok := gotPorts[21000]; !ok {
+				t.Fatalf("expected custom control edge, got %#v", edges)
+			}
+			_, gotDataEdge := gotPorts[16279]
+			if gotDataEdge != tt.wantDataEdge {
+				t.Fatalf("expected below-threshold data edge, got %#v", edges)
+			}
+		})
+	}
+}
+
+func TestCollector_CustomFTPControlPortSuppressesExactAndHighDataPorts(t *testing.T) {
+	opt := DefaultOptions()
+	opt.FTPControlPorts = map[uint16]struct{}{21000: {}}
+	c := NewCollector(opt)
+	ts := time.Unix(1700000600, 0).UTC()
+
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "10.119.163.201", "185.5.124.52", 35762, 21000, true, false, nil), ts)
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "185.5.124.52", "10.119.163.201", 21000, 35762, true, true, nil), ts.Add(10*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "10.119.163.201", "185.5.124.52", 35762, 21000, false, true, []byte("PASV\r\n")), ts.Add(20*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCPWithPayload(t, "185.5.124.52", "10.119.163.201", 21000, 35762, false, true, []byte("227 Entering Passive Mode (185,5,124,52,8,174)\r\n")), ts.Add(30*time.Millisecond))
+
+	c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35763, 2222, true, false), ts.Add(40*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", 2222, 35763, true, true), ts.Add(50*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35764, 40000, true, false), ts.Add(60*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", 40000, 35764, true, true), ts.Add(70*time.Millisecond))
+
+	edges := c.Edges()
+	if len(edges) != 1 || edges[0].Port != 21000 {
+		t.Fatalf("expected only custom ftp control edge, got %#v", edges)
+	}
+}
+
+func TestCollector_FTPControlPortsAreCopiedAndReplaceDefaults(t *testing.T) {
+	controlPorts := map[uint16]struct{}{21000: {}}
+	opt := DefaultOptions()
+	opt.FTPControlPorts = controlPorts
+	c := NewCollector(opt)
+
+	delete(controlPorts, 21000)
+	controlPorts[21] = struct{}{}
+
+	ts := time.Unix(1700000700, 0).UTC()
+
+	// Port 21 was added after collector construction and must not become a control port.
+	c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35762, 21, true, false), ts)
+	c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", 21, 35762, true, true), ts.Add(10*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "185.5.124.52", 35763, 40000, true, false), ts.Add(20*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCP(t, "185.5.124.52", "10.119.163.201", 40000, 35763, true, true), ts.Add(30*time.Millisecond))
+
+	// Port 21000 was removed after construction and must remain a control port.
+	c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "194.30.98.208", 35764, 21000, true, false), ts.Add(40*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCP(t, "194.30.98.208", "10.119.163.201", 21000, 35764, true, true), ts.Add(50*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCP(t, "10.119.163.201", "194.30.98.208", 35765, 40001, true, false), ts.Add(60*time.Millisecond))
+	c.OnPacket(mustPacketIPv4TCP(t, "194.30.98.208", "10.119.163.201", 40001, 35765, true, true), ts.Add(70*time.Millisecond))
+
+	edges := c.Edges()
+	if len(edges) != 3 {
+		t.Fatalf("expected port 21 pair unsuppressed and port 21000 pair suppressed, got %#v", edges)
+	}
+	if edges[0].Port != 21 || edges[1].Port != 40000 || edges[2].Port != 21000 {
+		t.Fatalf("expected ports 21, 40000, 21000, got %#v", edges)
+	}
+}
+
 func mustPacketIPv4TCP(t *testing.T, srcIP string, dstIP string, srcPort uint16, dstPort uint16, syn bool, ack bool) gopacket.Packet {
 	t.Helper()
 	return mustPacketIPv4TCPWithPayload(t, srcIP, dstIP, srcPort, dstPort, syn, ack, nil)
