@@ -245,6 +245,32 @@ func WritePrivateServersCSV(w io.Writer, records []Record) error {
 	return nil
 }
 
+// WritePublicServersCSV writes deduplicated public server tuples as CSV,
+// including a header row. An empty protocol is normalized to TCP for compatibility.
+func WritePublicServersCSV(w io.Writer, records []Record) error {
+	cw := csv.NewWriter(w)
+
+	if err := cw.Write([]string{"dst_ip", "dst_port", "protocol"}); err != nil {
+		return fmt.Errorf("write public servers CSV header: %w", err)
+	}
+
+	for _, row := range uniquePublicServerRows(records) {
+		if err := cw.Write([]string{
+			row.dstIP.String(),
+			strconv.FormatUint(uint64(row.dstPort), 10),
+			string(row.protocol),
+		}); err != nil {
+			return fmt.Errorf("write public servers CSV record: %w", err)
+		}
+	}
+
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		return fmt.Errorf("flush public servers CSV: %w", err)
+	}
+	return nil
+}
+
 // WritePrivateProbesCSV writes deduplicated private probe TCP SYN tuples as CSV, including a header row.
 func WritePrivateProbesCSV(w io.Writer, records []Record) error {
 	cw := csv.NewWriter(w)
@@ -292,6 +318,12 @@ type privateServerRow struct {
 	dstIP    netip.Addr
 	dstPort  uint16
 	protocol string
+}
+
+type publicServerRow struct {
+	dstIP    netip.Addr
+	dstPort  uint16
+	protocol Protocol
 }
 
 type privateProbeRow struct {
@@ -412,6 +444,41 @@ func uniquePrivateServerRows(records []Record) []privateServerRow {
 		}
 		if left.dstPort != right.dstPort {
 			return left.dstPort < right.dstPort
+		}
+		return left.protocol < right.protocol
+	})
+
+	return rows
+}
+
+func uniquePublicServerRows(records []Record) []publicServerRow {
+	seen := make(map[publicServerRow]struct{}, len(records))
+	rows := make([]publicServerRow, 0, len(records))
+	for _, record := range records {
+		row := publicServerRow{
+			dstIP:    record.DstIP,
+			dstPort:  record.DstPort,
+			protocol: normalizedProtocol(record.Protocol),
+		}
+		if _, ok := seen[row]; ok {
+			continue
+		}
+		seen[row] = struct{}{}
+		rows = append(rows, row)
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		left := rows[i]
+		right := rows[j]
+
+		if leftRank, rightRank := protocolRank(left.protocol), protocolRank(right.protocol); leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		if left.dstPort != right.dstPort {
+			return left.dstPort < right.dstPort
+		}
+		if cmp := compareAddr(left.dstIP, right.dstIP); cmp != 0 {
+			return cmp < 0
 		}
 		return left.protocol < right.protocol
 	})

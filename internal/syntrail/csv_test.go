@@ -210,6 +210,27 @@ func TestWritePrivateServersCSVEmptyWritesHeaderOnly(t *testing.T) {
 	}
 }
 
+func TestWritePublicServersCSVEmptyWritesHeaderOnly(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WritePublicServersCSV(&buf, nil); err != nil {
+		t.Fatalf("WritePublicServersCSV() error = %v", err)
+	}
+
+	want := "dst_ip,dst_port,protocol\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WritePublicServersCSV() = %q, want %q", got, want)
+	}
+}
+
+func TestWritePublicServersCSVReturnsWriterError(t *testing.T) {
+	writeErr := errors.New("write failed")
+
+	err := WritePublicServersCSV(testCSVErrorWriter{err: writeErr}, nil)
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("WritePublicServersCSV() error = %v, want wrapped %v", err, writeErr)
+	}
+}
+
 func TestWritePrivateProbesCSVEmptyWritesHeaderOnly(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WritePrivateProbesCSV(&buf, nil); err != nil {
@@ -375,6 +396,42 @@ func TestWritePrivateServersCSVIncludesProtocolDedupesAndSortsByTuple(t *testing
 		"10.0.0.10,443,tcp\n"
 	if got := buf.String(); got != want {
 		t.Fatalf("WritePrivateServersCSV() = %q, want %q", got, want)
+	}
+}
+
+func TestWritePublicServersCSVNormalizesDedupesSortsAndPreservesInput(t *testing.T) {
+	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	records := []Record{
+		testCSVRecordWithProtocol("10.0.0.1", "203.0.113.20", 53, ts, ProtocolTCP),
+		testCSVRecordWithProtocol("10.0.0.2", "203.0.113.3", 53, ts, ""),
+		testCSVRecordWithProtocol("10.0.0.3", "203.0.113.1", 80, ts, ProtocolTCP),
+		testCSVRecordWithProtocol("10.0.0.4", "203.0.113.3", 53, ts.Add(time.Second), ProtocolTCP),
+		testCSVRecordWithProtocol("10.0.0.5", "203.0.113.3", 53, ts, ProtocolUDP),
+		testCSVRecordWithProtocol("10.0.0.6", "203.0.113.2", 1, ts, ProtocolUDP),
+		testCSVRecordWithProtocol("10.0.0.7", "203.0.113.9", 7, ts, Protocol("sctp")),
+		testCSVRecordWithProtocol("10.0.0.8", "203.0.113.9", 7, ts, Protocol("icmp")),
+	}
+	original := append([]Record(nil), records...)
+
+	var buf bytes.Buffer
+	if err := WritePublicServersCSV(&buf, records); err != nil {
+		t.Fatalf("WritePublicServersCSV() error = %v", err)
+	}
+
+	want := "" +
+		"dst_ip,dst_port,protocol\n" +
+		"203.0.113.3,53,tcp\n" +
+		"203.0.113.20,53,tcp\n" +
+		"203.0.113.1,80,tcp\n" +
+		"203.0.113.2,1,udp\n" +
+		"203.0.113.3,53,udp\n" +
+		"203.0.113.9,7,icmp\n" +
+		"203.0.113.9,7,sctp\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("WritePublicServersCSV() = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(records, original) {
+		t.Fatalf("WritePublicServersCSV() mutated records: got %+v, want %+v", records, original)
 	}
 }
 
