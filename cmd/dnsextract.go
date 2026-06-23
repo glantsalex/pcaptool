@@ -191,12 +191,19 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no .pcap files found in %q", flagReadDir)
 	}
 
-	synTrailArtifacts, err := runSYNTrailSidecar(ctx, om, files, flagFleet, synTrailArtifactOptions{
-		FTPControlPorts:   ftpControlPorts,
-		FTPPassiveMinPort: ftpPassiveMinPort,
-	})
-	if err != nil {
-		return fmt.Errorf("run SYN trail sidecar: %w", err)
+	var synTrailArtifacts map[string]string
+	if flagFleet != "" {
+		progress.SetStage("Running fleet trail sidecar...")
+		synTrailStartedAt := time.Now()
+		synTrailArtifacts, err = runSYNTrailSidecar(ctx, om, files, flagFleet, synTrailArtifactOptions{
+			FTPControlPorts:   ftpControlPorts,
+			FTPPassiveMinPort: ftpPassiveMinPort,
+		})
+		synTrailElapsed := time.Since(synTrailStartedAt).Round(time.Millisecond)
+		if err != nil {
+			return fmt.Errorf("run fleet trail sidecar (elapsed %s): %w", synTrailElapsed, err)
+		}
+		progress.SetStage(fmt.Sprintf("Fleet trail sidecar complete (elapsed %s).", synTrailElapsed))
 	}
 
 	// --------------------------------------------------------------------
