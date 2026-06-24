@@ -299,28 +299,46 @@ It is sidecar-only:
 
 The generated files are:
 
-- `fleet-to-public-syn-trail.csv`
-- `fleet-to-private-nonfleet-syn-trail.csv`
-- `fleet-tcp-syn-unique.csv`
+- `fleet-to-public-trail.csv`
+- `fleet-to-private-nonfleet-trail.csv`
+- `fleet-to-public-unique.csv`
+- `public-servers-unique.csv`
+- `fleet-to-private-nonfleet-syn-unique.csv`
+- `private-servers-unique.csv`
 - `fleet-to-fleet-tcp-syn-trail.csv`
 - `fleet-to-fleet-tcp-syn-unique.csv`
-- `private-nonfleet-to-fleet-tcp-syn-trail.csv`
+- `private-nonfleet-to-fleet-trail.csv`
 - `private-nonfleet-to-fleet-tcp-syn-unique.csv`
+- `private-probes-syn-unique.csv`
+- `flow-direction-correction.sql`
 
 Bucket meanings:
 
 - fleet to public
   - `src_ip` is in fleet
   - `dst_ip` is public / not private-local
-  - manifest key: `fleet_to_public_syn_trail`
+  - manifest keys include: `fleet_to_public_trail`, `fleet_to_public_unique`, `public_servers_unique`
 - fleet to private non-fleet
   - `src_ip` is in fleet
   - `dst_ip` is private/local
   - `dst_ip` is not in fleet
-  - manifest key: `fleet_to_private_nonfleet_syn_trail`
+  - manifest keys include: `fleet_to_private_nonfleet_trail`, `fleet_to_private_nonfleet_syn_unique`
+- private server unique summary
+  - `private-servers-unique.csv` contains unique `dst_ip,dst_port,protocol` rows from the fleet-to-private-nonfleet split
+  - TCP rows and non-excluded UDP rows are retained
+  - TCP passive FTP data ports are suppressed only when a matching control connection is observed
+  - configured UDP destination ports are suppressed only from server summary artifacts
+  - manifest key: `private_servers_unique`
+- flow direction correction SQL
+  - `flow-direction-correction.sql` is generated only; pcaptool does not execute BigQuery
+  - manifest key: `flow_direction_correction_sql`
+  - SQL keeps `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders literal
+  - source table: `flow-data-{net-id}`
+  - materialized view: `mv-flow-data-{net-id}`
+  - private-server correction rules use the same cleaned `dst_ip,dst_port,protocol` semantics as `private-servers-unique.csv`
+  - the final materialized-view schema remains compatible with the flow table projection and does not include `swap_reason`
 - fleet to non-fleet unique
-  - `fleet-tcp-syn-unique.csv` remains the unique tuple file for all fleet to non-fleet destinations
-  - manifest key: `fleet_tcp_syn_unique`
+  - `fleet-to-public-unique.csv` and `fleet-to-private-nonfleet-syn-unique.csv` summarize fleet-to-non-fleet destinations by locality and protocol scope
 - fleet to fleet
   - `src_ip` is in fleet
   - `dst_ip` is in fleet
@@ -359,9 +377,10 @@ The command is a multi-pass offline pipeline.
 
 ### Optional TCP SYN trail sidecar
 
-If `--fleet` is set, the PCAP corpus is also scanned for packet-level IPv4 TCP SYN evidence and the SYN trail sidecar artifacts are written.
+If `--fleet` is set, the PCAP corpus is also scanned for packet-level IPv4 TCP SYN evidence and UDP edge evidence, and the fleet sidecar artifacts are written. The sidecar also writes `flow-direction-correction.sql`, a generated BigQuery script that creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
 
 This sidecar does not feed DNS attribution, connection inference, topology generation, or service endpoint generation.
+The SQL script is not executed by pcaptool.
 
 ### Pass 1: optional RADIUS/IP-to-IMSI index
 
@@ -411,6 +430,16 @@ Examples:
 The heuristic high-port cutoff is controlled by `--ftp-passive-min-port` and defaults to `30000`. It accepts one port in the range `1..65535`. After a configured FTP control channel is observed for an issuer/server pair, TCP destination ports at or above this value are suppressed as passive data edges. Exact ports announced by PASV/EPSV replies are still suppressed even when they are below the configured cutoff.
 
 For a network with a non-standard control channel and lower passive data range, use `--ftp-control-ports 21,990,21000 --ftp-passive-min-port 10000`.
+
+The two server summary artifacts, `public-servers-unique.csv` and `private-servers-unique.csv`, also suppress explicitly identified UDP destination ports configured by `--server-summary-exclude-udp-ports`. The default is the inclusive traceroute range `33434-33534`. The value accepts strict comma-separated ports and inclusive ranges such as `53,33434-33534`; malformed, empty, reversed, and out-of-range entries are errors. Set the flag to an empty value to disable this suppression.
+
+This UDP filter runs after passive FTP suppression and applies only to the two server summaries. Trail artifacts and edge-unique artifacts retain the original rows. TCP rows on the configured ports are retained, and records with an empty protocol are treated as TCP rather than UDP.
+
+Examples:
+
+- `--server-summary-exclude-udp-ports 33434-33534`
+- `--server-summary-exclude-udp-ports 33434-33534,40000,45000-45100`
+- `--server-summary-exclude-udp-ports ""`
 
 ### Topology build
 
@@ -548,6 +577,7 @@ This policy is designed to reduce CSV contamination from:
 | `--exclude-ports` | string | `53` | comma-separated destination/server ports to exclude from topology correlation |
 | `--ftp-control-ports` | string | `21,990` | strict comma-separated passive FTP/FTPS control ports; replaces the default set |
 | `--ftp-passive-min-port` | port | `30000` | minimum destination port heuristically suppressed after a configured FTP/FTPS control channel is observed |
+| `--server-summary-exclude-udp-ports` | port/range set | `33434-33534` | UDP destination ports excluded only from public/private server summary artifacts; empty disables |
 | `--active-resolve` | bool | `false` | resolve unresolved names against external resolvers |
 | `--active-resolvers` | string | empty | comma-separated resolver IPs for active resolve |
 | `--disable-sni` | bool | `false` | skip TLS ClientHello/SNI scan |

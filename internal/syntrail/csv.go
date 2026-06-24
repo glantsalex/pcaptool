@@ -254,11 +254,11 @@ func WritePublicServersCSV(w io.Writer, records []Record) error {
 		return fmt.Errorf("write public servers CSV header: %w", err)
 	}
 
-	for _, row := range uniquePublicServerRows(records) {
+	for _, row := range PrivateServerTuples(records) {
 		if err := cw.Write([]string{
-			row.dstIP.String(),
-			strconv.FormatUint(uint64(row.dstPort), 10),
-			string(row.protocol),
+			row.DstIP.String(),
+			strconv.FormatUint(uint64(row.DstPort), 10),
+			string(row.Protocol),
 		}); err != nil {
 			return fmt.Errorf("write public servers CSV record: %w", err)
 		}
@@ -320,16 +320,17 @@ type privateServerRow struct {
 	protocol string
 }
 
-type publicServerRow struct {
-	dstIP    netip.Addr
-	dstPort  uint16
-	protocol Protocol
-}
-
 type privateProbeRow struct {
 	srcIP    netip.Addr
 	dstPort  uint16
 	protocol string
+}
+
+// ServerTuple identifies a deduplicated server endpoint tuple.
+type ServerTuple struct {
+	DstIP    netip.Addr
+	DstPort  uint16
+	Protocol Protocol
 }
 
 func protocolTrailRowLess(left, right protocolTrailRow) bool {
@@ -451,14 +452,16 @@ func uniquePrivateServerRows(records []Record) []privateServerRow {
 	return rows
 }
 
-func uniquePublicServerRows(records []Record) []publicServerRow {
-	seen := make(map[publicServerRow]struct{}, len(records))
-	rows := make([]publicServerRow, 0, len(records))
+// PrivateServerTuples returns normalized, deduplicated destination server
+// tuples in the same deterministic order used by server summary CSV output.
+func PrivateServerTuples(records []Record) []ServerTuple {
+	seen := make(map[ServerTuple]struct{}, len(records))
+	rows := make([]ServerTuple, 0, len(records))
 	for _, record := range records {
-		row := publicServerRow{
-			dstIP:    record.DstIP,
-			dstPort:  record.DstPort,
-			protocol: normalizedProtocol(record.Protocol),
+		row := ServerTuple{
+			DstIP:    record.DstIP,
+			DstPort:  record.DstPort,
+			Protocol: normalizedProtocol(record.Protocol),
 		}
 		if _, ok := seen[row]; ok {
 			continue
@@ -471,16 +474,16 @@ func uniquePublicServerRows(records []Record) []publicServerRow {
 		left := rows[i]
 		right := rows[j]
 
-		if leftRank, rightRank := protocolRank(left.protocol), protocolRank(right.protocol); leftRank != rightRank {
+		if leftRank, rightRank := protocolRank(left.Protocol), protocolRank(right.Protocol); leftRank != rightRank {
 			return leftRank < rightRank
 		}
-		if left.dstPort != right.dstPort {
-			return left.dstPort < right.dstPort
+		if left.DstPort != right.DstPort {
+			return left.DstPort < right.DstPort
 		}
-		if cmp := compareAddr(left.dstIP, right.dstIP); cmp != 0 {
+		if cmp := compareAddr(left.DstIP, right.DstIP); cmp != 0 {
 			return cmp < 0
 		}
-		return left.protocol < right.protocol
+		return left.Protocol < right.Protocol
 	})
 
 	return rows

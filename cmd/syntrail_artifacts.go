@@ -11,8 +11,9 @@ import (
 )
 
 type synTrailArtifactOptions struct {
-	FTPControlPorts   map[uint16]struct{}
-	FTPPassiveMinPort uint16
+	FTPControlPorts              map[uint16]struct{}
+	FTPPassiveMinPort            uint16
+	ServerSummaryExcludeUDPPorts map[uint16]struct{}
 }
 
 func runSYNTrailSidecar(
@@ -48,13 +49,18 @@ func writeSYNTrailArtifacts(
 	buckets syntrail.BucketedRecords,
 	opt synTrailArtifactOptions,
 ) (map[string]string, error) {
-	artifacts := make(map[string]string, len(synTrailArtifactSpecs))
+	artifacts := make(map[string]string, len(synTrailArtifactSpecs)+1)
+	var privateServerRecords []syntrail.Record
 
 	for _, spec := range synTrailArtifactSpecs {
 		records := spec.records(buckets)
 		switch spec.key {
-		case "private_servers_syn_unique", "public_servers_unique":
+		case "private_servers_unique", "public_servers_unique":
 			records = filterPassiveFTPServerSummaryRecords(records, opt)
+			records = filterUDPServerSummaryRecords(records, opt.ServerSummaryExcludeUDPPorts)
+		}
+		if spec.key == "private_servers_unique" {
+			privateServerRecords = append([]syntrail.Record(nil), records...)
 		}
 		path, err := writeSYNTrailArtifact(om, spec.filename, records, spec.writer)
 		if err != nil {
@@ -62,6 +68,12 @@ func writeSYNTrailArtifacts(
 		}
 		artifacts[spec.key] = path
 	}
+
+	path, err := writeFlowDirectionCorrectionSQL(om, syntrail.PrivateServerTuples(privateServerRecords))
+	if err != nil {
+		return nil, err
+	}
+	artifacts[flowDirectionCorrectionSQLKey] = path
 
 	return artifacts, nil
 }
@@ -120,13 +132,13 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		writer: syntrail.WriteTCPUniqueCSV,
 	},
 	{
-		filename: "private-servers-syn-unique.csv",
-		key:      "private_servers_syn_unique",
+		filename: "private-servers-unique.csv",
+		key:      "private_servers_unique",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
 			_, privateNonFleet := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
-			return tcpSYNTrailRecords(privateNonFleet)
+			return privateNonFleet
 		},
-		writer: syntrail.WritePrivateServersCSV,
+		writer: syntrail.WritePublicServersCSV,
 	},
 	{
 		filename: "fleet-to-fleet-tcp-syn-trail.csv",
@@ -245,6 +257,26 @@ func shouldSuppressPassiveFTPRecord(
 
 func isTCPSYNTrailRecord(record syntrail.Record) bool {
 	return record.Protocol == "" || record.Protocol == syntrail.ProtocolTCP
+}
+
+func filterUDPServerSummaryRecords(
+	records []syntrail.Record,
+	excludedPorts map[uint16]struct{},
+) []syntrail.Record {
+	if len(excludedPorts) == 0 {
+		return records
+	}
+
+	filtered := make([]syntrail.Record, 0, len(records))
+	for _, record := range records {
+		if record.Protocol == syntrail.ProtocolUDP {
+			if _, excluded := excludedPorts[record.DstPort]; excluded {
+				continue
+			}
+		}
+		filtered = append(filtered, record)
+	}
+	return filtered
 }
 
 func writeSYNTrailArtifact(om *OutputManager, filename string, records []syntrail.Record, write func(io.Writer, []syntrail.Record) error) (string, error) {
