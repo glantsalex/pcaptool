@@ -435,6 +435,39 @@ func TestWritePublicServersCSVNormalizesDedupesSortsAndPreservesInput(t *testing
 	}
 }
 
+func TestPrivateServerTuplesNormalizesDedupesSortsAndPreservesInput(t *testing.T) {
+	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	records := []Record{
+		testCSVRecordWithProtocol("10.0.0.1", "203.0.113.20", 53, ts, ProtocolTCP),
+		testCSVRecordWithProtocol("10.0.0.2", "203.0.113.3", 53, ts, ""),
+		testCSVRecordWithProtocol("10.0.0.3", "203.0.113.1", 80, ts, ProtocolTCP),
+		testCSVRecordWithProtocol("10.0.0.4", "203.0.113.3", 53, ts.Add(time.Second), ProtocolTCP),
+		testCSVRecordWithProtocol("10.0.0.5", "203.0.113.3", 53, ts, ProtocolUDP),
+		testCSVRecordWithProtocol("10.0.0.6", "203.0.113.2", 1, ts, ProtocolUDP),
+		testCSVRecordWithProtocol("10.0.0.7", "203.0.113.9", 7, ts, Protocol("sctp")),
+		testCSVRecordWithProtocol("10.0.0.8", "203.0.113.9", 7, ts, Protocol("icmp")),
+	}
+	original := append([]Record(nil), records...)
+
+	got := PrivateServerTuples(records)
+	want := []ServerTuple{
+		{DstIP: netip.MustParseAddr("203.0.113.3"), DstPort: 53, Protocol: ProtocolTCP},
+		{DstIP: netip.MustParseAddr("203.0.113.20"), DstPort: 53, Protocol: ProtocolTCP},
+		{DstIP: netip.MustParseAddr("203.0.113.1"), DstPort: 80, Protocol: ProtocolTCP},
+		{DstIP: netip.MustParseAddr("203.0.113.2"), DstPort: 1, Protocol: ProtocolUDP},
+		{DstIP: netip.MustParseAddr("203.0.113.3"), DstPort: 53, Protocol: ProtocolUDP},
+		{DstIP: netip.MustParseAddr("203.0.113.9"), DstPort: 7, Protocol: Protocol("icmp")},
+		{DstIP: netip.MustParseAddr("203.0.113.9"), DstPort: 7, Protocol: Protocol("sctp")},
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PrivateServerTuples() = %+v, want %+v", got, want)
+	}
+	if !reflect.DeepEqual(records, original) {
+		t.Fatalf("PrivateServerTuples() mutated records: got %+v, want %+v", records, original)
+	}
+}
+
 func TestWritePrivateProbesCSVIncludesProtocolDedupesAndSortsByTuple(t *testing.T) {
 	early := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
 	late := early.Add(time.Second)

@@ -26,26 +26,27 @@ import (
 )
 
 var (
-	flagReadDir           string
-	flagFleet             string
-	flagFormat            string
-	flagExportCSV         string
-	flagConnectivityShort bool
-	flagRadiusIMSI        bool
-	flagOnlyTCP           bool
-	flagIgnoreNTP         bool
-	flagExcludePorts      string
-	flagFTPControlPorts   string
-	flagFTPPassiveMinPort string
-	flagDNSIPFile         string
-	flagTopologyDNSWindow time.Duration
-	flagActiveResolve     bool
-	flagActiveResolvers   string
-	flagDisableSNI        bool
-	flagUnsorted          bool
-	flagDebug             bool
-	flagManifestOut       string
-	flagPostHooks         []string
+	flagReadDir                      string
+	flagFleet                        string
+	flagFormat                       string
+	flagExportCSV                    string
+	flagConnectivityShort            bool
+	flagRadiusIMSI                   bool
+	flagOnlyTCP                      bool
+	flagIgnoreNTP                    bool
+	flagExcludePorts                 string
+	flagFTPControlPorts              string
+	flagFTPPassiveMinPort            string
+	flagServerSummaryExcludeUDPPorts string
+	flagDNSIPFile                    string
+	flagTopologyDNSWindow            time.Duration
+	flagActiveResolve                bool
+	flagActiveResolvers              string
+	flagDisableSNI                   bool
+	flagUnsorted                     bool
+	flagDebug                        bool
+	flagManifestOut                  string
+	flagPostHooks                    []string
 )
 
 func init() {
@@ -99,6 +100,12 @@ func init() {
 		"ftp-passive-min-port",
 		"30000",
 		"Minimum destination port treated as passive FTP/FTPS data after a control channel is observed (1..65535).",
+	)
+	cmd.Flags().StringVar(
+		&flagServerSummaryExcludeUDPPorts,
+		"server-summary-exclude-udp-ports",
+		"33434-33534",
+		"Comma-separated UDP destination ports or inclusive ranges excluded only from server summary artifacts; empty disables.",
 	)
 	cmd.Flags().BoolVar(
 		&flagActiveResolve,
@@ -176,6 +183,10 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("--ftp-passive-min-port: %w", err)
 	}
+	serverSummaryExcludeUDPPorts, err := parseOptionalPortRangeSet(flagServerSummaryExcludeUDPPorts)
+	if err != nil {
+		return fmt.Errorf("--server-summary-exclude-udp-ports: %w", err)
+	}
 
 	om, err := NewOutputManager(flagNetID, flagOutputRoot)
 	if err != nil {
@@ -196,8 +207,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		progress.SetStage("Running fleet trail sidecar...")
 		synTrailStartedAt := time.Now()
 		synTrailArtifacts, err = runSYNTrailSidecar(ctx, om, files, flagFleet, synTrailArtifactOptions{
-			FTPControlPorts:   ftpControlPorts,
-			FTPPassiveMinPort: ftpPassiveMinPort,
+			FTPControlPorts:              ftpControlPorts,
+			FTPPassiveMinPort:            ftpPassiveMinPort,
+			ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
 		})
 		synTrailElapsed := time.Since(synTrailStartedAt).Round(time.Millisecond)
 		if err != nil {

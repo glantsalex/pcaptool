@@ -65,6 +65,58 @@ func parseStrictPortSet(s string) (map[uint16]struct{}, error) {
 	return out, nil
 }
 
+func parseOptionalPortRangeSet(s string) (map[uint16]struct{}, error) {
+	out := make(map[uint16]struct{})
+	if strings.TrimSpace(s) == "" {
+		return out, nil
+	}
+
+	for i, raw := range strings.Split(s, ",") {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			return nil, fmt.Errorf("invalid port range entry %d value %q: must not be empty", i+1, raw)
+		}
+
+		bounds := strings.Split(value, "-")
+		switch len(bounds) {
+		case 1:
+			port, err := parseStrictPort(bounds[0])
+			if err != nil {
+				return nil, fmt.Errorf("invalid port range entry %d value %q: %w", i+1, value, err)
+			}
+			out[port] = struct{}{}
+		case 2:
+			start, err := parseStrictPort(bounds[0])
+			if err != nil {
+				return nil, fmt.Errorf("invalid port range entry %d value %q start: %w", i+1, value, err)
+			}
+			end, err := parseStrictPort(bounds[1])
+			if err != nil {
+				return nil, fmt.Errorf("invalid port range entry %d value %q end: %w", i+1, value, err)
+			}
+			if start > end {
+				return nil, fmt.Errorf(
+					"invalid port range entry %d value %q: range start %d exceeds end %d",
+					i+1,
+					value,
+					start,
+					end,
+				)
+			}
+			for port := int(start); port <= int(end); port++ {
+				out[uint16(port)] = struct{}{}
+			}
+		default:
+			return nil, fmt.Errorf(
+				"invalid port range entry %d value %q: must be a port or inclusive start-end range",
+				i+1,
+				value,
+			)
+		}
+	}
+	return out, nil
+}
+
 func parseStrictPort(s string) (uint16, error) {
 	value := strings.TrimSpace(s)
 	if value == "" {
