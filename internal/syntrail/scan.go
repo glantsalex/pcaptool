@@ -3,34 +3,179 @@ package syntrail
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
 )
 
+// ScanOptions controls packet capture scanning behavior.
+type ScanOptions struct {
+	// Workers is the maximum number of capture files scanned concurrently.
+	// Values <= 1 preserve the historical sequential scan behavior.
+	Workers int
+}
+
 // ScanFiles scans packet captures for raw observed IPv4 TCP SYN and eligible
 // UDP trail evidence.
 func ScanFiles(ctx context.Context, files []string) ([]Record, error) {
-	var tcpRecords []Record
-	udpRecords := make(map[observedRecordKey]Record)
-	var udpOrder []observedRecordKey
+	return ScanFilesWithOptions(ctx, files, ScanOptions{Workers: 1})
+}
 
-	for _, file := range files {
+// ScanFilesWithOptions scans packet captures for raw observed IPv4 TCP SYN and
+// eligible UDP trail evidence using bounded concurrent file scanning.
+func ScanFilesWithOptions(ctx context.Context, files []string, opts ScanOptions) ([]Record, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+	if opts.Workers <= 1 {
+		return scanFilesSequential(ctx, files)
+	}
+	return scanFilesConcurrent(ctx, files, opts.Workers)
+}
+
+func scanFilesSequential(ctx context.Context, files []string) ([]Record, error) {
+	results := make([]scanFileResult, len(files))
+	for i, file := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-
 		fileRecords, err := scanFile(ctx, file)
 		if err != nil {
 			return nil, err
 		}
-		for _, record := range fileRecords {
+		results[i] = scanFileResult{
+			index:   i,
+			path:    file,
+			records: fileRecords,
+		}
+	}
+	return mergeScanFileResults(results), nil
+}
+
+func scanFilesConcurrent(ctx context.Context, files []string, workers int) ([]Record, error) {
+	if workers > len(files) {
+		workers = len(files)
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan scanFileJob)
+	resultsCh := make(chan scanFileResult, len(files))
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				if err := ctx.Err(); err != nil {
+					resultsCh <- scanFileResult{index: job.index, path: job.path, err: err}
+					continue
+				}
+
+				records, err := scanFile(ctx, job.path)
+				if err != nil {
+					cancel()
+				}
+				resultsCh <- scanFileResult{
+					index:   job.index,
+					path:    job.path,
+					records: records,
+					err:     err,
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		for i, file := range files {
+			if err := ctx.Err(); err != nil {
+				return
+			}
+			select {
+			case jobs <- scanFileJob{index: i, path: file}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	results := make([]scanFileResult, len(files))
+	seen := make([]bool, len(files))
+	var firstErr error
+	for result := range resultsCh {
+		if result.index >= 0 && result.index < len(files) {
+			results[result.index] = result
+			seen[result.index] = true
+		}
+		if result.err != nil && shouldPreferScanError(firstErr, result.err) {
+			firstErr = result.err
+			cancel()
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	for i := range files {
+		if !seen[i] {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return mergeScanFileResults(results), nil
+}
+
+func shouldPreferScanError(current, next error) bool {
+	if next == nil {
+		return false
+	}
+	if current == nil {
+		return true
+	}
+	if errors.Is(current, context.Canceled) && !errors.Is(next, context.Canceled) {
+		return true
+	}
+	return false
+}
+
+type scanFileJob struct {
+	index int
+	path  string
+}
+
+type scanFileResult struct {
+	index   int
+	path    string
+	records []Record
+	err     error
+}
+
+func mergeScanFileResults(results []scanFileResult) []Record {
+	var tcpRecords []Record
+	udpRecords := make(map[observedRecordKey]Record)
+	var udpOrder []observedRecordKey
+
+	for _, result := range results {
+		for _, record := range result.records {
 			if record.Protocol != ProtocolUDP {
 				tcpRecords = append(tcpRecords, record)
 				continue
@@ -39,7 +184,7 @@ func ScanFiles(ctx context.Context, files []string) ([]Record, error) {
 		}
 	}
 
-	return appendOrderedRecords(tcpRecords, udpRecords, udpOrder), nil
+	return appendOrderedRecords(tcpRecords, udpRecords, udpOrder)
 }
 
 func scanFile(ctx context.Context, path string) ([]Record, error) {

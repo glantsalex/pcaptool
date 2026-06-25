@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,6 +202,164 @@ func TestScanFilesPreservesTCPFilePacketOrderAndDuplicates(t *testing.T) {
 	}
 }
 
+func TestScanFilesWithOptionsConcurrentMatchesSequentialOrder(t *testing.T) {
+	base := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	first := writePCAP(t, []testPacket{
+		tcp4Packet(base.Add(10*time.Millisecond), "10.0.0.1", "203.0.113.1", 443, true, false),
+		tcp4Packet(base.Add(20*time.Millisecond), "10.0.0.1", "203.0.113.1", 443, true, false),
+		udp4Packet(base.Add(10*time.Second), "10.0.0.1", "203.0.113.10", 53),
+		udp4Packet(base.Add(12*time.Second), "10.0.0.1", "203.0.113.10", 53),
+		udp4Packet(base.Add(2*time.Second), "10.0.0.1", "203.0.113.10", 5353),
+	})
+	second := writePCAP(t, []testPacket{
+		tcp4Packet(base.Add(30*time.Millisecond), "10.0.0.2", "203.0.113.2", 8443, true, false),
+		udp4Packet(base, "10.0.0.1", "203.0.113.10", 53),
+		udp4Packet(base.Add(3*time.Second), "10.0.0.1", "203.0.113.11", 53),
+	})
+	third := writePCAP(t, []testPacket{
+		tcp4Packet(base.Add(40*time.Millisecond), "10.0.0.3", "203.0.113.3", 9443, true, false),
+		tcp4Packet(base.Add(50*time.Millisecond), "10.0.0.3", "203.0.113.3", 9443, true, false),
+		udp4Packet(base.Add(4*time.Second), "10.0.0.4", "203.0.113.12", 123),
+	})
+	files := []string{first, second, third}
+
+	sequential, err := ScanFiles(context.Background(), files)
+	if err != nil {
+		t.Fatalf("ScanFiles() error = %v", err)
+	}
+	concurrent, err := ScanFilesWithOptions(context.Background(), files, ScanOptions{Workers: 2})
+	if err != nil {
+		t.Fatalf("ScanFilesWithOptions() error = %v", err)
+	}
+	if !reflect.DeepEqual(concurrent, sequential) {
+		t.Fatalf("concurrent records = %+v, want sequential %+v", concurrent, sequential)
+	}
+
+	want := []Record{
+		{
+			SrcIP:     netip.MustParseAddr("10.0.0.1"),
+			DstIP:     netip.MustParseAddr("203.0.113.1"),
+			DstPort:   443,
+			Protocol:  ProtocolTCP,
+			Timestamp: base.Add(10 * time.Millisecond),
+		},
+		{
+			SrcIP:     netip.MustParseAddr("10.0.0.1"),
+			DstIP:     netip.MustParseAddr("203.0.113.1"),
+			DstPort:   443,
+			Protocol:  ProtocolTCP,
+			Timestamp: base.Add(20 * time.Millisecond),
+		},
+		{
+			SrcIP:     netip.MustParseAddr("10.0.0.2"),
+			DstIP:     netip.MustParseAddr("203.0.113.2"),
+			DstPort:   8443,
+			Protocol:  ProtocolTCP,
+			Timestamp: base.Add(30 * time.Millisecond),
+		},
+		{
+			SrcIP:     netip.MustParseAddr("10.0.0.3"),
+			DstIP:     netip.MustParseAddr("203.0.113.3"),
+			DstPort:   9443,
+			Protocol:  ProtocolTCP,
+			Timestamp: base.Add(40 * time.Millisecond),
+		},
+		{
+			SrcIP:     netip.MustParseAddr("10.0.0.3"),
+			DstIP:     netip.MustParseAddr("203.0.113.3"),
+			DstPort:   9443,
+			Protocol:  ProtocolTCP,
+			Timestamp: base.Add(50 * time.Millisecond),
+		},
+		{
+			SrcIP:     netip.MustParseAddr("10.0.0.1"),
+			DstIP:     netip.MustParseAddr("203.0.113.10"),
+			DstPort:   53,
+			Protocol:  ProtocolUDP,
+			Timestamp: base,
+		},
+		{
+			SrcIP:     netip.MustParseAddr("10.0.0.1"),
+			DstIP:     netip.MustParseAddr("203.0.113.10"),
+			DstPort:   5353,
+			Protocol:  ProtocolUDP,
+			Timestamp: base.Add(2 * time.Second),
+		},
+		{
+			SrcIP:     netip.MustParseAddr("10.0.0.1"),
+			DstIP:     netip.MustParseAddr("203.0.113.11"),
+			DstPort:   53,
+			Protocol:  ProtocolUDP,
+			Timestamp: base.Add(3 * time.Second),
+		},
+		{
+			SrcIP:     netip.MustParseAddr("10.0.0.4"),
+			DstIP:     netip.MustParseAddr("203.0.113.12"),
+			DstPort:   123,
+			Protocol:  ProtocolUDP,
+			Timestamp: base.Add(4 * time.Second),
+		},
+	}
+	if !reflect.DeepEqual(concurrent, want) {
+		t.Fatalf("ScanFilesWithOptions() = %+v, want %+v", concurrent, want)
+	}
+}
+
+func TestScanFilesWithOptionsWorkersLessThanOrEqualOneMatchSequential(t *testing.T) {
+	ts := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	path := writePCAP(t, []testPacket{
+		tcp4Packet(ts, "10.1.2.3", "203.0.113.10", 443, true, false),
+		udp4Packet(ts.Add(time.Second), "10.1.2.3", "203.0.113.11", 53),
+	})
+
+	sequential, err := ScanFiles(context.Background(), []string{path})
+	if err != nil {
+		t.Fatalf("ScanFiles() error = %v", err)
+	}
+	for _, workers := range []int{-1, 0, 1} {
+		got, err := ScanFilesWithOptions(context.Background(), []string{path}, ScanOptions{Workers: workers})
+		if err != nil {
+			t.Fatalf("ScanFilesWithOptions(Workers=%d) error = %v", workers, err)
+		}
+		if !reflect.DeepEqual(got, sequential) {
+			t.Fatalf("ScanFilesWithOptions(Workers=%d) = %+v, want %+v", workers, got, sequential)
+		}
+	}
+}
+
+func TestScanFilesWithOptionsWorkersGreaterThanFiles(t *testing.T) {
+	ts := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	first := writePCAP(t, []testPacket{
+		tcp4Packet(ts, "10.1.2.3", "203.0.113.10", 443, true, false),
+	})
+	second := writePCAP(t, []testPacket{
+		udp4Packet(ts.Add(time.Second), "10.1.2.4", "203.0.113.11", 53),
+	})
+	files := []string{first, second}
+
+	sequential, err := ScanFiles(context.Background(), files)
+	if err != nil {
+		t.Fatalf("ScanFiles() error = %v", err)
+	}
+	got, err := ScanFilesWithOptions(context.Background(), files, ScanOptions{Workers: 8})
+	if err != nil {
+		t.Fatalf("ScanFilesWithOptions() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, sequential) {
+		t.Fatalf("ScanFilesWithOptions() = %+v, want %+v", got, sequential)
+	}
+}
+
+func TestScanFilesWithOptionsEmptyFileList(t *testing.T) {
+	records, err := ScanFilesWithOptions(context.Background(), nil, ScanOptions{Workers: 4})
+	if err != nil {
+		t.Fatalf("ScanFilesWithOptions() error = %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("ScanFilesWithOptions() returned %d records, want 0", len(records))
+	}
+}
+
 func TestScanFileReadsPCAPNG(t *testing.T) {
 	ts := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
 	path := writePCAPNG(t, []testPacket{
@@ -229,6 +388,34 @@ func TestScanFilesRespectsCanceledContext(t *testing.T) {
 	}
 	if records != nil {
 		t.Fatalf("ScanFiles() records = %+v, want nil", records)
+	}
+}
+
+func TestScanFilesWithOptionsRespectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	records, err := ScanFilesWithOptions(ctx, []string{filepath.Join(t.TempDir(), "missing.pcap")}, ScanOptions{Workers: 2})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ScanFilesWithOptions() error = %v, want context.Canceled", err)
+	}
+	if records != nil {
+		t.Fatalf("ScanFilesWithOptions() records = %+v, want nil", records)
+	}
+}
+
+func TestScanFilesWithOptionsErrorIncludesFilePath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.pcap")
+
+	records, err := ScanFilesWithOptions(context.Background(), []string{missing}, ScanOptions{Workers: 2})
+	if err == nil {
+		t.Fatal("ScanFilesWithOptions() error = nil, want error")
+	}
+	if records != nil {
+		t.Fatalf("ScanFilesWithOptions() records = %+v, want nil", records)
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Fatalf("ScanFilesWithOptions() error = %q, want path %q", err, missing)
 	}
 }
 
