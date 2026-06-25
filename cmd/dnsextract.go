@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -51,8 +52,6 @@ var (
 	flagFleetScanWorkers             int
 )
 
-var scanSYNTrailFilesWithOptions = syntrail.ScanFilesWithOptions
-
 func init() {
 	cmd := &cobra.Command{
 		Use:   "dnsextract",
@@ -70,8 +69,8 @@ func init() {
 	cmd.Flags().IntVar(
 		&flagFleetScanWorkers,
 		"fleet-scan-workers",
-		1,
-		"Number of workers for --fleet artifact scanning (default 1); higher values scan multiple capture files concurrently.",
+		0,
+		"Number of workers for --fleet artifact scanning; 0 auto-selects min(GOMAXPROCS, file count), 1 is sequential.",
 	)
 	cmd.Flags().StringVar(&flagFormat, "format", "table", "Output format: table|json")
 	cmd.Flags().StringVar(&flagExportCSV, "export-csv", "", "Optional CSV export path (relative paths are placed under the run output directory)")
@@ -219,18 +218,16 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if flagFleet != "" {
 		progress.SetStage("Running fleet trail sidecar...")
 		synTrailStartedAt := time.Now()
-		synTrailArtifacts, err = runSYNTrailSidecarForDNSExtract(
-			ctx,
-			om,
-			files,
-			flagFleet,
-			synTrailArtifactOptions{
-				FTPControlPorts:              ftpControlPorts,
-				FTPPassiveMinPort:            ftpPassiveMinPort,
-				ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
+		scanWorkers := effectiveFleetScanWorkers(flagFleetScanWorkers, len(files))
+		synTrailArtifacts, err = runSYNTrailSidecar(ctx, om, files, flagFleet, synTrailArtifactOptions{
+			FTPControlPorts:              ftpControlPorts,
+			FTPPassiveMinPort:            ftpPassiveMinPort,
+			ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
+			ScanOptions: syntrail.ScanOptions{
+				Workers:  scanWorkers,
+				Progress: fleetTrailScanProgress(progress.UpdateBar),
 			},
-			syntrail.ScanOptions{Workers: flagFleetScanWorkers},
-		)
+		})
 		synTrailElapsed := time.Since(synTrailStartedAt).Round(time.Millisecond)
 		if err != nil {
 			return fmt.Errorf("run fleet trail sidecar (elapsed %s): %w", synTrailElapsed, err)
@@ -623,43 +620,38 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func validateFleetScanWorkers(fleetPath string, workers int) error {
-	if strings.TrimSpace(fleetPath) == "" {
-		return nil
-	}
-	if workers < 1 {
-		return fmt.Errorf("--fleet-scan-workers must be >= 1 when --fleet is set")
+func validateFleetScanWorkers(_ string, workers int) error {
+	if workers < 0 {
+		return fmt.Errorf("--fleet-scan-workers must be >= 0")
 	}
 	return nil
 }
 
-func runSYNTrailSidecarForDNSExtract(
-	ctx context.Context,
-	om *OutputManager,
-	files []string,
-	fleetPath string,
-	artifactOpt synTrailArtifactOptions,
-	scanOpt syntrail.ScanOptions,
-) (map[string]string, error) {
-	if fleetPath == "" {
-		return nil, nil
+func effectiveFleetScanWorkers(requested, fileCount int) int {
+	if requested > 0 {
+		return requested
 	}
+	gomax := runtime.GOMAXPROCS(0)
+	if gomax < 1 {
+		gomax = 1
+	}
+	if fileCount < 1 {
+		return 1
+	}
+	if gomax > fileCount {
+		return fileCount
+	}
+	return gomax
+}
 
-	fleet, err := syntrail.LoadFleetIPv4File(fleetPath)
-	if err != nil {
-		return nil, fmt.Errorf("load SYN trail fleet file: %w", err)
+func fleetTrailScanProgress(update func(done, total int, message string)) syntrail.ScanProgressFunc {
+	return func(done, total int, file string) {
+		if file == "" {
+			update(total, total, "Fleet trail scan complete")
+			return
+		}
+		update(done, total, "Fleet trail "+filepath.Base(file))
 	}
-
-	records, err := scanSYNTrailFilesWithOptions(ctx, files, scanOpt)
-	if err != nil {
-		return nil, fmt.Errorf("scan SYN trail packet captures: %w", err)
-	}
-
-	artifacts, err := writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, fleet), artifactOpt)
-	if err != nil {
-		return nil, fmt.Errorf("write SYN trail artifacts: %w", err)
-	}
-	return artifacts, nil
 }
 
 func writeIPDNSAppendAudit(

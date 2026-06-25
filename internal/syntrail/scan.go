@@ -16,11 +16,18 @@ import (
 	"github.com/google/gopacket/pcapgo"
 )
 
+// ScanProgressFunc receives file-level scan progress updates.
+type ScanProgressFunc func(done, total int, file string)
+
 // ScanOptions controls packet capture scanning behavior.
 type ScanOptions struct {
 	// Workers is the maximum number of capture files scanned concurrently.
 	// Values <= 1 preserve the historical sequential scan behavior.
 	Workers int
+
+	// Progress is called after each file scan completes. It is optional and is
+	// invoked from the coordinating goroutine, not from worker goroutines.
+	Progress ScanProgressFunc
 }
 
 // ScanFiles scans packet captures for raw observed IPv4 TCP SYN and eligible
@@ -39,18 +46,21 @@ func ScanFilesWithOptions(ctx context.Context, files []string, opts ScanOptions)
 		return nil, nil
 	}
 	if opts.Workers <= 1 {
-		return scanFilesSequential(ctx, files)
+		return scanFilesSequential(ctx, files, opts.Progress)
 	}
-	return scanFilesConcurrent(ctx, files, opts.Workers)
+	return scanFilesConcurrent(ctx, files, opts.Workers, opts.Progress)
 }
 
-func scanFilesSequential(ctx context.Context, files []string) ([]Record, error) {
+func scanFilesSequential(ctx context.Context, files []string, progress ScanProgressFunc) ([]Record, error) {
 	results := make([]scanFileResult, len(files))
 	for i, file := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		fileRecords, err := scanFile(ctx, file)
+		if progress != nil {
+			progress(i+1, len(files), file)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -63,7 +73,7 @@ func scanFilesSequential(ctx context.Context, files []string) ([]Record, error) 
 	return mergeScanFileResults(results), nil
 }
 
-func scanFilesConcurrent(ctx context.Context, files []string, workers int) ([]Record, error) {
+func scanFilesConcurrent(ctx context.Context, files []string, workers int, progress ScanProgressFunc) ([]Record, error) {
 	if workers > len(files) {
 		workers = len(files)
 	}
@@ -121,10 +131,15 @@ func scanFilesConcurrent(ctx context.Context, files []string, workers int) ([]Re
 	results := make([]scanFileResult, len(files))
 	seen := make([]bool, len(files))
 	var firstErr error
+	done := 0
 	for result := range resultsCh {
 		if result.index >= 0 && result.index < len(files) {
 			results[result.index] = result
 			seen[result.index] = true
+		}
+		done++
+		if progress != nil {
+			progress(done, len(files), result.path)
 		}
 		if result.err != nil && shouldPreferScanError(firstErr, result.err) {
 			firstErr = result.err

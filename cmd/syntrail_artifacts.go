@@ -14,7 +14,10 @@ type synTrailArtifactOptions struct {
 	FTPControlPorts              map[uint16]struct{}
 	FTPPassiveMinPort            uint16
 	ServerSummaryExcludeUDPPorts map[uint16]struct{}
+	ScanOptions                  syntrail.ScanOptions
 }
+
+var scanSYNTrailFilesWithOptions = syntrail.ScanFilesWithOptions
 
 func runSYNTrailSidecar(
 	ctx context.Context,
@@ -32,9 +35,12 @@ func runSYNTrailSidecar(
 		return nil, fmt.Errorf("load SYN trail fleet file: %w", err)
 	}
 
-	records, err := syntrail.ScanFiles(ctx, files)
+	records, err := scanSYNTrailFilesWithOptions(ctx, files, opt.ScanOptions)
 	if err != nil {
 		return nil, fmt.Errorf("scan SYN trail packet captures: %w", err)
+	}
+	if opt.ScanOptions.Progress != nil {
+		opt.ScanOptions.Progress(len(files), len(files), "")
 	}
 
 	artifacts, err := writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, fleet), opt)

@@ -305,6 +305,90 @@ func TestScanFilesWithOptionsConcurrentMatchesSequentialOrder(t *testing.T) {
 	}
 }
 
+func TestScanFilesWithOptionsProgressCallbackSequential(t *testing.T) {
+	base := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	first := writePCAP(t, []testPacket{
+		tcp4Packet(base, "10.1.2.3", "203.0.113.10", 443, true, false),
+	})
+	second := writePCAP(t, []testPacket{
+		udp4Packet(base.Add(time.Second), "10.1.2.4", "203.0.113.11", 53),
+	})
+	files := []string{first, second}
+
+	var updates []scanProgressUpdate
+	_, err := ScanFilesWithOptions(context.Background(), files, ScanOptions{
+		Workers: 1,
+		Progress: func(done, total int, file string) {
+			updates = append(updates, scanProgressUpdate{done: done, total: total, file: file})
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanFilesWithOptions() error = %v", err)
+	}
+
+	want := []scanProgressUpdate{
+		{done: 1, total: 2, file: first},
+		{done: 2, total: 2, file: second},
+	}
+	if !reflect.DeepEqual(updates, want) {
+		t.Fatalf("progress updates = %#v, want %#v", updates, want)
+	}
+}
+
+func TestScanFilesWithOptionsProgressCallbackConcurrent(t *testing.T) {
+	base := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	first := writePCAP(t, []testPacket{
+		tcp4Packet(base, "10.1.2.3", "203.0.113.10", 443, true, false),
+	})
+	second := writePCAP(t, []testPacket{
+		udp4Packet(base.Add(time.Second), "10.1.2.4", "203.0.113.11", 53),
+	})
+	third := writePCAP(t, []testPacket{
+		udp4Packet(base.Add(2*time.Second), "10.1.2.5", "203.0.113.12", 123),
+	})
+	files := []string{first, second, third}
+
+	var updates []scanProgressUpdate
+	_, err := ScanFilesWithOptions(context.Background(), files, ScanOptions{
+		Workers: 2,
+		Progress: func(done, total int, file string) {
+			updates = append(updates, scanProgressUpdate{done: done, total: total, file: file})
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanFilesWithOptions() error = %v", err)
+	}
+	if len(updates) != len(files) {
+		t.Fatalf("progress update count = %d, want %d: %#v", len(updates), len(files), updates)
+	}
+	seenFiles := make(map[string]struct{}, len(files))
+	for i, update := range updates {
+		if update.done != i+1 {
+			t.Fatalf("progress update %d done = %d, want %d", i, update.done, i+1)
+		}
+		if update.total != len(files) {
+			t.Fatalf("progress update %d total = %d, want %d", i, update.total, len(files))
+		}
+		seenFiles[update.file] = struct{}{}
+	}
+	for _, file := range files {
+		if _, ok := seenFiles[file]; !ok {
+			t.Fatalf("missing progress update for %q in %#v", file, updates)
+		}
+	}
+}
+
+func TestScanFilesWithOptionsNilProgressCallback(t *testing.T) {
+	ts := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	path := writePCAP(t, []testPacket{
+		tcp4Packet(ts, "10.1.2.3", "203.0.113.10", 443, true, false),
+	})
+
+	if _, err := ScanFilesWithOptions(context.Background(), []string{path}, ScanOptions{Workers: 2}); err != nil {
+		t.Fatalf("ScanFilesWithOptions() error = %v", err)
+	}
+}
+
 func TestScanFilesWithOptionsWorkersLessThanOrEqualOneMatchSequential(t *testing.T) {
 	ts := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
 	path := writePCAP(t, []testPacket{
@@ -324,6 +408,25 @@ func TestScanFilesWithOptionsWorkersLessThanOrEqualOneMatchSequential(t *testing
 		if !reflect.DeepEqual(got, sequential) {
 			t.Fatalf("ScanFilesWithOptions(Workers=%d) = %+v, want %+v", workers, got, sequential)
 		}
+	}
+}
+
+func TestScanFilesWithOptionsWorkersZeroIsLibrarySequential(t *testing.T) {
+	ts := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
+	path := writePCAP(t, []testPacket{
+		tcp4Packet(ts, "10.1.2.3", "203.0.113.10", 443, true, false),
+	})
+
+	sequential, err := ScanFiles(context.Background(), []string{path})
+	if err != nil {
+		t.Fatalf("ScanFiles() error = %v", err)
+	}
+	got, err := ScanFilesWithOptions(context.Background(), []string{path}, ScanOptions{Workers: 0})
+	if err != nil {
+		t.Fatalf("ScanFilesWithOptions() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, sequential) {
+		t.Fatalf("ScanFilesWithOptions(Workers=0) = %+v, want sequential %+v", got, sequential)
 	}
 }
 
@@ -422,6 +525,12 @@ func TestScanFilesWithOptionsErrorIncludesFilePath(t *testing.T) {
 type testPacket struct {
 	ts   time.Time
 	data []byte
+}
+
+type scanProgressUpdate struct {
+	done  int
+	total int
+	file  string
 }
 
 func tcp4Packet(ts time.Time, src, dst string, dstPort uint16, syn, ack bool) testPacket {
