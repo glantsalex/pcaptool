@@ -377,7 +377,7 @@ The command is a multi-pass offline pipeline.
 
 ### Optional TCP SYN trail sidecar
 
-If `--fleet` is set, the PCAP corpus is also scanned for packet-level IPv4 TCP SYN evidence and UDP edge evidence, and the fleet sidecar artifacts are written. The sidecar also writes `flow-direction-correction.sql`, a generated BigQuery script that creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
+If `--fleet` is set, the PCAP corpus is also scanned for packet-level IPv4 TCP SYN evidence and UDP edge evidence, and the fleet sidecar artifacts are written. By default this sidecar scan is sequential; `--fleet-scan-workers 8` scans multiple capture files concurrently. Higher values can reduce wall-clock time on large directories but increase disk and CPU pressure. The sidecar also writes `flow-direction-correction.sql`, a generated BigQuery script that creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
 
 This sidecar does not feed DNS attribution, connection inference, topology generation, or service endpoint generation.
 The SQL script is not executed by pcaptool.
@@ -567,6 +567,7 @@ This policy is designed to reduce CSV contamination from:
 |---|---|---:|---|
 | `--read-dir`, `-r` | string | required | directory containing PCAP files; walked recursively |
 | `--fleet` | string | empty | optional fleet IPv4 list; when set, writes packet-level TCP SYN evidence artifacts |
+| `--fleet-scan-workers` | int | `1` | workers for `--fleet` artifact scanning; higher values scan multiple capture files concurrently |
 | `--format` | string | `table` | main output format: `table` or `json` |
 | `--export-csv` | string | empty | optional CSV export path for main records |
 | `--short`, `-s` | bool | `false` | squash topology to one row per issuer/DNS/port |
