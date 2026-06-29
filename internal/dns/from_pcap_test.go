@@ -1,10 +1,17 @@
 package dns
 
 import (
+	"context"
+	"encoding/binary"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/aglants/pcaptool/internal/connectivity"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcapgo"
 )
 
 func TestAllowConnectionInferredDNSBackfillWithCSVGuard(t *testing.T) {
@@ -178,5 +185,80 @@ func TestSuppressMergedFTPPassiveEdgesZeroMinimumUsesDefault(t *testing.T) {
 	}
 	if got[0].Port != 21 || got[1].Port != 29999 {
 		t.Fatalf("expected ports 21 and 29999 after suppression, got %#v", got)
+	}
+}
+
+func TestDNSScanCollectsTruncatedQueryAndContinues(t *testing.T) {
+	header := make([]byte, 12)
+	binary.BigEndian.PutUint16(header[0:2], 0x090a)
+	binary.BigEndian.PutUint16(header[2:4], 0x0100)
+	binary.BigEndian.PutUint16(header[4:6], 1)
+	truncated := append(header, 0x03, 'a', 'p', 'i', 0x07, 'e', 'x')
+	malformed := []byte{0x09, 0x0a, 0x01}
+	complete := buildRawDNSQuery("complete.example", uint16(layers.DNSTypeA))
+
+	path := filepath.Join(t.TempDir(), "dns-truncated.pcap")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create pcap: %v", err)
+	}
+	w := pcapgo.NewWriter(f)
+	if err := w.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {
+		f.Close()
+		t.Fatalf("write pcap header: %v", err)
+	}
+	base := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+	for i, payload := range [][]byte{truncated, malformed, complete} {
+		packetData := buildTestIPv4UDPPacket(t, payload)
+		originalLength := len(packetData)
+		if i == 0 {
+			originalLength += 8
+		}
+		if err := w.WritePacket(gopacket.CaptureInfo{
+			Timestamp:     base.Add(time.Duration(i) * time.Second),
+			CaptureLength: len(packetData),
+			Length:        originalLength,
+		}, packetData); err != nil {
+			f.Close()
+			t.Fatalf("write pcap packet %d: %v", i, err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close pcap: %v", err)
+	}
+
+	txs, _, rows, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
+		context.Background(),
+		[]string{path},
+		false,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("scan DNS diagnostics: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("truncated diagnostics = %+v, want one row", rows)
+	}
+	if rows[0].PCAPFile != filepath.Base(path) || rows[0].IssuerIP != "10.0.0.10" || rows[0].TruncatedDNSName != "api.ex" {
+		t.Fatalf("unexpected truncated diagnostic: %+v", rows[0])
+	}
+	if len(txs) != 1 || txs[0].DNSName != "complete.example" {
+		t.Fatalf("scan did not continue to complete DNS query: %+v", txs)
+	}
+
+	disabledTxs, _, disabledRows, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
+		context.Background(),
+		[]string{path},
+		false,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("scan with diagnostics disabled: %v", err)
+	}
+	if len(disabledRows) != 0 {
+		t.Fatalf("diagnostics disabled returned rows: %+v", disabledRows)
+	}
+	if len(disabledTxs) != 1 || disabledTxs[0].DNSName != "complete.example" {
+		t.Fatalf("diagnostics-disabled scan created a truncated transaction: %+v", disabledTxs)
 	}
 }

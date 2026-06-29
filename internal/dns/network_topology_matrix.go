@@ -9,6 +9,7 @@ package dns
 
 import (
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -783,6 +784,67 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		return out[i].Port < out[j].Port
 	})
 
+	return out
+}
+
+// CompleteTopologyWithActiveDNS fills otherwise-unattributed public IPv4 rows
+// when active resolution produced exactly one canonical DNS name for the row's
+// destination IP. It never overwrites existing attribution.
+func CompleteTopologyWithActiveDNS(entries []TopologyEntry, resolutions []DNSNameIPv4Resolution) []TopologyEntry {
+	if len(entries) == 0 || len(resolutions) == 0 {
+		return entries
+	}
+
+	namesByIP := make(map[string]map[string]struct{}, len(resolutions))
+	for _, resolution := range resolutions {
+		name := canonicalDNSName(strings.TrimSpace(resolution.DNSName))
+		if !IsResolvableDNSName(name) {
+			continue
+		}
+		for _, rawIP := range resolution.IPv4s {
+			ip, ok := canonicalIPv4String(rawIP)
+			if !ok {
+				continue
+			}
+			addr, err := netip.ParseAddr(ip)
+			if err != nil || !isPublicIPv4(addr) {
+				continue
+			}
+			names := namesByIP[ip]
+			if names == nil {
+				names = make(map[string]struct{}, 1)
+				namesByIP[ip] = names
+			}
+			names[name] = struct{}{}
+		}
+	}
+	if len(namesByIP) == 0 {
+		return entries
+	}
+
+	out := append([]TopologyEntry(nil), entries...)
+	for i := range out {
+		row := &out[i]
+		if strings.TrimSpace(row.DNSName) != "" {
+			continue
+		}
+		ip, ok := canonicalIPv4String(row.DestinationIP)
+		if !ok {
+			continue
+		}
+		addr, err := netip.ParseAddr(ip)
+		if err != nil || !isPublicIPv4(addr) {
+			continue
+		}
+		names := namesByIP[ip]
+		if len(names) != 1 {
+			continue
+		}
+		for name := range names {
+			row.DNSName = name
+			row.DNSSource = "active+matrix"
+		}
+	}
 	return out
 }
 

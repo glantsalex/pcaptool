@@ -59,3 +59,23 @@ func TestFilterUnresolvedByTopologyAttribution_IgnoresIssuer(t *testing.T) {
 		t.Fatalf("unexpected remaining unresolved row: %#v", got[0])
 	}
 }
+
+func TestFilterUnresolvedByTruncatedDNSPacketsExactCanonicalMatch(t *testing.T) {
+	unresolved := []DNSUnresolvedStat{
+		{Name: "API.EXAMPL.", IssuerIP: "10.0.0.1", FirstPCAPFile: "a.pcap"},
+		{Name: "api.example.com", IssuerIP: "10.0.0.1", FirstPCAPFile: "b.pcap"},
+		{Name: "normal.example", IssuerIP: "10.0.0.2", FirstPCAPFile: "c.pcap"},
+	}
+	truncated := []TruncatedDNSPacket{
+		{TruncatedDNSName: "api.exampl"},
+		{TruncatedDNSName: " API.EXAMPL. "},
+	}
+
+	got := FilterUnresolvedByTruncatedDNSPackets(unresolved, truncated)
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2; got = %#v", len(got), got)
+	}
+	if got[0].Name != "api.example.com" || got[1].Name != "normal.example" {
+		t.Fatalf("unexpected remaining unresolved rows: %#v", got)
+	}
+}

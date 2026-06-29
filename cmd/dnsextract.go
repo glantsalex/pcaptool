@@ -9,11 +9,13 @@ package cmd
 
 import (
 	"context"
+	"encoding/csv"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +52,7 @@ var (
 	flagManifestOut                  string
 	flagPostHooks                    []string
 	flagFleetScanWorkers             int
+	resolveDNSNamesIPv4              = dns.ResolveDNSNamesIPv4
 )
 
 func init() {
@@ -256,7 +259,12 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	} else {
 		progress.SetStage("Pass 2: scanning DNS + TLS SNI...")
 	}
-	txs, _, err := dns.BuildTransactionsWithSNIFromPCAPs(ctx, files, !flagDisableSNI)
+	txs, _, truncatedDNSPackets, err := dns.BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
+		ctx,
+		files,
+		!flagDisableSNI,
+		true,
+	)
 	if err != nil {
 		return err
 	}
@@ -268,22 +276,18 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 
 	// --------------------------------------------------------------------
-	// Pass 2.5: resolve unresolved DNS names and inject IPv4 results
+	// Pass 2.5: validate active-resolution configuration. Resolution is
+	// intentionally deferred until after the packet-derived matrix is built.
 	// --------------------------------------------------------------------
+	activeResolveOpt := dns.DefaultResolveUnresolvedOptions()
 	if flagActiveResolve {
-		progress.SetStage("Pass 2.5: resolving unresolved DNS names (IPv4 only)...")
-
-		opt := dns.DefaultResolveUnresolvedOptions()
+		progress.SetStage("Pass 2.5: active resolve enabled; deferring to matrix completion...")
 		if strings.TrimSpace(flagActiveResolvers) != "" {
 			servers, err := parseResolverServers(flagActiveResolvers)
 			if err != nil {
 				return fmt.Errorf("--active-resolvers: %w", err)
 			}
-			opt.Servers = servers
-		}
-		txs, _, err = dns.ResolveUnresolvedDNSTransactions(ctx, txs, opt)
-		if err != nil {
-			return err
+			activeResolveOpt.Servers = servers
 		}
 	} else {
 		progress.SetStage("Pass 2.5: active resolve disabled; keeping unresolved DNS as-is...")
@@ -444,6 +448,26 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if flagConnectivityShort {
 		topo = dns.SquashNetworkTopologyShortWithOptions(topo, !flagUnsorted)
 	}
+
+	// Compute packet/topology unresolved names before optional active matrix
+	// completion. Active resolution must not alter this forensic artifact.
+	unresolvedFinal := dns.ComputeUnresolvedDNSFirstSeen(txs)
+	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
+	unresolvedFinal = dns.FilterUnresolvedByTruncatedDNSPackets(unresolvedFinal, truncatedDNSPackets)
+
+	if flagActiveResolve && len(unresolvedFinal) > 0 {
+		progress.SetStage("Pass 4: resolving unresolved DNS names for matrix completion...")
+		names := make([]string, 0, len(unresolvedFinal))
+		for _, row := range unresolvedFinal {
+			names = append(names, row.Name)
+		}
+		resolvedNames, err := resolveDNSNamesIPv4(ctx, names, activeResolveOpt, nil)
+		if err != nil {
+			return fmt.Errorf("active resolve for matrix completion: %w", err)
+		}
+		topo = dns.CompleteTopologyWithActiveDNS(topo, resolvedNames)
+	}
+
 	networkTopologyPath := ""
 	networkTopologyJSONPath := ""
 	if len(topo) > 0 {
@@ -489,8 +513,6 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// ---------------------------
 	// Extra report: unresolved DNS (post-topology attribution)
 	// ---------------------------
-	unresolvedFinal := dns.ComputeUnresolvedDNSFirstSeen(txs)
-	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
 	unresolvedDNSPath := ""
 	if len(unresolvedFinal) > 0 {
 		uf, err := om.Create("dns-unresolved-dns.txt")
@@ -569,6 +591,10 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		}
 		ipDNSAppendAuditPath = om.Path("ip-dns-append-audit.txt")
 	}
+	truncatedDNSPacketsPath, err := writeTruncatedDNSPacketsCSV(om, truncatedDNSPackets)
+	if err != nil {
+		return fmt.Errorf("write truncated DNS packets: %w", err)
+	}
 	filesMap := map[string]string{
 		"main_output":       mainOutputPath,
 		"service_endpoints": serviceEndpointsPath,
@@ -596,6 +622,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if ipDNSAppendAuditPath != "" {
 		filesMap["ip_dns_append_audit"] = ipDNSAppendAuditPath
+	}
+	if truncatedDNSPacketsPath != "" {
+		filesMap["truncated_dns_packets"] = truncatedDNSPacketsPath
 	}
 	for key, path := range synTrailArtifacts {
 		filesMap[key] = path
@@ -687,6 +716,57 @@ func writeIPDNSAppendAudit(
 		return err
 	}
 	return output.WriteIPDNSAppendAuditTable(f, rows)
+}
+
+func writeTruncatedDNSPacketsCSV(om *OutputManager, rows []dns.TruncatedDNSPacket) (string, error) {
+	f, err := om.Create("truncated-dns-packets.csv")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	if err := w.Write([]string{
+		"pcap_file",
+		"issuer_ip",
+		"truncated_dns_name",
+		"timestamp_utc",
+		"src_ip",
+		"dst_ip",
+		"src_port",
+		"dst_port",
+		"txid",
+		"reason",
+	}); err != nil {
+		return "", err
+	}
+
+	for _, row := range rows {
+		timestamp := ""
+		if !row.TimestampUTC.IsZero() {
+			timestamp = row.TimestampUTC.UTC().Format(time.RFC3339Nano)
+		}
+		if err := w.Write([]string{
+			row.PCAPFile,
+			row.IssuerIP,
+			row.TruncatedDNSName,
+			timestamp,
+			row.SrcIP,
+			row.DstIP,
+			strconv.FormatUint(uint64(row.SrcPort), 10),
+			strconv.FormatUint(uint64(row.DstPort), 10),
+			strconv.FormatUint(uint64(row.TxID), 10),
+			row.Reason,
+		}); err != nil {
+			return "", err
+		}
+	}
+
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 func parseResolverServers(s string) ([]string, error) {

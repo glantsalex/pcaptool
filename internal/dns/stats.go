@@ -358,3 +358,31 @@ func FilterUnresolvedByTopologyAttribution(unresolved []DNSUnresolvedStat, topo 
 	}
 	return out
 }
+
+// FilterUnresolvedByTruncatedDNSPackets drops unresolved rows whose canonical
+// DNS name exactly matches a name recovered from an incomplete DNS QNAME.
+func FilterUnresolvedByTruncatedDNSPackets(unresolved []DNSUnresolvedStat, truncated []TruncatedDNSPacket) []DNSUnresolvedStat {
+	if len(unresolved) == 0 || len(truncated) == 0 {
+		return unresolved
+	}
+
+	truncatedNames := make(map[string]struct{}, len(truncated))
+	for _, packet := range truncated {
+		name := canonicalDNSName(packet.TruncatedDNSName)
+		if name != "" {
+			truncatedNames[name] = struct{}{}
+		}
+	}
+	if len(truncatedNames) == 0 {
+		return unresolved
+	}
+
+	out := make([]DNSUnresolvedStat, 0, len(unresolved))
+	for _, row := range unresolved {
+		if _, found := truncatedNames[canonicalDNSName(row.Name)]; found {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out
+}

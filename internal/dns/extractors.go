@@ -26,22 +26,45 @@ type PacketExtractor interface {
 	Earliest() time.Time
 }
 
+// TruncatedDNSPacket describes a UDP/IPv4 DNS query whose QNAME was not fully
+// present in the captured UDP payload. It is diagnostic-only and is never used
+// to create or enrich a DNSTransaction.
+type TruncatedDNSPacket struct {
+	PCAPFile         string
+	IssuerIP         string
+	TruncatedDNSName string
+	TimestampUTC     time.Time
+	SrcIP            string
+	DstIP            string
+	SrcPort          uint16
+	DstPort          uint16
+	TxID             uint16
+	Reason           string
+}
+
 // -------------------------
 // DNS extractor (queries/responses → DNSTransaction map)
 // -------------------------
 
 type dnsExtractor struct {
-	txMap    map[TxKey][]*DNSTransaction
-	byLookup map[txLookupKey][]*DNSTransaction
-	earliest time.Time
-	first    bool
+	txMap                          map[TxKey][]*DNSTransaction
+	byLookup                       map[txLookupKey][]*DNSTransaction
+	truncatedDNSPackets            []TruncatedDNSPacket
+	collectTruncatedDNSDiagnostics bool
+	earliest                       time.Time
+	first                          bool
 }
 
 func newDNSExtractor() *dnsExtractor {
+	return newDNSExtractorWithDiagnostics(false)
+}
+
+func newDNSExtractorWithDiagnostics(collectTruncatedDNS bool) *dnsExtractor {
 	return &dnsExtractor{
-		txMap:    make(map[TxKey][]*DNSTransaction),
-		byLookup: make(map[txLookupKey][]*DNSTransaction),
-		first:    true,
+		txMap:                          make(map[TxKey][]*DNSTransaction),
+		byLookup:                       make(map[txLookupKey][]*DNSTransaction),
+		collectTruncatedDNSDiagnostics: collectTruncatedDNS,
+		first:                          true,
 	}
 }
 
@@ -54,6 +77,10 @@ func (e *dnsExtractor) Earliest() time.Time {
 }
 
 func (e *dnsExtractor) Map() map[TxKey][]*DNSTransaction { return e.txMap }
+
+func (e *dnsExtractor) TruncatedDNSPackets() []TruncatedDNSPacket {
+	return e.truncatedDNSPackets
+}
 
 func canonicalDNSName(name string) string {
 	return strings.ToLower(strings.TrimSpace(strings.TrimSuffix(name, ".")))
@@ -135,6 +162,28 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 		payload = tcp.Payload
 	} else {
 		return
+	}
+
+	if ip4Layer != nil && proto == L4ProtoUDP && (srcPort == 53 || dstPort == 53) {
+		if id, name, reason, ok := extractTruncatedDNSQueryDiagnostic(payload); ok {
+			if e.collectTruncatedDNSDiagnostics {
+				e.truncatedDNSPackets = append(e.truncatedDNSPackets, TruncatedDNSPacket{
+					PCAPFile:         filepath.Base(fileBase),
+					IssuerIP:         srcIP.String(),
+					TruncatedDNSName: name,
+					TimestampUTC:     ts.UTC(),
+					SrcIP:            srcIP.String(),
+					DstIP:            dstIP.String(),
+					SrcPort:          srcPort,
+					DstPort:          dstPort,
+					TxID:             id,
+					Reason:           reason,
+				})
+			}
+			// Incomplete QNAMEs are diagnostic-only. Do not let them reach the
+			// normal DNS layer or raw-query transaction paths.
+			return
+		}
 	}
 
 	// We only care about DNS layer packets.
@@ -315,6 +364,82 @@ func extractDNSQueryNameFromRaw(payload []byte, proto L4Proto, captureTruncated 
 	}
 
 	return id, canonicalDNSName(name), true
+}
+
+const (
+	truncatedDNSReasonLabel              = "truncated_label"
+	truncatedDNSReasonMissingRoot        = "missing_root_label"
+	truncatedDNSReasonCompressionPointer = "unsupported_compression_pointer"
+)
+
+func extractTruncatedDNSQueryDiagnostic(payload []byte) (uint16, string, string, bool) {
+	if len(payload) < 12 {
+		return 0, "", "", false
+	}
+
+	id := binary.BigEndian.Uint16(payload[:2])
+	flags := binary.BigEndian.Uint16(payload[2:4])
+	if flags&0x8000 != 0 {
+		return 0, "", "", false
+	}
+	if binary.BigEndian.Uint16(payload[4:6]) == 0 {
+		return 0, "", "", false
+	}
+
+	name, reason, ok := extractTruncatedDNSQName(payload)
+	if !ok {
+		return 0, "", "", false
+	}
+	return id, canonicalDNSName(name), reason, true
+}
+
+// extractTruncatedDNSQName returns only QNAME prefixes proven to be present in
+// msg. A normally terminated QNAME is complete and therefore not diagnostic.
+func extractTruncatedDNSQName(msg []byte) (string, string, bool) {
+	if len(msg) < 12 {
+		return "", "", false
+	}
+
+	labels := make([]string, 0, 8)
+	off := 12
+	for steps := 0; steps < 128; steps++ {
+		if off >= len(msg) {
+			return strings.Join(labels, "."), truncatedDNSReasonMissingRoot, true
+		}
+
+		labelLen := int(msg[off])
+		off++
+		if labelLen == 0 {
+			return "", "", false
+		}
+		if labelLen&0xC0 == 0xC0 {
+			if len(labels) == 0 {
+				return "", "", false
+			}
+			return strings.Join(labels, "."), truncatedDNSReasonCompressionPointer, true
+		}
+		if labelLen&0xC0 != 0 || labelLen > 63 {
+			return "", "", false
+		}
+
+		if off+labelLen > len(msg) {
+			if off < len(msg) {
+				if label, valid := parseDNSLabelASCII(msg[off:]); valid && label != "" {
+					labels = append(labels, label)
+				}
+			}
+			return strings.Join(labels, "."), truncatedDNSReasonLabel, true
+		}
+
+		label, valid := parseDNSLabelASCII(msg[off : off+labelLen])
+		if !valid || label == "" {
+			return "", "", false
+		}
+		labels = append(labels, label)
+		off += labelLen
+	}
+
+	return "", "", false
 }
 
 func extractDNSResponseFromRaw(payload []byte, proto L4Proto, captureTruncated bool) (uint16, string, []net.IP, bool) {

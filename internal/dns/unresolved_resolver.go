@@ -28,6 +28,18 @@ type ResolveUnresolvedOptions struct {
 	Servers []string
 }
 
+// IPv4LookupFunc resolves one DNS name. Implementations must honor ctx. Callers
+// may inject a deterministic implementation for tests; a nil function uses the
+// configured UDP resolvers.
+type IPv4LookupFunc func(context.Context, string) ([]net.IP, error)
+
+// DNSNameIPv4Resolution is one canonical DNS name and its sorted, unique IPv4
+// results from active resolution.
+type DNSNameIPv4Resolution struct {
+	DNSName string
+	IPv4s   []string
+}
+
 // makeResolver creates a net.Resolver that uses the given DNS servers (UDP/53)
 // in a round-robin manner.
 func makeResolver(servers []string, timeout time.Duration) *net.Resolver {
@@ -70,8 +82,13 @@ func IsResolvableDNSName(name string) bool {
 	if ls == "localhost" {
 		return false
 	}
-	if strings.HasSuffix(ls, ".local") {
+	if ls == "in-addr.arpa" || ls == "ip6.arpa" {
 		return false
+	}
+	for _, suffix := range []string{".local", ".loc", ".internal", ".eth0", ".in-addr.arpa", ".ip6.arpa"} {
+		if strings.HasSuffix(ls, suffix) {
+			return false
+		}
 	}
 
 	// Must contain at least one dot (FQDN-ish)
@@ -112,6 +129,140 @@ func IsResolvableDNSName(name string) bool {
 	}
 
 	return true
+}
+
+// ResolveDNSNamesIPv4 actively resolves a finite set of DNS names without
+// mutating DNS transactions. Work is bounded by the candidate count, a maximum
+// of 32 workers, and the per-name timeout. Individual lookup failures are
+// omitted; parent-context cancellation aborts the operation.
+func ResolveDNSNamesIPv4(
+	ctx context.Context,
+	names []string,
+	opt ResolveUnresolvedOptions,
+	lookup IPv4LookupFunc,
+) ([]DNSNameIPv4Resolution, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	def := DefaultResolveUnresolvedOptions()
+	if opt.Workers <= 0 {
+		opt.Workers = def.Workers
+	}
+	if opt.Timeout <= 0 {
+		opt.Timeout = def.Timeout
+	}
+	if len(opt.Servers) == 0 {
+		opt.Servers = append([]string(nil), def.Servers...)
+	}
+
+	unique := make(map[string]struct{}, len(names))
+	for _, raw := range names {
+		name := canonicalDNSName(strings.TrimSpace(raw))
+		if !IsResolvableDNSName(name) {
+			continue
+		}
+		unique[name] = struct{}{}
+	}
+	if len(unique) == 0 {
+		return nil, nil
+	}
+
+	candidates := make([]string, 0, len(unique))
+	for name := range unique {
+		candidates = append(candidates, name)
+	}
+	sort.Strings(candidates)
+
+	if lookup == nil {
+		resolver := makeResolver(opt.Servers, opt.Timeout)
+		lookup = func(ctx context.Context, name string) ([]net.IP, error) {
+			return resolver.LookupIP(ctx, "ip4", name)
+		}
+	}
+
+	type result struct {
+		name string
+		ips  []string
+	}
+
+	workers := min(opt.Workers, len(candidates), 32)
+	if workers < 1 {
+		workers = 1
+	}
+
+	jobs := make(chan string)
+	results := make(chan result, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case name, ok := <-jobs:
+					if !ok {
+						return
+					}
+
+					lookupCtx, cancel := context.WithTimeout(ctx, opt.Timeout)
+					ips, err := lookup(lookupCtx, name)
+					cancel()
+					if err != nil {
+						continue
+					}
+
+					seen := make(map[string]struct{}, len(ips))
+					ipv4s := make([]string, 0, len(ips))
+					for _, ip := range ips {
+						if ip4 := ip.To4(); ip4 != nil {
+							s := ip4.String()
+							if _, exists := seen[s]; exists {
+								continue
+							}
+							seen[s] = struct{}{}
+							ipv4s = append(ipv4s, s)
+						}
+					}
+					if len(ipv4s) == 0 {
+						continue
+					}
+					sort.Strings(ipv4s)
+					select {
+					case <-ctx.Done():
+						return
+					case results <- result{name: name, ips: ipv4s}:
+					}
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		for _, name := range candidates {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- name:
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	out := make([]DNSNameIPv4Resolution, 0, len(candidates))
+	for item := range results {
+		out = append(out, DNSNameIPv4Resolution{DNSName: item.name, IPv4s: item.ips})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DNSName < out[j].DNSName })
+	return out, nil
 }
 
 // ResolveUnresolvedDNSTransactions:

@@ -104,6 +104,65 @@ func TestCSVNameForIP_MultiNameIsRejectedAsAmbiguous(t *testing.T) {
 	}
 }
 
+func TestCompleteTopologyWithActiveDNSConservativeCompletion(t *testing.T) {
+	in := []TopologyEntry{
+		{IssuerIP: "10.0.0.1", DestinationIP: "8.8.8.8", DNSName: "", DNSSource: "mid-session", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.2", DestinationIP: "8.8.4.4", DNSName: "already.example", DNSSource: "dns+synack", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.3", DestinationIP: "9.9.9.9", DNSName: " ", DNSSource: "mid-session", Protocol: "udp", Port: 1234},
+		{IssuerIP: "10.0.0.4", DestinationIP: "1.1.1.1", DNSName: "", DNSSource: "mid-session", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.5", DestinationIP: "10.1.2.3", DNSName: "", DNSSource: "", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.6", DestinationIP: "2001:4860:4860::8888", DNSName: "", DNSSource: "", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.7", DestinationIP: "4.4.4.4", DNSName: "", DNSSource: "", Protocol: "tcp", Port: 443},
+	}
+	resolutions := []DNSNameIPv4Resolution{
+		{DNSName: " API.EXAMPLE.COM. ", IPv4s: []string{"8.8.8.8", "8.8.4.4", "10.1.2.3", "2001:4860:4860::8888"}},
+		{DNSName: "one.example.com", IPv4s: []string{"9.9.9.9"}},
+		{DNSName: "two.example.com", IPv4s: []string{"9.9.9.9"}},
+		{DNSName: "cloud.example.com", IPv4s: []string{"1.1.1.1"}},
+	}
+
+	got := CompleteTopologyWithActiveDNS(in, resolutions)
+	if got[0].DNSName != "api.example.com" || got[0].DNSSource != "active+matrix" {
+		t.Fatalf("unique public match not completed: %#v", got[0])
+	}
+	if got[1].DNSName != "already.example" || got[1].DNSSource != "dns+synack" {
+		t.Fatalf("existing attribution was overwritten: %#v", got[1])
+	}
+	for _, idx := range []int{2, 4, 5, 6} {
+		if got[idx].DNSName != in[idx].DNSName || got[idx].DNSSource != in[idx].DNSSource {
+			t.Fatalf("row %d unexpectedly completed: got=%#v input=%#v", idx, got[idx], in[idx])
+		}
+	}
+	if got[3].DNSName != "cloud.example.com" || got[3].DNSSource != "active+matrix" {
+		t.Fatalf("second unique public match not completed: %#v", got[3])
+	}
+	if in[0].DNSName != "" || in[0].DNSSource != "mid-session" {
+		t.Fatalf("input topology mutated: %#v", in[0])
+	}
+}
+
+func TestCompleteTopologyWithActiveDNSDoesNotMutateTransactionsOrCSVLearning(t *testing.T) {
+	tx := &DNSTransaction{DNSName: "api.example.com", IssuerIP: net.ParseIP("10.0.0.1")}
+	got := CompleteTopologyWithActiveDNS(
+		[]TopologyEntry{{
+			IssuerIP:      "10.0.0.1",
+			DestinationIP: "8.8.8.8",
+			Protocol:      "tcp",
+			Port:          443,
+		}},
+		[]DNSNameIPv4Resolution{{DNSName: "api.example.com", IPv4s: []string{"8.8.8.8"}}},
+	)
+	if got[0].DNSName != "api.example.com" || got[0].DNSSource != "active+matrix" {
+		t.Fatalf("topology was not completed: %#v", got)
+	}
+	if len(tx.ResolvedIPs) != 0 || tx.NameEvidence != EvNone {
+		t.Fatalf("active matrix completion mutated transaction: %#v", tx)
+	}
+	if learned := StrongObservedIPDNSPairsFromTransactions([]*DNSTransaction{tx}); len(learned) != 0 {
+		t.Fatalf("active matrix completion produced CSV learning candidates: %#v", learned)
+	}
+}
+
 func TestBuildNetworkTopologyMatrixEntries_SortsIssuersByEndpointCountDesc(t *testing.T) {
 	// 10.0.0.9 has two unique endpoints (same dst, different ports).
 	// 10.0.0.10 has one endpoint.

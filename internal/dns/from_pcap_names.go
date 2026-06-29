@@ -31,12 +31,25 @@ import (
 // when includeSNI is true. SNI synthetic txs already have DestinationPort set
 // and are skipped by correlation index build.
 func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string, includeSNI bool) ([]*DNSTransaction, time.Time, error) {
+	txs, earliest, _, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(ctx, files, includeSNI, false)
+	return txs, earliest, err
+}
+
+// BuildTransactionsWithSNIFromPCAPsWithDiagnostics performs the normal DNS/SNI
+// scan and optionally collects diagnostic-only truncated UDP DNS query records.
+func BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
+	ctx context.Context,
+	files []string,
+	includeSNI bool,
+	collectTruncatedDNS bool,
+) ([]*DNSTransaction, time.Time, []TruncatedDNSPacket, error) {
 	type fileResult struct {
-		txMap    map[TxKey][]*DNSTransaction
-		sniTxs   []*DNSTransaction
-		earliest time.Time
-		err      error
-		file     string
+		txMap               map[TxKey][]*DNSTransaction
+		sniTxs              []*DNSTransaction
+		truncatedDNSPackets []TruncatedDNSPacket
+		earliest            time.Time
+		err                 error
+		file                string
 	}
 
 	fileCh := make(chan string)
@@ -51,13 +64,19 @@ func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string, incl
 		go func() {
 			defer wg.Done()
 			for path := range fileCh {
-				txMap, sniTxs, earliest, err := scanDNSAndSNIInFile(ctx, path, includeSNI)
+				txMap, sniTxs, truncatedDNSPackets, earliest, err := scanDNSAndSNIInFile(
+					ctx,
+					path,
+					includeSNI,
+					collectTruncatedDNS,
+				)
 				resCh <- fileResult{
-					txMap:    txMap,
-					sniTxs:   sniTxs,
-					earliest: earliest,
-					err:      err,
-					file:     path,
+					txMap:               txMap,
+					sniTxs:              sniTxs,
+					truncatedDNSPackets: truncatedDNSPackets,
+					earliest:            earliest,
+					err:                 err,
+					file:                path,
 				}
 			}
 		}()
@@ -78,6 +97,7 @@ func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string, incl
 	// Global merge state (single goroutine consumer => no locks needed)
 	globalMap := make(map[TxKey][]*DNSTransaction)
 	var globalSNI []*DNSTransaction
+	var truncatedDNSPackets []TruncatedDNSPacket
 
 	// Global SNI dedup across files
 	type sniDedupKey struct {
@@ -97,7 +117,7 @@ func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string, incl
 
 	for res := range resCh {
 		if res.err != nil {
-			return nil, time.Time{}, res.err
+			return nil, time.Time{}, nil, res.err
 		}
 
 		doneFiles++
@@ -142,6 +162,8 @@ func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string, incl
 			seenSNI[k] = struct{}{}
 			globalSNI = append(globalSNI, tx)
 		}
+
+		truncatedDNSPackets = append(truncatedDNSPackets, res.truncatedDNSPackets...)
 	}
 
 	// Convert globalMap to slice
@@ -164,15 +186,48 @@ func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string, incl
 		}
 		return ti.Before(tj)
 	})
+	sort.Slice(truncatedDNSPackets, func(i, j int) bool {
+		a, b := truncatedDNSPackets[i], truncatedDNSPackets[j]
+		if !a.TimestampUTC.Equal(b.TimestampUTC) {
+			return a.TimestampUTC.Before(b.TimestampUTC)
+		}
+		if a.PCAPFile != b.PCAPFile {
+			return a.PCAPFile < b.PCAPFile
+		}
+		if a.SrcIP != b.SrcIP {
+			return a.SrcIP < b.SrcIP
+		}
+		if a.DstIP != b.DstIP {
+			return a.DstIP < b.DstIP
+		}
+		if a.SrcPort != b.SrcPort {
+			return a.SrcPort < b.SrcPort
+		}
+		if a.DstPort != b.DstPort {
+			return a.DstPort < b.DstPort
+		}
+		if a.TxID != b.TxID {
+			return a.TxID < b.TxID
+		}
+		if a.TruncatedDNSName != b.TruncatedDNSName {
+			return a.TruncatedDNSName < b.TruncatedDNSName
+		}
+		return a.Reason < b.Reason
+	})
 
 	progress.UpdateBar(totalFiles, totalFiles, "DNS+SNI scan complete")
-	return txs, globalEarliest, nil
+	return txs, globalEarliest, truncatedDNSPackets, nil
 }
 
-func scanDNSAndSNIInFile(ctx context.Context, path string, includeSNI bool) (map[TxKey][]*DNSTransaction, []*DNSTransaction, time.Time, error) {
+func scanDNSAndSNIInFile(
+	ctx context.Context,
+	path string,
+	includeSNI bool,
+	collectTruncatedDNS bool,
+) (map[TxKey][]*DNSTransaction, []*DNSTransaction, []TruncatedDNSPacket, time.Time, error) {
 	handle, err := pcap.OpenOffline(path)
 	if err != nil {
-		return nil, nil, time.Time{}, fmt.Errorf("open pcap %s: %w", path, err)
+		return nil, nil, nil, time.Time{}, fmt.Errorf("open pcap %s: %w", path, err)
 	}
 	defer handle.Close()
 
@@ -183,13 +238,13 @@ func scanDNSAndSNIInFile(ctx context.Context, path string, includeSNI bool) (map
 		filter = "udp port 53 or tcp"
 	}
 	if err := handle.SetBPFFilter(filter); err != nil {
-		return nil, nil, time.Time{}, fmt.Errorf("set BPF filter on %s: %w", path, err)
+		return nil, nil, nil, time.Time{}, fmt.Errorf("set BPF filter on %s: %w", path, err)
 	}
 
 	src := gopacket.NewPacketSource(handle, handle.LinkType())
 	src.NoCopy = true
 
-	dnsEx := newDNSExtractor()
+	dnsEx := newDNSExtractorWithDiagnostics(collectTruncatedDNS)
 	var sniEx *sniExtractor
 	if includeSNI {
 		sniEx = newSNIExtractor()
@@ -199,7 +254,7 @@ func scanDNSAndSNIInFile(ctx context.Context, path string, includeSNI bool) (map
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, nil, time.Time{}, ctx.Err()
+			return nil, nil, nil, time.Time{}, ctx.Err()
 
 		case pkt, ok := <-packets:
 			if !ok {
@@ -214,7 +269,7 @@ func scanDNSAndSNIInFile(ctx context.Context, path string, includeSNI bool) (map
 				if sniEx != nil {
 					sniTxs = sniEx.Slice()
 				}
-				return dnsEx.Map(), sniTxs, earliest, nil
+				return dnsEx.Map(), sniTxs, dnsEx.TruncatedDNSPackets(), earliest, nil
 			}
 
 			base := filepath.Base(path)
