@@ -71,6 +71,22 @@ func TestStrongObservedIPDNSPairsFromTransactions(t *testing.T) {
 	}
 }
 
+func TestLoadIPToDNSFromFile_DNSIPFormatCanonicalizesEVSEPair(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dns-ip.csv")
+	if err := os.WriteFile(path, []byte("EVSE.Total-EV-Charge.COM., 63.183.18.177\n"), 0o644); err != nil {
+		t.Fatalf("write dns-ip fixture: %v", err)
+	}
+
+	got, err := LoadIPToDNSFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadIPToDNSFromFile: %v", err)
+	}
+	names := got["63.183.18.177"]
+	if len(names) != 1 || names[0] != "evse.total-ev-charge.com" {
+		t.Fatalf("loaded names=%#v, want one canonical EVSE name", names)
+	}
+}
+
 func TestMergeIPToDNSMaps_ReturnsOnlyNewPairs(t *testing.T) {
 	base := map[string][]string{
 		"34.120.10.1": {"api.example.com"},

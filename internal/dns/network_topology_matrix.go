@@ -594,14 +594,21 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 						// Cross-port conflict handling:
 						// if strong DNS exists for same issuer|dst|proto and CSV DNS differs,
 						// downgrade CSV row to unresolved to avoid cross-port contamination
-						// from fallback tables while preserving endpoint visibility.
+						// from fallback tables while preserving endpoint visibility. Keep a
+						// csv+mid row when the current CSV still has that exact unique name.
+						preserveCSVMid := false
+						if strings.EqualFold(strings.TrimSpace(row.DNSSource), "csv+mid") {
+							if csvName, ok := csvNameForIP(ipToDNS, row.DestinationIP, true); ok {
+								preserveCSVMid = normalizeName(csvName) == normalizeName(row.DNSName)
+							}
+						}
 						k3 := key3{
 							issuer: row.IssuerIP,
 							dst:    row.DestinationIP,
 							proto:  row.Protocol,
 						}
 						if strongNames := strongNamesByTuple3[k3]; len(strongNames) > 0 {
-							if _, ok := strongNames[normalizeName(row.DNSName)]; !ok {
+							if _, ok := strongNames[normalizeName(row.DNSName)]; !ok && !preserveCSVMid {
 								row.DNSName = ""
 								if strings.EqualFold(strings.TrimSpace(row.DNSSource), "csv+mid") {
 									row.DNSSource = "mid-session"
@@ -615,91 +622,6 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 				out2 = append(out2, row)
 			}
 			out = out2
-		}
-	}
-
-	// ------------------------------------------------------------
-	// Run-local peer completion for unresolved rows.
-	//
-	// If a PUBLIC (dstIP, proto, port) tuple has a unique strong resolved DNS
-	// name elsewhere in the same run, use it to fill unresolved rows for that
-	// exact endpoint tuple across issuers.
-	//
-	// Only direct dns+synack / sni+synack evidence may donate a name. Connection-
-	// inferred, CSV, active, and mid-session rows never act as donors. Ambiguous
-	// tuples with more than one unique direct name are left unresolved.
-	// ------------------------------------------------------------
-	if len(out) > 0 {
-		type peerKey struct {
-			dst, proto string
-			port       uint16
-		}
-		type donorSet struct {
-			directNames map[string]string
-		}
-
-		isDirectPeerDonor := func(src string) bool {
-			s := strings.ToLower(strings.TrimSpace(src))
-			return s == "dns+synack" || s == "sni+synack"
-		}
-		donorsByTuple := make(map[peerKey]*donorSet, len(out))
-		for _, row := range out {
-			if strings.TrimSpace(row.DNSName) == "" {
-				continue
-			}
-			dst := net.ParseIP(row.DestinationIP)
-			if dst == nil || dst.To4() == nil || dst.IsPrivate() {
-				continue
-			}
-
-			pk := peerKey{
-				dst:   row.DestinationIP,
-				proto: row.Protocol,
-				port:  row.Port,
-			}
-			ds := donorsByTuple[pk]
-			if ds == nil {
-				ds = &donorSet{
-					directNames: make(map[string]string, 1),
-				}
-				donorsByTuple[pk] = ds
-			}
-
-			name := normalize(row.DNSName)
-			if name == "" {
-				continue
-			}
-			if isDirectPeerDonor(row.DNSSource) {
-				ds.directNames[name] = row.DNSName
-			}
-		}
-
-		for i := range out {
-			row := &out[i]
-			if strings.TrimSpace(row.DNSName) != "" {
-				continue
-			}
-			dst := net.ParseIP(row.DestinationIP)
-			if dst == nil || dst.To4() == nil || dst.IsPrivate() {
-				continue
-			}
-
-			pk := peerKey{
-				dst:   row.DestinationIP,
-				proto: row.Protocol,
-				port:  row.Port,
-			}
-			ds := donorsByTuple[pk]
-			if ds == nil {
-				continue
-			}
-
-			if len(ds.directNames) == 1 {
-				for _, orig := range ds.directNames {
-					row.DNSName = orig
-					row.DNSSource = "peer+ipport"
-				}
-			}
 		}
 	}
 
@@ -764,6 +686,93 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		return out[i].Port < out[j].Port
 	})
 
+	return out
+}
+
+// isSafeDNSDonationDonor recognizes only direct, canonical packet evidence.
+// Inferred, CSV, active-resolution, and previously donated sources must never
+// recursively donate names.
+func isSafeDNSDonationDonor(source string) bool {
+	return source == "dns+synack" || source == "sni+synack"
+}
+
+// CompleteTopologyWithDNSDonation fills otherwise-unattributed public IPv4
+// rows from a unique direct DNS/SNI name observed for the exact destination
+// IP, normalized protocol, and port elsewhere in the same run. It never
+// overwrites existing attribution and does not mutate entries.
+func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+
+	type donationKey struct {
+		destinationIP string
+		protocol      string
+		port          uint16
+	}
+
+	keyFor := func(row TopologyEntry) (donationKey, bool) {
+		if row.Port == 0 {
+			return donationKey{}, false
+		}
+		ip, ok := canonicalIPv4String(row.DestinationIP)
+		if !ok {
+			return donationKey{}, false
+		}
+		addr, err := netip.ParseAddr(ip)
+		if err != nil || !isPublicIPv4(addr) {
+			return donationKey{}, false
+		}
+		protocol := strings.ToLower(strings.TrimSpace(row.Protocol))
+		if protocol == "" {
+			return donationKey{}, false
+		}
+		return donationKey{destinationIP: ip, protocol: protocol, port: row.Port}, true
+	}
+
+	donors := make(map[donationKey]map[string]struct{}, len(entries))
+	for _, row := range entries {
+		if !isSafeDNSDonationDonor(row.DNSSource) {
+			continue
+		}
+		name := canonicalDNSName(row.DNSName)
+		if !IsResolvableDNSName(name) {
+			continue
+		}
+		key, ok := keyFor(row)
+		if !ok {
+			continue
+		}
+		names := donors[key]
+		if names == nil {
+			names = make(map[string]struct{}, 1)
+			donors[key] = names
+		}
+		names[name] = struct{}{}
+	}
+	if len(donors) == 0 {
+		return entries
+	}
+
+	out := append([]TopologyEntry(nil), entries...)
+	for i := range out {
+		row := &out[i]
+		if strings.TrimSpace(row.DNSName) != "" {
+			continue
+		}
+		key, ok := keyFor(*row)
+		if !ok {
+			continue
+		}
+		names := donors[key]
+		if len(names) != 1 {
+			continue
+		}
+		for name := range names {
+			row.DNSName = name
+			row.DNSSource = "donated+ipport"
+		}
+	}
 	return out
 }
 
