@@ -625,12 +625,9 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	// name elsewhere in the same run, use it to fill unresolved rows for that
 	// exact endpoint tuple across issuers.
 	//
-	// Donor priority:
-	//   1) direct donor:  dns+synack / sni+synack        -> peer+ipport
-	//   2) inferred donor: dns+conn+synack               -> peer+ipport+conn
-	//
-	// CSV/active/mid-session rows never act as donors. Ambiguous tuples (more than
-	// one unique donor name in the same tier) are left unresolved.
+	// Only direct dns+synack / sni+synack evidence may donate a name. Connection-
+	// inferred, CSV, active, and mid-session rows never act as donors. Ambiguous
+	// tuples with more than one unique direct name are left unresolved.
 	// ------------------------------------------------------------
 	if len(out) > 0 {
 		type peerKey struct {
@@ -638,19 +635,13 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			port       uint16
 		}
 		type donorSet struct {
-			directNames   map[string]string
-			inferredNames map[string]string
+			directNames map[string]string
 		}
 
 		isDirectPeerDonor := func(src string) bool {
 			s := strings.ToLower(strings.TrimSpace(src))
 			return s == "dns+synack" || s == "sni+synack"
 		}
-		isInferredPeerDonor := func(src string) bool {
-			s := strings.ToLower(strings.TrimSpace(src))
-			return s == "dns+conn+synack"
-		}
-
 		donorsByTuple := make(map[peerKey]*donorSet, len(out))
 		for _, row := range out {
 			if strings.TrimSpace(row.DNSName) == "" {
@@ -669,8 +660,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			ds := donorsByTuple[pk]
 			if ds == nil {
 				ds = &donorSet{
-					directNames:   make(map[string]string, 1),
-					inferredNames: make(map[string]string, 1),
+					directNames: make(map[string]string, 1),
 				}
 				donorsByTuple[pk] = ds
 			}
@@ -679,11 +669,8 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			if name == "" {
 				continue
 			}
-			switch {
-			case isDirectPeerDonor(row.DNSSource):
+			if isDirectPeerDonor(row.DNSSource) {
 				ds.directNames[name] = row.DNSName
-			case isInferredPeerDonor(row.DNSSource):
-				ds.inferredNames[name] = row.DNSName
 			}
 		}
 
@@ -711,13 +698,6 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 				for _, orig := range ds.directNames {
 					row.DNSName = orig
 					row.DNSSource = "peer+ipport"
-				}
-				continue
-			}
-			if len(ds.directNames) == 0 && len(ds.inferredNames) == 1 {
-				for _, orig := range ds.inferredNames {
-					row.DNSName = orig
-					row.DNSSource = "peer+ipport+conn"
 				}
 			}
 		}

@@ -578,7 +578,61 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionUsesUniqueDirectDonor(t
 	}
 }
 
-func TestBuildNetworkTopologyMatrixEntries_PeerCompletionUsesUniqueInferredDonor(t *testing.T) {
+func TestBuildNetworkTopologyMatrixEntries_PeerCompletionDoesNotCrossDestinationIP(t *testing.T) {
+	p443 := uint16(443)
+	txTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
+	txs := []*DNSTransaction{
+		{
+			RequestTime:     txTime,
+			IssuerIP:        net.ParseIP("10.116.12.67"),
+			DNSName:         "direct.example.com",
+			ResolvedIPs:     []net.IP{net.ParseIP("13.55.209.128")},
+			DestinationPort: &p443,
+			ProtocolL4:      L4ProtoTCP,
+			NameEvidence:    EvDNSAnswer,
+			ResolvedIPEvidence: map[string]Evidence{
+				"13.55.209.128": EvDNSAnswer,
+			},
+		},
+	}
+	edges := []connectivity.Edge{
+		{
+			IssuerIP:  "10.116.12.67",
+			DstIP:     "13.55.209.128",
+			Protocol:  connectivity.ProtoTCP,
+			Port:      443,
+			FirstSeen: txTime.Add(time.Second),
+		},
+		{
+			IssuerIP:  "10.116.12.67",
+			DstIP:     "13.55.209.129",
+			Protocol:  connectivity.ProtoTCP,
+			Port:      443,
+			FirstSeen: txTime.Add(2 * time.Second),
+		},
+	}
+
+	out := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, DefaultTopologyBuildOptions())
+	if len(out) != 2 {
+		t.Fatalf("expected 2 rows, got %d: %#v", len(out), out)
+	}
+	for _, row := range out {
+		switch row.DestinationIP {
+		case "13.55.209.128":
+			if row.DNSName != "direct.example.com" || row.DNSSource != "dns+synack" {
+				t.Fatalf("direct donor row changed: %#v", row)
+			}
+		case "13.55.209.129":
+			if row.DNSName != "" || row.DNSSource != "mid-session" {
+				t.Fatalf("direct donor crossed destination IP: %#v", row)
+			}
+		default:
+			t.Fatalf("unexpected destination row: %#v", row)
+		}
+	}
+}
+
+func TestBuildNetworkTopologyMatrixEntries_PeerCompletionRejectsUniqueInferredDonor(t *testing.T) {
 	p8883 := uint16(8883)
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
@@ -626,20 +680,86 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionUsesUniqueInferredDonor
 		t.Fatalf("expected 2 rows, got %d: %#v", len(out), out)
 	}
 
-	var foundPeer bool
+	var foundDonor, foundUnresolvedPeer bool
 	for _, row := range out {
+		if row.IssuerIP == "10.116.12.67" && row.DestinationIP == "13.55.209.128" && row.Port == 8883 {
+			if row.DNSName != "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c" || row.DNSSource != "dns+conn+synack" {
+				t.Fatalf("inferred donor row changed unexpectedly: %#v", row)
+			}
+			foundDonor = true
+		}
 		if row.IssuerIP == "10.116.12.7" && row.DestinationIP == "13.55.209.128" && row.Port == 8883 {
-			if row.DNSName != "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c" {
-				t.Fatalf("expected propagated DNS name, got %#v", row)
+			if row.DNSName != "" || row.DNSSource != "mid-session" {
+				t.Fatalf("inferred donor completed peer row: %#v", row)
 			}
-			if row.DNSSource != "peer+ipport+conn" {
-				t.Fatalf("expected peer+ipport+conn source, got %#v", row)
-			}
-			foundPeer = true
+			foundUnresolvedPeer = true
 		}
 	}
-	if !foundPeer {
-		t.Fatalf("expected unresolved peer row to be completed from inferred donor")
+	if !foundDonor || !foundUnresolvedPeer {
+		t.Fatalf("expected unchanged donor and unresolved peer; got %#v", out)
+	}
+}
+
+func TestBuildNetworkTopologyMatrixEntries_PeerCompletionDoesNotAmplifyInferredNameAcrossDestinations(t *testing.T) {
+	p443 := uint16(443)
+	txTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
+	txs := []*DNSTransaction{
+		{
+			RequestTime:     txTime,
+			IssuerIP:        net.ParseIP("10.245.200.86"),
+			DNSName:         "www.cisco.com",
+			ResolvedIPs:     []net.IP{net.ParseIP("3.5.120.27")},
+			DestinationPort: &p443,
+			ProtocolL4:      L4ProtoTCP,
+			NameEvidence:    EvDNSAnswer,
+			ResolvedIPEvidence: map[string]Evidence{
+				"3.5.120.27": EvDNSAnswer | EvConnInferred,
+			},
+		},
+		{
+			RequestTime:     txTime.Add(time.Second),
+			IssuerIP:        net.ParseIP("10.118.217.9"),
+			DNSName:         "www.cisco.com",
+			ResolvedIPs:     []net.IP{net.ParseIP("52.219.170.186")},
+			DestinationPort: &p443,
+			ProtocolL4:      L4ProtoTCP,
+			NameEvidence:    EvDNSAnswer,
+			ResolvedIPEvidence: map[string]Evidence{
+				"52.219.170.186": EvDNSAnswer | EvConnInferred,
+			},
+		},
+	}
+	edges := []connectivity.Edge{
+		{IssuerIP: "10.245.200.86", DstIP: "3.5.120.27", Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: txTime.Add(2 * time.Second)},
+		{IssuerIP: "10.245.214.82", DstIP: "3.5.120.27", Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: txTime.Add(3 * time.Second)},
+		{IssuerIP: "10.118.217.9", DstIP: "52.219.170.186", Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: txTime.Add(4 * time.Second)},
+		{IssuerIP: "10.118.216.36", DstIP: "52.219.170.186", Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: txTime.Add(5 * time.Second)},
+	}
+
+	out := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, DefaultTopologyBuildOptions())
+	if len(out) != 4 {
+		t.Fatalf("expected 4 rows, got %d: %#v", len(out), out)
+	}
+
+	donors, unresolvedPeers := 0, 0
+	for _, row := range out {
+		switch row.DNSSource {
+		case "dns+conn+synack":
+			if row.DNSName != "www.cisco.com" {
+				t.Fatalf("unexpected inferred donor name: %#v", row)
+			}
+			donors++
+		case "peer+ipport+conn":
+			t.Fatalf("inferred name was amplified to peer: %#v", row)
+		default:
+			if row.DNSName != "" {
+				t.Fatalf("unexpected named non-donor row: %#v", row)
+			}
+			unresolvedPeers++
+		}
+	}
+	if donors != 2 || unresolvedPeers != 2 {
+		t.Fatalf("donors=%d unresolved_peers=%d, want 2 each; out=%#v", donors, unresolvedPeers, out)
 	}
 }
 
