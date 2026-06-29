@@ -51,6 +51,27 @@ func TestBuildNetworkTopologyMatrixEntries_CSVMidSingleNameUsesFullFQDNAndDedups
 	}
 }
 
+func TestBuildNetworkTopologyMatrixEntries_EVSECSVMidForMappedIPs(t *testing.T) {
+	edges := []connectivity.Edge{
+		{IssuerIP: "10.93.3.28", DstIP: "63.183.18.177", Protocol: connectivity.ProtoTCP, Port: 443},
+		{IssuerIP: "10.93.3.28", DstIP: "63.184.210.25", Protocol: connectivity.ProtoTCP, Port: 443},
+	}
+	ipToDNS := map[string][]string{
+		"63.183.18.177": {"evse.total-ev-charge.com"},
+		"63.184.210.25": {"evse.total-ev-charge.com"},
+	}
+
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want 2: %#v", len(got), got)
+	}
+	for _, row := range got {
+		if row.DNSName != "evse.total-ev-charge.com" || row.DNSSource != "csv+mid" {
+			t.Fatalf("mapped EVSE row lost CSV attribution: %#v", row)
+		}
+	}
+}
+
 func TestBuildNetworkTopologyMatrixEntries_CSVConnSingleNameUsesFullFQDN(t *testing.T) {
 	edges := []connectivity.Edge{
 		{
@@ -101,6 +122,40 @@ func TestCSVNameForIP_MultiNameIsRejectedAsAmbiguous(t *testing.T) {
 
 	if gotMid, ok := csvNameForIP(ipToDNS, "203.0.113.10", true); ok || gotMid != "" {
 		t.Fatalf("expected mid mode to reject ambiguous IP, got name=%q ok=%v", gotMid, ok)
+	}
+}
+
+func TestCSVNameForIP_EVSEMappedIPsReturnExactCanonicalName(t *testing.T) {
+	ipToDNS := map[string][]string{
+		"63.183.18.177": {"EVSE.Total-EV-Charge.COM."},
+		"63.184.210.25": {"evse.total-ev-charge.com"},
+	}
+
+	for _, ip := range []string{"63.183.18.177", "63.184.210.25"} {
+		got, ok := csvNameForIP(ipToDNS, ip, true)
+		if !ok || got != "evse.total-ev-charge.com" {
+			t.Fatalf("csvNameForIP(%q)=(%q,%v), want canonical EVSE name", ip, got, ok)
+		}
+	}
+}
+
+func TestBuildNetworkTopologyMatrixEntries_AmbiguousCSVRemainsUnresolved(t *testing.T) {
+	edges := []connectivity.Edge{{
+		IssuerIP: "10.93.3.28",
+		DstIP:    "63.184.210.25",
+		Protocol: connectivity.ProtoTCP,
+		Port:     443,
+	}}
+	ipToDNS := map[string][]string{
+		"63.184.210.25": {"evse.total-ev-charge.com", "other.example.com"},
+	}
+
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
+	if len(got) != 1 {
+		t.Fatalf("got %d rows, want 1: %#v", len(got), got)
+	}
+	if got[0].DNSName != "" || got[0].DNSSource != "mid-session" {
+		t.Fatalf("ambiguous CSV unexpectedly attributed row: %#v", got[0])
 	}
 }
 
@@ -437,44 +492,44 @@ func TestBuildNetworkTopologyMatrixEntries_StrongDNSSuppressesCSVConnSameTuple(t
 	}
 }
 
-func TestBuildNetworkTopologyMatrixEntries_StrongDNSSuppressesConflictingCSVCrossPort(t *testing.T) {
-	p443 := uint16(443)
+func TestBuildNetworkTopologyMatrixEntries_UniqueCSVMidSurvivesConflictingStrongDNSCrossPort(t *testing.T) {
+	p9999 := uint16(9999)
 	txTime := time.Date(2026, 3, 4, 10, 0, 1, 0, time.UTC)
 
 	txs := []*DNSTransaction{
 		{
 			RequestTime:     txTime,
-			IssuerIP:        net.ParseIP("10.164.41.4"),
-			DNSName:         "cpc.ocpp.amazon.eocharging.com",
-			ResolvedIPs:     []net.IP{net.ParseIP("18.193.216.103")},
-			DestinationPort: &p443,
+			IssuerIP:        net.ParseIP("10.93.3.28"),
+			DNSName:         "different.example.com",
+			ResolvedIPs:     []net.IP{net.ParseIP("63.184.210.25")},
+			DestinationPort: &p9999,
 			ProtocolL4:      L4ProtoTCP,
 			NameEvidence:    EvDNSAnswer,
 			ResolvedIPEvidence: map[string]Evidence{
-				"18.193.216.103": EvDNSAnswer,
+				"63.184.210.25": EvDNSAnswer,
 			},
 		},
 	}
 
 	edges := []connectivity.Edge{
 		{
-			IssuerIP:  "10.164.41.4",
-			DstIP:     "18.193.216.103",
+			IssuerIP:  "10.93.3.28",
+			DstIP:     "63.184.210.25",
 			Protocol:  connectivity.ProtoTCP,
-			Port:      443,
+			Port:      9999,
 			FirstSeen: txTime.Add(1 * time.Second),
 		},
 		{
-			IssuerIP:  "10.164.41.4",
-			DstIP:     "18.193.216.103",
+			IssuerIP:  "10.93.3.28",
+			DstIP:     "63.184.210.25",
 			Protocol:  connectivity.ProtoTCP,
-			Port:      80,
+			Port:      443,
 			FirstSeen: txTime.Add(2 * time.Second),
 		},
 	}
 
 	ipToDNS := map[string][]string{
-		"18.193.216.103": {"google.com"},
+		"63.184.210.25": {"EVSE.Total-EV-Charge.COM."},
 	}
 
 	out := BuildNetworkTopologyMatrixEntriesWithOptions(
@@ -486,34 +541,149 @@ func TestBuildNetworkTopologyMatrixEntries_StrongDNSSuppressesConflictingCSVCros
 	)
 
 	if len(out) != 2 {
-		t.Fatalf("expected exactly 2 rows (strong 443 + unresolved 80), got %d: %#v", len(out), out)
+		t.Fatalf("expected strong 9999 and csv+mid 443 rows, got %d: %#v", len(out), out)
 	}
 
 	var (
-		foundStrong443 bool
-		foundMid80     bool
+		foundStrong9999 bool
+		foundCSV443     bool
 	)
 	for _, row := range out {
-		if row.DestinationIP != "18.193.216.103" || row.Protocol != "tcp" {
+		if row.DestinationIP != "63.184.210.25" || row.Protocol != "tcp" {
 			continue
 		}
-		if row.Port == 443 && row.DNSName == "cpc.ocpp.amazon.eocharging.com" && row.DNSSource == "dns+synack" {
-			foundStrong443 = true
+		if row.Port == 9999 && row.DNSName == "different.example.com" && row.DNSSource == "dns+synack" {
+			foundStrong9999 = true
 		}
-		if row.Port == 80 && row.DNSName == "" {
-			foundMid80 = true
+		if row.Port == 443 && row.DNSName == "evse.total-ev-charge.com" && row.DNSSource == "csv+mid" {
+			foundCSV443 = true
 		}
 	}
 
-	if !foundStrong443 {
-		t.Fatalf("expected strong dns+synack row on tcp/443")
+	if !foundStrong9999 {
+		t.Fatalf("expected conflicting strong dns+synack row on tcp/9999")
 	}
-	if !foundMid80 {
-		t.Fatalf("expected tcp/80 row to remain unresolved (conflicting csv suppressed)")
+	if !foundCSV443 {
+		t.Fatalf("expected authoritative csv+mid row on tcp/443 to survive cross-port cleanup")
 	}
 }
 
-func TestBuildNetworkTopologyMatrixEntries_PeerCompletionUsesUniqueDirectDonor(t *testing.T) {
+func TestIsSafeDNSDonationDonor(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   bool
+	}{
+		{name: "direct DNS", source: "dns+synack", want: true},
+		{name: "direct SNI", source: "sni+synack", want: true},
+		{name: "leading whitespace", source: " dns+synack", want: false},
+		{name: "uppercase", source: "DNS+SYNACK", want: false},
+		{name: "DNS connection inferred", source: "dns+conn+synack", want: false},
+		{name: "SNI connection inferred", source: "sni+conn+synack", want: false},
+		{name: "DNS connection only", source: "dns+conn", want: false},
+		{name: "SNI connection only", source: "sni+conn", want: false},
+		{name: "CSV connection", source: "csv+conn", want: false},
+		{name: "CSV mid-session", source: "csv+mid", want: false},
+		{name: "mid-session", source: "mid-session", want: false},
+		{name: "legacy peer", source: "peer+ipport", want: false},
+		{name: "legacy peer inferred", source: "peer+ipport+conn", want: false},
+		{name: "previous donation", source: "donated+ipport", want: false},
+		{name: "active completion", source: "active+matrix", want: false},
+		{name: "placeholder", source: "placeholder", want: false},
+		{name: "arbitrary future connection", source: "future+conn", want: false},
+		{name: "empty", source: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSafeDNSDonationDonor(tt.source); got != tt.want {
+				t.Fatalf("isSafeDNSDonationDonor(%q)=%v, want %v", tt.source, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompleteTopologyWithDNSDonationAcceptsDirectDNSAndSNI(t *testing.T) {
+	in := []TopologyEntry{
+		{IssuerIP: "10.0.0.1", DestinationIP: " 8.8.8.8 ", DNSName: "API.EXAMPLE.COM.", DNSSource: "dns+synack", Protocol: " TCP ", Port: 443},
+		{IssuerIP: "10.0.0.2", DestinationIP: "8.8.8.8", DNSName: "api.example.com", DNSSource: "dns+synack", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.3", DestinationIP: "8.8.8.8", DNSName: " \t", DNSSource: "mid-session", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.4", DestinationIP: "1.1.1.1", DNSName: "SNI.EXAMPLE.COM.", DNSSource: "sni+synack", Protocol: "tcp", Port: 8443},
+		{IssuerIP: "10.0.0.5", DestinationIP: "1.1.1.1", DNSName: "", DNSSource: "mid-session", Protocol: " TCP", Port: 8443},
+	}
+
+	got := CompleteTopologyWithDNSDonation(in)
+	for _, idx := range []int{2, 4} {
+		if got[idx].DNSSource != "donated+ipport" {
+			t.Fatalf("row %d source=%q, want donated+ipport: %#v", idx, got[idx].DNSSource, got[idx])
+		}
+	}
+	if got[2].DNSName != "api.example.com" {
+		t.Fatalf("canonical DNS donation=%q, want api.example.com", got[2].DNSName)
+	}
+	if got[4].DNSName != "sni.example.com" {
+		t.Fatalf("canonical SNI donation=%q, want sni.example.com", got[4].DNSName)
+	}
+	if in[2].DNSName != " \t" || in[4].DNSName != "" {
+		t.Fatalf("input entries were mutated: %#v", in)
+	}
+}
+
+func TestCompleteTopologyWithDNSDonationIsolatesKeyAndPreservesAttribution(t *testing.T) {
+	in := []TopologyEntry{
+		{IssuerIP: "10.0.0.1", DestinationIP: "8.8.8.8", DNSName: "direct.example.com", DNSSource: "dns+synack", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.2", DestinationIP: "8.8.4.4", DNSName: "", DNSSource: "mid-session", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.3", DestinationIP: "8.8.8.8", DNSName: "", DNSSource: "mid-session", Protocol: "udp", Port: 443},
+		{IssuerIP: "10.0.0.4", DestinationIP: "8.8.8.8", DNSName: "", DNSSource: "mid-session", Protocol: "tcp", Port: 8443},
+		{IssuerIP: "10.0.0.5", DestinationIP: "8.8.8.8", DNSName: "keep.example.com", DNSSource: "csv+conn", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.6", DestinationIP: "10.1.2.3", DNSName: "private.example.com", DNSSource: "dns+synack", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.7", DestinationIP: "10.1.2.3", DNSName: "", DNSSource: "mid-session", Protocol: "tcp", Port: 443},
+		{IssuerIP: "10.0.0.8", DestinationIP: "9.9.9.9", DNSName: "zero-port.example.com", DNSSource: "dns+synack", Protocol: "tcp", Port: 0},
+		{IssuerIP: "10.0.0.9", DestinationIP: "9.9.9.9", DNSName: "", DNSSource: "mid-session", Protocol: "tcp", Port: 0},
+	}
+
+	got := CompleteTopologyWithDNSDonation(in)
+	for _, idx := range []int{1, 2, 3, 6, 8} {
+		if got[idx].DNSName != "" || got[idx].DNSSource != in[idx].DNSSource {
+			t.Fatalf("isolated/private row %d was completed: %#v", idx, got[idx])
+		}
+	}
+	if got[4].DNSName != "keep.example.com" || got[4].DNSSource != "csv+conn" {
+		t.Fatalf("existing attribution was overwritten: %#v", got[4])
+	}
+}
+
+func TestCompleteTopologyWithDNSDonationRejectsUnsafeSources(t *testing.T) {
+	unsafeSources := []string{
+		"dns+conn+synack",
+		"sni+conn+synack",
+		"dns+conn",
+		"sni+conn",
+		"csv+conn",
+		"csv+mid",
+		"mid-session",
+		"active+matrix",
+		"peer+ipport",
+		"peer+ipport+conn",
+		"donated+ipport",
+		"placeholder",
+		"future+conn",
+	}
+
+	for _, source := range unsafeSources {
+		t.Run(source, func(t *testing.T) {
+			got := CompleteTopologyWithDNSDonation([]TopologyEntry{
+				{IssuerIP: "10.0.0.1", DestinationIP: "8.8.8.8", DNSName: "unsafe.example.com", DNSSource: source, Protocol: "tcp", Port: 443},
+				{IssuerIP: "10.0.0.2", DestinationIP: "8.8.8.8", DNSName: "", DNSSource: "mid-session", Protocol: "tcp", Port: 443},
+			})
+			if got[1].DNSName != "" || got[1].DNSSource != "mid-session" {
+				t.Fatalf("source %q donated unexpectedly: %#v", source, got[1])
+			}
+		})
+	}
+}
+
+func TestCompleteTopologyWithDNSDonationUsesUniqueDirectDonor(t *testing.T) {
 	p8883 := uint16(8883)
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
@@ -549,13 +719,13 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionUsesUniqueDirectDonor(t
 		},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(
 		txs,
 		edges,
 		nil,
 		nil,
 		DefaultTopologyBuildOptions(),
-	)
+	))
 
 	if len(out) != 2 {
 		t.Fatalf("expected 2 rows, got %d: %#v", len(out), out)
@@ -567,8 +737,8 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionUsesUniqueDirectDonor(t
 			if row.DNSName != "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c" {
 				t.Fatalf("expected propagated DNS name, got %#v", row)
 			}
-			if row.DNSSource != "peer+ipport" {
-				t.Fatalf("expected peer+ipport source, got %#v", row)
+			if row.DNSSource != "donated+ipport" {
+				t.Fatalf("expected donated+ipport source, got %#v", row)
 			}
 			foundPeer = true
 		}
@@ -578,7 +748,7 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionUsesUniqueDirectDonor(t
 	}
 }
 
-func TestBuildNetworkTopologyMatrixEntries_PeerCompletionDoesNotCrossDestinationIP(t *testing.T) {
+func TestCompleteTopologyWithDNSDonationDoesNotCrossDestinationIP(t *testing.T) {
 	p443 := uint16(443)
 	txTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	txs := []*DNSTransaction{
@@ -612,7 +782,7 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionDoesNotCrossDestination
 		},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, DefaultTopologyBuildOptions())
+	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, DefaultTopologyBuildOptions()))
 	if len(out) != 2 {
 		t.Fatalf("expected 2 rows, got %d: %#v", len(out), out)
 	}
@@ -632,7 +802,7 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionDoesNotCrossDestination
 	}
 }
 
-func TestBuildNetworkTopologyMatrixEntries_PeerCompletionRejectsUniqueInferredDonor(t *testing.T) {
+func TestCompleteTopologyWithDNSDonationRejectsUniqueInferredDonor(t *testing.T) {
 	p8883 := uint16(8883)
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
@@ -668,13 +838,13 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionRejectsUniqueInferredDo
 		},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(
 		txs,
 		edges,
 		nil,
 		nil,
 		DefaultTopologyBuildOptions(),
-	)
+	))
 
 	if len(out) != 2 {
 		t.Fatalf("expected 2 rows, got %d: %#v", len(out), out)
@@ -700,7 +870,7 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionRejectsUniqueInferredDo
 	}
 }
 
-func TestBuildNetworkTopologyMatrixEntries_PeerCompletionDoesNotAmplifyInferredNameAcrossDestinations(t *testing.T) {
+func TestCompleteTopologyWithDNSDonationDoesNotAmplifyInferredNameAcrossDestinations(t *testing.T) {
 	p443 := uint16(443)
 	txTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	txs := []*DNSTransaction{
@@ -736,7 +906,7 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionDoesNotAmplifyInferredN
 		{IssuerIP: "10.118.216.36", DstIP: "52.219.170.186", Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: txTime.Add(5 * time.Second)},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, DefaultTopologyBuildOptions())
+	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, DefaultTopologyBuildOptions()))
 	if len(out) != 4 {
 		t.Fatalf("expected 4 rows, got %d: %#v", len(out), out)
 	}
@@ -749,7 +919,7 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionDoesNotAmplifyInferredN
 				t.Fatalf("unexpected inferred donor name: %#v", row)
 			}
 			donors++
-		case "peer+ipport+conn":
+		case "peer+ipport+conn", "donated+ipport":
 			t.Fatalf("inferred name was amplified to peer: %#v", row)
 		default:
 			if row.DNSName != "" {
@@ -763,7 +933,7 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionDoesNotAmplifyInferredN
 	}
 }
 
-func TestBuildNetworkTopologyMatrixEntries_PeerCompletionSkipsAmbiguousDonors(t *testing.T) {
+func TestCompleteTopologyWithDNSDonationSkipsAmbiguousDonors(t *testing.T) {
 	p8883 := uint16(8883)
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
@@ -818,13 +988,13 @@ func TestBuildNetworkTopologyMatrixEntries_PeerCompletionSkipsAmbiguousDonors(t 
 		},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(
 		txs,
 		edges,
 		nil,
 		nil,
 		DefaultTopologyBuildOptions(),
-	)
+	))
 
 	var unresolvedFound bool
 	for _, row := range out {

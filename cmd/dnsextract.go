@@ -467,6 +467,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		}
 		topo = dns.CompleteTopologyWithActiveDNS(topo, resolvedNames)
 	}
+	topo = dns.CompleteTopologyWithDNSDonation(topo)
 
 	networkTopologyPath := ""
 	networkTopologyJSONPath := ""
