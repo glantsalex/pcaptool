@@ -128,6 +128,64 @@ func LoadIPToDNSFromFile(path string) (map[string][]string, error) {
 	return out, nil
 }
 
+// LoadIPToDNSWithTopologyOverlay loads the base IP-to-DNS mapping and, when
+// present, overlays topology-<netID>.csv from the same directory. The overlay
+// accepts only dns,ip rows. Existing base IPs take precedence, and the first
+// valid overlay row wins for each IP absent from the base mapping.
+func LoadIPToDNSWithTopologyOverlay(basePath, netID string) (map[string][]string, error) {
+	ipToDNS, err := LoadIPToDNSFromFile(basePath)
+	if err != nil {
+		return nil, err
+	}
+
+	overlayPath := filepath.Join(filepath.Dir(basePath), "topology-"+netID+".csv")
+	f, err := os.Open(overlayPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ipToDNS, nil
+		}
+		return nil, fmt.Errorf("open topology overlay %q: %w", overlayPath, err)
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	sc.Buffer(buf, 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.Split(line, ",")
+		if len(parts) != 2 {
+			continue
+		}
+
+		dnsName := canonicalDNSName(parts[0])
+		if dnsName == "" {
+			continue
+		}
+		if _, firstIsIP := canonicalIPv4String(parts[0]); firstIsIP {
+			continue
+		}
+		ip, ok := canonicalIPv4String(parts[1])
+		if !ok {
+			continue
+		}
+		if _, exists := ipToDNS[ip]; exists {
+			continue
+		}
+
+		ipToDNS[ip] = []string{dnsName}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("scan topology overlay %q: %w", overlayPath, err)
+	}
+
+	return ipToDNS, nil
+}
+
 func MergeIPToDNSMaps(base, extra map[string][]string) (map[string][]string, []IPDNSPair) {
 	out := make(map[string][]string, len(base))
 	seen := make(map[string]map[string]struct{}, len(base))

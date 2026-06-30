@@ -30,7 +30,7 @@ func printBanner() {
 	)
 
 	fmt.Println(cyan + "┌──────────────────────────────────────────────────────────────────────────────┐" + reset)
-	fmt.Println(cyan + "│" + reset + "   " + cyan + "pcaptool" + reset + " – " + cyan + "Advanced DNS & PCAP Intelligence (v0.1)" + reset + "                         " + cyan + "│" + reset)
+	fmt.Println(cyan + "│" + reset + "   " + cyan + "pcaptool" + reset + " – " + cyan + "Advanced DNS & PCAP Intelligence (v0.2)" + reset + "                         " + cyan + "│" + reset)
 	fmt.Println(cyan + "│" + reset + "   " + yellow + "Because \"just scroll it in Wireshark forever\" is not a long-term strategy." + reset + " " + cyan + "│" + reset)
 	fmt.Println(cyan + "│" + reset + "   " + yellow + "Multi-pass correlation • Device DNS profiling • Unused/Unresolved DNS" + reset + "      " + cyan + "│" + reset)
 	fmt.Println(cyan + "│" + reset + "   " + yellow + "No magic. Just Go, packets, and a healthy dose of paranoia." + reset + "                " + cyan + "│" + reset)

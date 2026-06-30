@@ -93,7 +93,7 @@ func init() {
 		&flagDNSIPFile,
 		"dns-ip-file",
 		"",
-		"CSV file containing DNS,IP pairs used as last-resort IP->DNS attribution (e.g. dns,ip). IPv4 only.",
+		"CSV file containing DNS,IP pairs used as last-resort IP->DNS attribution (e.g. dns,ip). An adjacent topology-<net-id>.csv is overlaid when present. IPv4 only.",
 	)
 	cmd.Flags().StringVar(
 		&flagExcludePorts,
@@ -303,7 +303,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	var ipToDNS map[string][]string
 	if strings.TrimSpace(flagDNSIPFile) != "" {
-		ipToDNS, err = dns.LoadIPToDNSFromFile(flagDNSIPFile)
+		ipToDNS, err = dns.LoadIPToDNSWithTopologyOverlay(flagDNSIPFile, flagNetID)
 		if err != nil {
 			return fmt.Errorf("load --dns-ip-file: %w", err)
 		}
