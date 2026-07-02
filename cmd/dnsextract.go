@@ -47,6 +47,7 @@ var (
 	flagActiveResolve                bool
 	flagActiveResolvers              string
 	flagReverseDNSLookup             bool
+	flagTLSCertLookup                bool
 	flagDisableSNI                   bool
 	flagUnsorted                     bool
 	flagDebug                        bool
@@ -55,6 +56,7 @@ var (
 	flagFleetScanWorkers             int
 	resolveDNSNamesIPv4              = dns.ResolveDNSNamesIPv4
 	completeTopologyWithReverseDNS   = dns.CompleteTopologyWithReverseDNS
+	probeTLSCertificates             = dns.ProbeTLSCertificates
 )
 
 func init() {
@@ -138,6 +140,12 @@ func init() {
 		"reverse-dns-lookup",
 		false,
 		"Use PTR lookups as last-resort completion for unattributed public topology IPs and write a lookup audit CSV.",
+	)
+	cmd.Flags().BoolVar(
+		&flagTLSCertLookup,
+		"tls-cert-lookup",
+		false,
+		"Probe unresolved public TLS endpoints, decorate exact matching matrix rows, and write a certificate audit CSV.",
 	)
 	cmd.Flags().BoolVar(
 		&flagDisableSNI,
@@ -516,6 +524,47 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		))
 	}
 
+	tlsCertLookupLogPath := ""
+	if flagTLSCertLookup {
+		progress.SetStage("Pass 4.6: probing TLS certificates for unresolved endpoints...")
+		tlsCertRecords, err := probeTLSCertificates(ctx, topo, nil, dns.TLSCertLookupOptions{
+			Progress: func(processed, total int) {
+				progress.UpdateBar(processed, total, fmt.Sprintf("processed %d / %d endpoints", processed, total))
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("probe TLS certificates: %w", err)
+		}
+		selectedResults := 0
+		for _, record := range tlsCertRecords {
+			if record.Status == "used_cert" && strings.TrimSpace(record.SelectedName) != "" {
+				selectedResults++
+			}
+		}
+		var decoratedRows int
+		topo, decoratedRows = dns.CompleteTopologyWithTLSCertificates(topo, tlsCertRecords)
+		tlsCertLookupLogPath, err = writeTLSCertLookupLog(om, tlsCertRecords)
+		if err != nil {
+			return err
+		}
+		statusCounts := make(map[string]int)
+		for _, record := range tlsCertRecords {
+			statusCounts[record.Status]++
+		}
+		skippedOrError := len(tlsCertRecords) - statusCounts["used_cert"] - statusCounts["no_certificate"] - statusCounts["tls_error"] - statusCounts["timeout"]
+		progress.SetStage(fmt.Sprintf(
+			"Pass 4.6: TLS certificate lookup complete: %d processed, %d selected, %d matrix rows decorated, %d used_cert, %d no_cert, %d tls_error, %d timeout, %d skipped/error.",
+			len(tlsCertRecords),
+			selectedResults,
+			decoratedRows,
+			statusCounts["used_cert"],
+			statusCounts["no_certificate"],
+			statusCounts["tls_error"],
+			statusCounts["timeout"],
+			skippedOrError,
+		))
+	}
+
 	networkTopologyPath := ""
 	networkTopologyJSONPath := ""
 	networkTopologyCompactJSONPath := ""
@@ -695,6 +744,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if reverseDNSLookupLogPath != "" {
 		filesMap["reverse_dns_lookup_log"] = reverseDNSLookupLogPath
 	}
+	if tlsCertLookupLogPath != "" {
+		filesMap["tls_cert_lookup_log"] = tlsCertLookupLogPath
+	}
 	for key, path := range synTrailArtifacts {
 		filesMap[key] = path
 	}
@@ -851,6 +903,23 @@ func writeReverseDNSLookupLog(om *OutputManager, rows []dns.ReverseDNSLookupReco
 	}
 	if closeErr != nil {
 		return "", fmt.Errorf("close reverse DNS lookup log: %w", closeErr)
+	}
+	return path, nil
+}
+
+func writeTLSCertLookupLog(om *OutputManager, rows []dns.TLSCertLookupRecord) (string, error) {
+	f, err := om.Create("tls-cert-lookup-log.csv")
+	if err != nil {
+		return "", fmt.Errorf("create TLS certificate lookup log: %w", err)
+	}
+	path := f.Name()
+	writeErr := dns.WriteTLSCertLookupCSV(f, rows)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return "", fmt.Errorf("write TLS certificate lookup log: %w", writeErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close TLS certificate lookup log: %w", closeErr)
 	}
 	return path, nil
 }

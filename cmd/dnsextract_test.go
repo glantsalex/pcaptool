@@ -371,6 +371,161 @@ func TestDnsextractReverseDNSLookupArtifactAndManifest(t *testing.T) {
 	}
 }
 
+func TestDnsextractTLSCertLookupDecoratesExactEndpointAndIsManifested(t *testing.T) {
+	restoreDNSExtractFlags(t)
+	resolveDNSNamesIPv4 = func(
+		context.Context,
+		[]string,
+		dns.ResolveUnresolvedOptions,
+		dns.IPv4LookupFunc,
+	) ([]dns.DNSNameIPv4Resolution, error) {
+		t.Fatal("active resolver called while --active-resolve=false")
+		return nil, nil
+	}
+
+	readDir := t.TempDir()
+	writeDNSArtifactTestPCAP(t, filepath.Join(readDir, "capture.pcap"))
+	probeCalls := 0
+	probeTLSCertificates = func(
+		_ context.Context,
+		entries []dns.TopologyEntry,
+		prober dns.TLSCertProber,
+		options dns.TLSCertLookupOptions,
+	) ([]dns.TLSCertLookupRecord, error) {
+		probeCalls++
+		if prober != nil {
+			t.Fatalf("command TLS certificate prober = %#v, want nil/default", prober)
+		}
+		if len(entries) == 0 {
+			t.Fatal("command passed empty topology to TLS certificate lookup")
+		}
+		if options.Progress == nil {
+			t.Fatal("command TLS certificate progress callback = nil")
+		}
+		options.Progress(1, 1)
+		return []dns.TLSCertLookupRecord{{
+			IP:               "8.8.8.8",
+			Port:             443,
+			Status:           "used_cert",
+			SelectedName:     "cert.example.com",
+			Reason:           "selected_first_san",
+			SubjectCN:        "cert.example.com",
+			DNSSANs:          "cert.example.com",
+			IssuerCommonName: "Test Issuer",
+			NotBefore:        "2026-01-01T00:00:00Z",
+			NotAfter:         "2027-01-01T00:00:00Z",
+			Source:           "tls-cert-san+matrix",
+		}}, nil
+	}
+
+	type runResult struct {
+		runDir   string
+		manifest RunArtifactsManifest
+		files    map[string][]byte
+	}
+	run := func(t *testing.T, enabled bool) runResult {
+		t.Helper()
+		outputRoot := t.TempDir()
+		flagReadDir = readDir
+		flagNetID = "net"
+		flagOutputRoot = outputRoot
+		flagFormat = "table"
+		flagFleet = ""
+		flagExportCSV = ""
+		flagConnectivityShort = false
+		flagRadiusIMSI = false
+		flagOnlyTCP = false
+		flagIgnoreNTP = false
+		flagExcludePorts = "53"
+		flagFTPControlPorts = "21,990"
+		flagFTPPassiveMinPort = "30000"
+		flagServerSummaryExcludeUDPPorts = "33434-33534"
+		flagDNSIPFile = ""
+		flagTopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+		flagActiveResolve = false
+		flagActiveResolvers = ""
+		flagReverseDNSLookup = false
+		flagTLSCertLookup = enabled
+		flagDisableSNI = true
+		flagUnsorted = false
+		flagDebug = false
+		flagManifestOut = ""
+		flagPostHooks = nil
+		flagFleetScanWorkers = 0
+		flagEnforcePrivateAsSource = false
+
+		if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
+			t.Fatalf("runDNSExtract(tls-cert-lookup=%v): %v", enabled, err)
+		}
+		runEntries, err := os.ReadDir(filepath.Join(outputRoot, "net"))
+		if err != nil {
+			t.Fatalf("read network output dir: %v", err)
+		}
+		runDir := filepath.Join(outputRoot, "net", runEntries[0].Name())
+		manifestBytes, err := os.ReadFile(filepath.Join(runDir, "_run-artifacts.json"))
+		if err != nil {
+			t.Fatalf("read manifest: %v", err)
+		}
+		var manifest RunArtifactsManifest
+		if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+			t.Fatalf("unmarshal manifest: %v", err)
+		}
+		files := make(map[string][]byte)
+		for _, filename := range []string{
+			"network-topology-matrix.txt",
+			"network-topology-matrix.json",
+			"network-topology-matrix.compact.json",
+			"service-endpoints.txt",
+		} {
+			contents, err := os.ReadFile(filepath.Join(runDir, filename))
+			if err != nil {
+				t.Fatalf("read %s: %v", filename, err)
+			}
+			files[filename] = contents
+		}
+		return runResult{runDir: runDir, manifest: manifest, files: files}
+	}
+
+	disabled := run(t, false)
+	if probeCalls != 0 {
+		t.Fatalf("disabled TLS certificate probe calls = %d, want 0", probeCalls)
+	}
+	disabledLogPath := filepath.Join(disabled.runDir, "tls-cert-lookup-log.csv")
+	if _, err := os.Stat(disabledLogPath); !os.IsNotExist(err) {
+		t.Fatalf("disabled TLS certificate log stat error = %v, want not exist", err)
+	}
+	if _, ok := disabled.manifest.Files["tls_cert_lookup_log"]; ok {
+		t.Fatal("disabled manifest contains tls_cert_lookup_log")
+	}
+
+	enabled := run(t, true)
+	if probeCalls != 1 {
+		t.Fatalf("enabled TLS certificate probe calls = %d, want 1", probeCalls)
+	}
+	enabledLogPath := filepath.Join(enabled.runDir, "tls-cert-lookup-log.csv")
+	logBytes, err := os.ReadFile(enabledLogPath)
+	if err != nil {
+		t.Fatalf("read enabled TLS certificate log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "8.8.8.8,443,used_cert,cert.example.com") || !strings.Contains(string(logBytes), "tls-cert-san+matrix") {
+		t.Fatalf("TLS certificate log missing result: %s", logBytes)
+	}
+	if got := enabled.manifest.Files["tls_cert_lookup_log"]; got != enabledLogPath {
+		t.Fatalf("manifest TLS certificate log path = %q, want %q", got, enabledLogPath)
+	}
+	for _, filename := range []string{"network-topology-matrix.txt", "network-topology-matrix.json", "network-topology-matrix.compact.json", "service-endpoints.txt"} {
+		if strings.Contains(string(disabled.files[filename]), "cert.example.com") || strings.Contains(string(disabled.files[filename]), "tls-cert-san+matrix") {
+			t.Fatalf("disabled %s unexpectedly contains TLS certificate decoration: %s", filename, disabled.files[filename])
+		}
+		if !strings.Contains(string(enabled.files[filename]), "cert.example.com") {
+			t.Fatalf("enabled %s missing TLS certificate name: %s", filename, enabled.files[filename])
+		}
+		if filename != "service-endpoints.txt" && !strings.Contains(string(enabled.files[filename]), "tls-cert-san+matrix") {
+			t.Fatalf("enabled %s missing TLS certificate source: %s", filename, enabled.files[filename])
+		}
+	}
+}
+
 func restoreDNSExtractFlags(t *testing.T) {
 	t.Helper()
 	oldReadDir, oldFleet := flagReadDir, flagFleet
@@ -383,6 +538,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 	oldDNSIPFile, oldTopologyDNSWindow := flagDNSIPFile, flagTopologyDNSWindow
 	oldActiveResolve, oldActiveResolvers := flagActiveResolve, flagActiveResolvers
 	oldReverseDNSLookup := flagReverseDNSLookup
+	oldTLSCertLookup := flagTLSCertLookup
 	oldDisableSNI, oldUnsorted, oldDebug := flagDisableSNI, flagUnsorted, flagDebug
 	oldManifestOut := flagManifestOut
 	oldPostHooks := append([]string(nil), flagPostHooks...)
@@ -391,6 +547,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 	oldEnforcePrivateAsSource := flagEnforcePrivateAsSource
 	oldResolveDNSNamesIPv4 := resolveDNSNamesIPv4
 	oldCompleteTopologyWithReverseDNS := completeTopologyWithReverseDNS
+	oldProbeTLSCertificates := probeTLSCertificates
 	t.Cleanup(func() {
 		flagReadDir, flagFleet = oldReadDir, oldFleet
 		flagFormat, flagExportCSV = oldFormat, oldExportCSV
@@ -402,6 +559,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 		flagDNSIPFile, flagTopologyDNSWindow = oldDNSIPFile, oldTopologyDNSWindow
 		flagActiveResolve, flagActiveResolvers = oldActiveResolve, oldActiveResolvers
 		flagReverseDNSLookup = oldReverseDNSLookup
+		flagTLSCertLookup = oldTLSCertLookup
 		flagDisableSNI, flagUnsorted, flagDebug = oldDisableSNI, oldUnsorted, oldDebug
 		flagManifestOut = oldManifestOut
 		flagPostHooks = oldPostHooks
@@ -410,6 +568,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 		flagEnforcePrivateAsSource = oldEnforcePrivateAsSource
 		resolveDNSNamesIPv4 = oldResolveDNSNamesIPv4
 		completeTopologyWithReverseDNS = oldCompleteTopologyWithReverseDNS
+		probeTLSCertificates = oldProbeTLSCertificates
 	})
 }
 

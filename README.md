@@ -270,6 +270,20 @@ ip,status,raw_ptr,normalized_name,source,reason,forward_confirmed,forward_ips,er
 
 PTR and forward-IP lists are canonicalized, sorted, deduplicated, and joined with semicolons. Individual lookup failures are recorded without failing the run; parent cancellation still aborts the command.
 
+#### `tls-cert-lookup-log.csv`
+
+Produced whenever `--tls-cert-lookup` is enabled, including as a header-only artifact when no eligible endpoints exist. Manifest key: `tls_cert_lookup_log`.
+
+The log contains one deterministic row per unique unresolved public IPv4 TCP endpoint on port `443`, `8443`, or `8883`:
+
+```text
+ip,port,status,selected_name,reason,subject_cn,dns_sans,issuer_common_name,not_before,not_after,error,source
+```
+
+The probe connects by IP without SNI, records only the presented leaf certificate, and uses a bounded worker pool with a two-second timeout per endpoint. SANs are canonicalized but retained in certificate order, including duplicates and rejected names, so first-choice provenance remains visible. The first usable non-wildcard SAN is selected; a valid leading `*.` wildcard is stripped to its base name. If no SAN is usable, a valid non-wildcard subject CN may be selected. Certificate verification is intentionally disabled because this is diagnostic collection, not authentication.
+
+Selected certificate labels decorate only the exact unresolved public TCP endpoint that was probed, using source `tls-cert-san+matrix`; existing attribution is never overwritten. This weak endpoint decoration appears in topology and derived endpoint outputs, but it is not observed DNS evidence, cannot donate to other rows, and is not persisted to DNS transactions or `dns-ip.csv`. Presented certificates describe probe-time endpoint state and are not capture-time truth.
+
 #### `export_csv` target
 
 If `--export-csv` is used, the main records are exported as CSV.
@@ -487,6 +501,7 @@ Common source labels in `network-topology-matrix.txt` and related outputs:
 | `ptr+fcrdns+matrix` | a unique PTR name forward-resolved to the queried public IPv4 and completed an unattributed matrix row |
 | `ptr+matrix` | a unique usable raw PTR name completed an unattributed matrix row without forward confirmation |
 | `ptr-normalized+matrix` | a matching AWS EC2 IP-encoded PTR was normalized and completed an unattributed matrix row |
+| `tls-cert-san+matrix` | an unresolved public TLS endpoint was decorated from the first usable leaf-certificate SAN, stripped wildcard base, or CN fallback |
 | `csv+conn` | DNS came from `dns-ip.csv` fallback on a non-mid-session row |
 | `csv+mid` | DNS came from `dns-ip.csv` fallback for a mid-session row |
 | `mid-session` | connection was observed without usable DNS attribution |
@@ -607,6 +622,7 @@ This policy is designed to reduce CSV contamination from:
 | `--active-resolve` | bool | `false` | resolve unresolved names against external resolvers |
 | `--active-resolvers` | string | empty | comma-separated resolver IPs for active resolve |
 | `--reverse-dns-lookup` | bool | `false` | use bounded PTR/forward-confirmation lookup as last-resort topology completion and write its audit CSV |
+| `--tls-cert-lookup` | bool | `false` | probe unresolved public TLS endpoints, decorate exact matching matrix rows, and write a certificate audit CSV |
 | `--disable-sni` | bool | `false` | skip TLS ClientHello/SNI scan |
 | `--unsorted` | bool | `false` | preserve natural first-seen issuer order in topology output |
 | `--debug` | bool | `false` | emit additional debug artifacts, including detailed fleet trail/unique CSVs and CSV append audit |
