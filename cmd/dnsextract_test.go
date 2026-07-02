@@ -23,7 +23,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestTruncatedDNSPacketsArtifactWrittenAndManifestedRegardlessOfDebug(t *testing.T) {
+func TestTruncatedDNSPacketsArtifactWrittenAndManifestedOnlyWithDebug(t *testing.T) {
 	restoreDNSExtractFlags(t)
 	resolveDNSNamesIPv4 = func(
 		context.Context,
@@ -81,19 +81,6 @@ func TestTruncatedDNSPacketsArtifactWrittenAndManifestedRegardlessOfDebug(t *tes
 			runDir := filepath.Join(outputRoot, "net", runEntries[0].Name())
 			artifactPath := filepath.Join(runDir, "truncated-dns-packets.csv")
 
-			f, err := os.Open(artifactPath)
-			if err != nil {
-				t.Fatalf("open truncated DNS artifact: %v", err)
-			}
-			records, err := csv.NewReader(f).ReadAll()
-			f.Close()
-			if err != nil {
-				t.Fatalf("read truncated DNS artifact: %v", err)
-			}
-			if len(records) != 3 || records[1][2] != "api.exampl" || records[2][2] != "api.exampl" {
-				t.Fatalf("unexpected truncated DNS CSV records: %#v", records)
-			}
-
 			manifestPath := filepath.Join(runDir, "_run-artifacts.json")
 			manifestBytes, err := os.ReadFile(manifestPath)
 			if err != nil {
@@ -103,8 +90,29 @@ func TestTruncatedDNSPacketsArtifactWrittenAndManifestedRegardlessOfDebug(t *tes
 			if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 				t.Fatalf("unmarshal manifest: %v", err)
 			}
-			if got := manifest.Files["truncated_dns_packets"]; got != artifactPath {
-				t.Fatalf("manifest truncated_dns_packets = %q, want %q", got, artifactPath)
+			if !debug {
+				if _, err := os.Stat(artifactPath); !os.IsNotExist(err) {
+					t.Fatalf("non-debug truncated DNS artifact stat error = %v, want not exist", err)
+				}
+				if got, ok := manifest.Files["truncated_dns_packets"]; ok {
+					t.Fatalf("non-debug manifest contains truncated_dns_packets = %q", got)
+				}
+			} else {
+				f, err := os.Open(artifactPath)
+				if err != nil {
+					t.Fatalf("open truncated DNS artifact: %v", err)
+				}
+				records, err := csv.NewReader(f).ReadAll()
+				f.Close()
+				if err != nil {
+					t.Fatalf("read truncated DNS artifact: %v", err)
+				}
+				if len(records) != 3 || records[1][2] != "api.exampl" || records[2][2] != "api.exampl" {
+					t.Fatalf("unexpected truncated DNS CSV records: %#v", records)
+				}
+				if got := manifest.Files["truncated_dns_packets"]; got != artifactPath {
+					t.Fatalf("manifest truncated_dns_packets = %q, want %q", got, artifactPath)
+				}
 			}
 
 			unresolvedBytes, err := os.ReadFile(filepath.Join(runDir, "dns-unresolved-dns.txt"))
@@ -157,7 +165,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 	})
 }
 
-func TestActiveResolveCompletesTopologyWithoutMutatingUnresolvedOrDNSIP(t *testing.T) {
+func TestActiveResolveFiltersFinalUnresolvedWithoutMutatingDNSIP(t *testing.T) {
 	restoreDNSExtractFlags(t)
 
 	readDir := t.TempDir()
@@ -243,8 +251,8 @@ func TestActiveResolveCompletesTopologyWithoutMutatingUnresolvedOrDNSIP(t *testi
 	if err != nil {
 		t.Fatalf("read unresolved DNS artifact: %v", err)
 	}
-	if got := unresolvedDNSNamesFromTable(string(unresolvedBytes)); !reflect.DeepEqual(got, []string{"api.example.com", "normal.example"}) {
-		t.Fatalf("unresolved DNS names changed by active completion: %#v", got)
+	if got := unresolvedDNSNamesFromTable(string(unresolvedBytes)); !reflect.DeepEqual(got, []string{"api.example.com"}) {
+		t.Fatalf("final unresolved DNS names = %#v, want only names absent from final topology", got)
 	}
 
 	serviceBytes, err := os.ReadFile(filepath.Join(runDir, "service-endpoints.txt"))

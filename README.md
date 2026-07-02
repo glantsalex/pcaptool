@@ -245,7 +245,7 @@ Useful as a higher-level service inventory view with:
 
 #### `dns-unresolved-dns.txt`
 
-Unresolved DNS names that remained unresolved after attribution.
+Packet-observed complete DNS names that remain unresolved after final topology attribution, including optional active matrix completion and DNS donation.
 Includes issuer and first PCAP file seen.
 
 #### `unresolved-ip.json`
@@ -405,7 +405,7 @@ This is controlled by `--ignore-ntp`.
 
 ### Pass 2.5: optional active resolve
 
-If `--active-resolve` is enabled, unresolved DNS names are resolved against external resolvers.
+If `--active-resolve` is enabled, every name unresolved before active completion is offered to the configured external resolvers. Successful results may complete otherwise unattributed topology rows; names actually attributed in the final topology are then omitted from `dns-unresolved-dns.txt`.
 This is intentionally disabled by default because it is not capture-time truth.
 
 ### Pass 3: connection correlation
@@ -463,6 +463,7 @@ Common source labels in `network-topology-matrix.txt` and related outputs:
 | `sni+conn+synack` | SNI-derived name with connectivity-backed IP inference |
 | `active+synack` | name was obtained by active resolver lookup and later confirmed by observed connection |
 | `active+conn+synack` | active-resolve name with connectivity-inferred IP |
+| `active+matrix` | an otherwise-unattributed topology row was completed from an optional active-resolve result |
 | `csv+conn` | DNS came from `dns-ip.csv` fallback on a non-mid-session row |
 | `csv+mid` | DNS came from `dns-ip.csv` fallback for a mid-session row |
 | `mid-session` | connection was observed without usable DNS attribution |

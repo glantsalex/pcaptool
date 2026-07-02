@@ -450,7 +450,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 
 	// Compute packet/topology unresolved names before optional active matrix
-	// completion. Active resolution must not alter this forensic artifact.
+	// completion so every packet-unresolved name remains eligible for lookup.
 	unresolvedFinal := dns.ComputeUnresolvedDNSFirstSeen(txs)
 	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
 	unresolvedFinal = dns.FilterUnresolvedByTruncatedDNSPackets(unresolvedFinal, truncatedDNSPackets)
@@ -468,6 +468,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		topo = dns.CompleteTopologyWithActiveDNS(topo, resolvedNames)
 	}
 	topo = dns.CompleteTopologyWithDNSDonation(topo)
+	// The artifact reflects final topology attribution, including active matrix
+	// completion and conservative DNS donation.
+	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
 
 	networkTopologyPath := ""
 	networkTopologyJSONPath := ""
@@ -592,9 +595,12 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		}
 		ipDNSAppendAuditPath = om.Path("ip-dns-append-audit.txt")
 	}
-	truncatedDNSPacketsPath, err := writeTruncatedDNSPacketsCSV(om, truncatedDNSPackets)
-	if err != nil {
-		return fmt.Errorf("write truncated DNS packets: %w", err)
+	truncatedDNSPacketsPath := ""
+	if flagDebug {
+		truncatedDNSPacketsPath, err = writeTruncatedDNSPacketsCSV(om, truncatedDNSPackets)
+		if err != nil {
+			return fmt.Errorf("write truncated DNS packets: %w", err)
+		}
 	}
 	filesMap := map[string]string{
 		"main_output":       mainOutputPath,
