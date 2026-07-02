@@ -127,6 +127,102 @@ func TestTruncatedDNSPacketsArtifactWrittenAndManifestedOnlyWithDebug(t *testing
 	}
 }
 
+func TestDnsextractFleetArtifactsRespectDebugAndProbeRename(t *testing.T) {
+	restoreDNSExtractFlags(t)
+	resolveDNSNamesIPv4 = func(
+		context.Context,
+		[]string,
+		dns.ResolveUnresolvedOptions,
+		dns.IPv4LookupFunc,
+	) ([]dns.DNSNameIPv4Resolution, error) {
+		t.Fatal("active resolver called while --active-resolve=false")
+		return nil, nil
+	}
+
+	readDir := t.TempDir()
+	writeDNSArtifactTestPCAP(t, filepath.Join(readDir, "capture.pcap"))
+	fleetPath := filepath.Join(t.TempDir(), "fleet.txt")
+	if err := os.WriteFile(fleetPath, []byte("10.0.0.10\n"), 0o644); err != nil {
+		t.Fatalf("write fleet file: %v", err)
+	}
+
+	for _, debug := range []bool{false, true} {
+		t.Run(map[bool]string{false: "non_debug", true: "debug"}[debug], func(t *testing.T) {
+			outputRoot := t.TempDir()
+			flagReadDir = readDir
+			flagNetID = "net"
+			flagOutputRoot = outputRoot
+			flagFormat = "table"
+			flagFleet = fleetPath
+			flagExportCSV = ""
+			flagConnectivityShort = false
+			flagRadiusIMSI = false
+			flagOnlyTCP = false
+			flagIgnoreNTP = false
+			flagExcludePorts = "53"
+			flagFTPControlPorts = "21,990"
+			flagFTPPassiveMinPort = "30000"
+			flagServerSummaryExcludeUDPPorts = "33434-33534"
+			flagDNSIPFile = ""
+			flagTopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+			flagActiveResolve = false
+			flagActiveResolvers = ""
+			flagDisableSNI = true
+			flagUnsorted = false
+			flagDebug = debug
+			flagManifestOut = ""
+			flagPostHooks = nil
+			flagFleetScanWorkers = 1
+			flagEnforcePrivateAsSource = false
+
+			if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
+				t.Fatalf("runDNSExtract(debug=%v): %v", debug, err)
+			}
+			runEntries, err := os.ReadDir(filepath.Join(outputRoot, "net"))
+			if err != nil {
+				t.Fatalf("read network output dir: %v", err)
+			}
+			if len(runEntries) != 1 || !runEntries[0].IsDir() {
+				t.Fatalf("run output entries = %#v, want one run directory", runEntries)
+			}
+			runDir := filepath.Join(outputRoot, "net", runEntries[0].Name())
+			manifestBytes, err := os.ReadFile(filepath.Join(runDir, "_run-artifacts.json"))
+			if err != nil {
+				t.Fatalf("read manifest: %v", err)
+			}
+			var manifest RunArtifactsManifest
+			if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+				t.Fatalf("unmarshal manifest: %v", err)
+			}
+
+			for _, artifact := range expectedSYNTrailArtifacts {
+				got, present := manifest.Files[artifact.key]
+				wantPresent := !artifact.debugOnly || debug
+				if present != wantPresent {
+					t.Fatalf("manifest key %q present=%v, want %v", artifact.key, present, wantPresent)
+				}
+				artifactPath := filepath.Join(runDir, artifact.filename)
+				if wantPresent {
+					if got != artifactPath {
+						t.Fatalf("manifest key %q path = %q, want %q", artifact.key, got, artifactPath)
+					}
+					if _, err := os.Stat(artifactPath); err != nil {
+						t.Fatalf("stat %s: %v", artifact.filename, err)
+					}
+				} else if _, err := os.Stat(artifactPath); !os.IsNotExist(err) {
+					t.Fatalf("debug-only %s stat error = %v, want not exist", artifact.filename, err)
+				}
+			}
+			if _, ok := manifest.Files["private_probes_syn_unique"]; ok {
+				t.Fatal("manifest contains old key private_probes_syn_unique")
+			}
+			if _, err := os.Stat(filepath.Join(runDir, "private-probes-syn-unique.csv")); !os.IsNotExist(err) {
+				t.Fatalf("old private probe filename stat error = %v, want not exist", err)
+			}
+		})
+	}
+}
+
 func restoreDNSExtractFlags(t *testing.T) {
 	t.Helper()
 	oldReadDir, oldFleet := flagReadDir, flagFleet

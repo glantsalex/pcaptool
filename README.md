@@ -297,32 +297,38 @@ It is sidecar-only:
 - it does not change connection inference
 - `--exclude-ports` does not apply to SYN evidence artifacts
 
-The generated files are:
+The always-on fleet files are:
+
+- `public-servers-unique.csv`
+- `private-servers-unique.csv`
+- `private-probes-unique.csv`
+- `flow-direction-correction.sql`
+
+With `--debug`, the sidecar additionally writes these detailed artifacts:
 
 - `fleet-to-public-trail.csv`
 - `fleet-to-private-nonfleet-trail.csv`
 - `fleet-to-public-unique.csv`
-- `public-servers-unique.csv`
 - `fleet-to-private-nonfleet-syn-unique.csv`
-- `private-servers-unique.csv`
 - `fleet-to-fleet-tcp-syn-trail.csv`
 - `fleet-to-fleet-tcp-syn-unique.csv`
 - `private-nonfleet-to-fleet-trail.csv`
 - `private-nonfleet-to-fleet-tcp-syn-unique.csv`
-- `private-probes-syn-unique.csv`
-- `flow-direction-correction.sql`
+
+`private-probes-unique.csv` and manifest key `private_probes_unique` replace the former `private-probes-syn-unique.csv` and `private_probes_syn_unique` names. The probe artifact remains always-on whenever the fleet sidecar runs; the rename does not change its row semantics.
 
 Bucket meanings:
 
 - fleet to public
   - `src_ip` is in fleet
   - `dst_ip` is public / not private-local
-  - manifest keys include: `fleet_to_public_trail`, `fleet_to_public_unique`, `public_servers_unique`
+  - always-on manifest key: `public_servers_unique`
+  - debug manifest keys include: `fleet_to_public_trail`, `fleet_to_public_unique`
 - fleet to private non-fleet
   - `src_ip` is in fleet
   - `dst_ip` is private/local
   - `dst_ip` is not in fleet
-  - manifest keys include: `fleet_to_private_nonfleet_trail`, `fleet_to_private_nonfleet_syn_unique`
+  - debug manifest keys include: `fleet_to_private_nonfleet_trail`, `fleet_to_private_nonfleet_syn_unique`
 - private server unique summary
   - `private-servers-unique.csv` contains unique `dst_ip,dst_port,protocol` rows from the fleet-to-private-nonfleet split
   - TCP rows and non-excluded UDP rows are retained
@@ -377,7 +383,7 @@ The command is a multi-pass offline pipeline.
 
 ### Optional TCP SYN trail sidecar
 
-If `--fleet` is set, the PCAP corpus is also scanned for packet-level IPv4 TCP SYN evidence and UDP edge evidence, and the fleet sidecar artifacts are written. By default, `--fleet-scan-workers 0` auto-selects `min(GOMAXPROCS, file_count)` workers with a minimum of `1`; `--fleet-scan-workers 1` forces sequential scanning, and values greater than `1` force that many concurrent file scanners. Higher values can reduce wall-clock time on large directories but increase disk and CPU pressure. The sidecar also writes `flow-direction-correction.sql`, a generated BigQuery script that creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
+If `--fleet` is set, the PCAP corpus is also scanned for packet-level IPv4 TCP SYN evidence and UDP edge evidence. Server summaries, private probes, and `flow-direction-correction.sql` are always written; detailed trail and unique evidence artifacts require `--debug`. Debug selection changes only artifact writing and does not rescan the corpus. By default, `--fleet-scan-workers 0` auto-selects `min(GOMAXPROCS, file_count)` workers with a minimum of `1`; `--fleet-scan-workers 1` forces sequential scanning, and values greater than `1` force that many concurrent file scanners. Higher values can reduce wall-clock time on large directories but increase disk and CPU pressure. The generated BigQuery script creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
 
 This sidecar does not feed DNS attribution, connection inference, topology generation, or service endpoint generation.
 The SQL script is not executed by pcaptool.
@@ -567,7 +573,7 @@ This policy is designed to reduce CSV contamination from:
 | Flag | Type | Default | Meaning |
 |---|---|---:|---|
 | `--read-dir`, `-r` | string | required | directory containing PCAP files; walked recursively |
-| `--fleet` | string | empty | optional fleet IPv4 list; when set, writes packet-level TCP SYN evidence artifacts |
+| `--fleet` | string | empty | optional fleet IPv4 list; when set, scans fleet evidence and writes always-on server/probe summaries and flow-direction SQL |
 | `--fleet-scan-workers` | int | `0` | workers for `--fleet` artifact scanning; `0` auto-selects `min(GOMAXPROCS, file_count)` with minimum `1`, `1` is sequential, higher values force concurrent scanning |
 | `--format` | string | `table` | main output format: `table` or `json` |
 | `--export-csv` | string | empty | optional CSV export path for main records |
@@ -584,7 +590,7 @@ This policy is designed to reduce CSV contamination from:
 | `--active-resolvers` | string | empty | comma-separated resolver IPs for active resolve |
 | `--disable-sni` | bool | `false` | skip TLS ClientHello/SNI scan |
 | `--unsorted` | bool | `false` | preserve natural first-seen issuer order in topology output |
-| `--debug` | bool | `false` | emit additional debug artifacts, including CSV append audit |
+| `--debug` | bool | `false` | emit additional debug artifacts, including detailed fleet trail/unique CSVs and CSV append audit |
 | `--manifest-out` | string | empty | write an extra copy of `_run-artifacts.json` |
 | `--post-hook` | string array | empty | shell command(s) to run after extraction completes |
 | `--topology-dns-window` | duration | `2m` | max age between DNS query and first observed edge for topology attribution |

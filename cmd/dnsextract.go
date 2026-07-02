@@ -67,7 +67,7 @@ func init() {
 		&flagFleet,
 		"fleet",
 		"",
-		"Optional fleet IPv4 list path; when set, writes packet-level TCP SYN evidence artifacts.",
+		"Optional fleet IPv4 list path; when set, writes server/probe summaries and flow-direction SQL. Use --debug for detailed trail artifacts.",
 	)
 	cmd.Flags().IntVar(
 		&flagFleetScanWorkers,
@@ -147,7 +147,7 @@ func init() {
 		&flagDebug,
 		"debug",
 		false,
-		"Write additional per-run debug artifacts, including learned IP->DNS append provenance when --dns-ip-file is used.",
+		"Write additional per-run debug artifacts, including detailed fleet trails and learned IP->DNS append provenance.",
 	)
 	cmd.Flags().StringVar(
 		&flagManifestOut,
@@ -226,6 +226,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 			FTPControlPorts:              ftpControlPorts,
 			FTPPassiveMinPort:            ftpPassiveMinPort,
 			ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
+			Debug:                        flagDebug,
 			ScanOptions: syntrail.ScanOptions{
 				Workers:  scanWorkers,
 				Progress: fleetTrailScanProgress(progress.UpdateBar),

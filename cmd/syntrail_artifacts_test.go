@@ -62,7 +62,7 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 		},
 	}
 
-	artifacts, err := writeSYNTrailArtifacts(om, buckets, synTrailArtifactOptions{})
+	artifacts, err := writeSYNTrailArtifacts(om, buckets, synTrailArtifactOptions{Debug: true})
 	if err != nil {
 		t.Fatalf("writeSYNTrailArtifacts() error = %v", err)
 	}
@@ -117,7 +117,7 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	assertSYNTrailFile(t, om, "private-nonfleet-to-fleet-tcp-syn-unique.csv", ""+
 		"src_ip,dst_ip,dst_port\n"+
 		"192.168.1.10,10.0.0.2,22\n")
-	assertSYNTrailFile(t, om, "private-probes-syn-unique.csv", ""+
+	assertSYNTrailFile(t, om, "private-probes-unique.csv", ""+
 		"src_ip,dst_port,protocol\n"+
 		"192.168.1.10,22,tcp\n")
 
@@ -187,6 +187,53 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 			t.Fatalf("%s stat error = %v, want not exist", artifact.filename, err)
 		}
 	}
+	if _, ok := artifacts["private_probes_syn_unique"]; ok {
+		t.Fatal("artifacts contains old key private_probes_syn_unique")
+	}
+	if _, err := os.Stat(om.Path("private-probes-syn-unique.csv")); !os.IsNotExist(err) {
+		t.Fatalf("private-probes-syn-unique.csv stat error = %v, want not exist", err)
+	}
+}
+
+func TestWriteSYNTrailArtifactsNonDebugWritesOnlyAlwaysOnFiles(t *testing.T) {
+	om := newSYNTrailTestOutputManager(t)
+
+	artifacts, err := writeSYNTrailArtifacts(om, nil, synTrailArtifactOptions{Debug: false})
+	if err != nil {
+		t.Fatalf("writeSYNTrailArtifacts() error = %v", err)
+	}
+
+	for _, artifact := range expectedSYNTrailArtifacts {
+		_, present := artifacts[artifact.key]
+		_, statErr := os.Stat(om.Path(artifact.filename))
+		if artifact.debugOnly {
+			if present {
+				t.Fatalf("non-debug artifacts contains debug-only key %q", artifact.key)
+			}
+			if !os.IsNotExist(statErr) {
+				t.Fatalf("non-debug %s stat error = %v, want not exist", artifact.filename, statErr)
+			}
+			continue
+		}
+		if !present {
+			t.Fatalf("non-debug artifacts missing always-on key %q", artifact.key)
+		}
+		if statErr != nil {
+			t.Fatalf("stat always-on %s: %v", artifact.filename, statErr)
+		}
+	}
+	if len(artifacts) != 4 {
+		t.Fatalf("non-debug artifact count = %d, want 4", len(artifacts))
+	}
+	if got := artifacts["private_probes_unique"]; got != om.Path("private-probes-unique.csv") {
+		t.Fatalf("private probes artifact path = %q", got)
+	}
+	if _, ok := artifacts["private_probes_syn_unique"]; ok {
+		t.Fatal("non-debug artifacts contains old key private_probes_syn_unique")
+	}
+	if _, err := os.Stat(om.Path("private-probes-syn-unique.csv")); !os.IsNotExist(err) {
+		t.Fatalf("private-probes-syn-unique.csv stat error = %v, want not exist", err)
+	}
 }
 
 func TestWriteSYNTrailArtifactsFlowDirectionSQLDedupesDuplicatePrivateServerTuples(t *testing.T) {
@@ -212,7 +259,7 @@ func TestWriteSYNTrailArtifactsFlowDirectionSQLDedupesDuplicatePrivateServerTupl
 func TestWriteSYNTrailArtifactsEmptyBucketsWriteHeaderOnlyFiles(t *testing.T) {
 	om := newSYNTrailTestOutputManager(t)
 
-	artifacts, err := writeSYNTrailArtifacts(om, nil, synTrailArtifactOptions{})
+	artifacts, err := writeSYNTrailArtifacts(om, nil, synTrailArtifactOptions{Debug: true})
 	if err != nil {
 		t.Fatalf("writeSYNTrailArtifacts() error = %v", err)
 	}
@@ -408,6 +455,7 @@ func TestWriteSYNTrailArtifactsFiltersPassiveFTPOnlyFromServerSummaries(t *testi
 	opt := synTrailArtifactOptions{
 		FTPControlPorts:   map[uint16]struct{}{21000: {}},
 		FTPPassiveMinPort: 17000,
+		Debug:             true,
 	}
 
 	if _, err := writeSYNTrailArtifacts(om, buckets, opt); err != nil {
@@ -468,6 +516,7 @@ func TestWriteSYNTrailArtifactsExcludesUDPPortsOnlyFromServerSummaries(t *testin
 	}
 	opt := synTrailArtifactOptions{
 		ServerSummaryExcludeUDPPorts: excludedPorts,
+		Debug:                        true,
 	}
 
 	if _, err := writeSYNTrailArtifacts(om, buckets, opt); err != nil {
@@ -526,26 +575,30 @@ func TestWriteSYNTrailArtifactsEmptyUDPExclusionSetRetainsServerSummaryUDP(t *te
 }
 
 type expectedSYNTrailArtifact struct {
-	filename string
-	key      string
-	header   string
+	filename  string
+	key       string
+	header    string
+	debugOnly bool
 }
 
 var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
 	{
-		filename: "fleet-to-public-trail.csv",
-		key:      "fleet_to_public_trail",
-		header:   "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n",
+		filename:  "fleet-to-public-trail.csv",
+		key:       "fleet_to_public_trail",
+		header:    "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n",
+		debugOnly: true,
 	},
 	{
-		filename: "fleet-to-private-nonfleet-trail.csv",
-		key:      "fleet_to_private_nonfleet_trail",
-		header:   "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n",
+		filename:  "fleet-to-private-nonfleet-trail.csv",
+		key:       "fleet_to_private_nonfleet_trail",
+		header:    "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n",
+		debugOnly: true,
 	},
 	{
-		filename: "fleet-to-public-unique.csv",
-		key:      "fleet_to_public_unique",
-		header:   "src_ip,dst_ip,dst_port,protocol\n",
+		filename:  "fleet-to-public-unique.csv",
+		key:       "fleet_to_public_unique",
+		header:    "src_ip,dst_ip,dst_port,protocol\n",
+		debugOnly: true,
 	},
 	{
 		filename: "public-servers-unique.csv",
@@ -553,9 +606,10 @@ var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
 		header:   "dst_ip,dst_port,protocol\n",
 	},
 	{
-		filename: "fleet-to-private-nonfleet-syn-unique.csv",
-		key:      "fleet_to_private_nonfleet_syn_unique",
-		header:   "src_ip,dst_ip,dst_port,protocol\n",
+		filename:  "fleet-to-private-nonfleet-syn-unique.csv",
+		key:       "fleet_to_private_nonfleet_syn_unique",
+		header:    "src_ip,dst_ip,dst_port,protocol\n",
+		debugOnly: true,
 	},
 	{
 		filename: "private-servers-unique.csv",
@@ -563,28 +617,32 @@ var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
 		header:   "dst_ip,dst_port,protocol\n",
 	},
 	{
-		filename: "fleet-to-fleet-tcp-syn-trail.csv",
-		key:      "fleet_to_fleet_tcp_syn_trail",
-		header:   "src_ip,dst_ip,dst_port,syn_timestamp_utc\n",
+		filename:  "fleet-to-fleet-tcp-syn-trail.csv",
+		key:       "fleet_to_fleet_tcp_syn_trail",
+		header:    "src_ip,dst_ip,dst_port,syn_timestamp_utc\n",
+		debugOnly: true,
 	},
 	{
-		filename: "fleet-to-fleet-tcp-syn-unique.csv",
-		key:      "fleet_to_fleet_tcp_syn_unique",
-		header:   "src_ip,dst_ip,dst_port\n",
+		filename:  "fleet-to-fleet-tcp-syn-unique.csv",
+		key:       "fleet_to_fleet_tcp_syn_unique",
+		header:    "src_ip,dst_ip,dst_port\n",
+		debugOnly: true,
 	},
 	{
-		filename: "private-nonfleet-to-fleet-trail.csv",
-		key:      "private_nonfleet_to_fleet_trail",
-		header:   "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n",
+		filename:  "private-nonfleet-to-fleet-trail.csv",
+		key:       "private_nonfleet_to_fleet_trail",
+		header:    "src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n",
+		debugOnly: true,
 	},
 	{
-		filename: "private-nonfleet-to-fleet-tcp-syn-unique.csv",
-		key:      "private_nonfleet_to_fleet_tcp_syn_unique",
-		header:   "src_ip,dst_ip,dst_port\n",
+		filename:  "private-nonfleet-to-fleet-tcp-syn-unique.csv",
+		key:       "private_nonfleet_to_fleet_tcp_syn_unique",
+		header:    "src_ip,dst_ip,dst_port\n",
+		debugOnly: true,
 	},
 	{
-		filename: "private-probes-syn-unique.csv",
-		key:      "private_probes_syn_unique",
+		filename: "private-probes-unique.csv",
+		key:      "private_probes_unique",
 		header:   "src_ip,dst_port,protocol\n",
 	},
 	{
