@@ -46,6 +46,7 @@ var (
 	flagTopologyDNSWindow            time.Duration
 	flagActiveResolve                bool
 	flagActiveResolvers              string
+	flagReverseDNSLookup             bool
 	flagDisableSNI                   bool
 	flagUnsorted                     bool
 	flagDebug                        bool
@@ -53,6 +54,7 @@ var (
 	flagPostHooks                    []string
 	flagFleetScanWorkers             int
 	resolveDNSNamesIPv4              = dns.ResolveDNSNamesIPv4
+	completeTopologyWithReverseDNS   = dns.CompleteTopologyWithReverseDNS
 )
 
 func init() {
@@ -130,6 +132,12 @@ func init() {
 		"active-resolvers",
 		"",
 		"Comma-separated resolver IPs for --active-resolve (e.g. 8.8.8.8,1.1.1.1). Defaults are used when empty.",
+	)
+	cmd.Flags().BoolVar(
+		&flagReverseDNSLookup,
+		"reverse-dns-lookup",
+		false,
+		"Use PTR lookups as last-resort completion for unattributed public topology IPs and write a lookup audit CSV.",
 	)
 	cmd.Flags().BoolVar(
 		&flagDisableSNI,
@@ -473,6 +481,41 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// completion and conservative DNS donation.
 	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
 
+	reverseDNSLookupLogPath := ""
+	if flagReverseDNSLookup {
+		// PTR is weak endpoint labeling, not packet-observed DNS evidence, so it
+		// intentionally does not re-filter unresolvedFinal.
+		progress.SetStage("Pass 4.5: reverse DNS lookup for remaining topology IPs...")
+		var reverseDNSRecords []dns.ReverseDNSLookupRecord
+		topo, reverseDNSRecords, err = completeTopologyWithReverseDNS(ctx, topo, nil, dns.ReverseDNSLookupOptions{
+			Progress: func(processed, total int) {
+				progress.UpdateBar(processed, total, fmt.Sprintf("processed %d / %d IPs", processed, total))
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("complete topology with reverse DNS: %w", err)
+		}
+		reverseDNSLookupLogPath, err = writeReverseDNSLookupLog(om, reverseDNSRecords)
+		if err != nil {
+			return err
+		}
+		statusCounts := make(map[string]int)
+		for _, record := range reverseDNSRecords {
+			statusCounts[record.Status]++
+		}
+		progress.SetStage(fmt.Sprintf(
+			"Pass 4.5: reverse DNS lookup complete: %d processed, %d used_raw, %d used_fcrdns, %d used_normalized, %d nxdomain/no_ptr, %d skipped_noise, %d ambiguous, %d error.",
+			len(reverseDNSRecords),
+			statusCounts["used_raw"],
+			statusCounts["used_fcrdns"],
+			statusCounts["used_normalized"],
+			statusCounts["nxdomain"]+statusCounts["no_ptr"],
+			statusCounts["skipped_noise"],
+			statusCounts["ambiguous"],
+			statusCounts["error"],
+		))
+	}
+
 	networkTopologyPath := ""
 	networkTopologyJSONPath := ""
 	networkTopologyCompactJSONPath := ""
@@ -649,6 +692,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if truncatedDNSPacketsPath != "" {
 		filesMap["truncated_dns_packets"] = truncatedDNSPacketsPath
 	}
+	if reverseDNSLookupLogPath != "" {
+		filesMap["reverse_dns_lookup_log"] = reverseDNSLookupLogPath
+	}
 	for key, path := range synTrailArtifacts {
 		filesMap[key] = path
 	}
@@ -790,6 +836,23 @@ func writeTruncatedDNSPacketsCSV(om *OutputManager, rows []dns.TruncatedDNSPacke
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+func writeReverseDNSLookupLog(om *OutputManager, rows []dns.ReverseDNSLookupRecord) (string, error) {
+	f, err := om.Create("reverse-dns-lookup-log.csv")
+	if err != nil {
+		return "", fmt.Errorf("create reverse DNS lookup log: %w", err)
+	}
+	path := f.Name()
+	writeErr := dns.WriteReverseDNSLookupCSV(f, rows)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return "", fmt.Errorf("write reverse DNS lookup log: %w", writeErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close reverse DNS lookup log: %w", closeErr)
+	}
+	return path, nil
 }
 
 func parseResolverServers(s string) ([]string, error) {

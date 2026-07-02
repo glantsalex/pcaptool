@@ -223,6 +223,154 @@ func TestDnsextractFleetArtifactsRespectDebugAndProbeRename(t *testing.T) {
 	}
 }
 
+func TestDnsextractReverseDNSLookupArtifactAndManifest(t *testing.T) {
+	restoreDNSExtractFlags(t)
+	resolveDNSNamesIPv4 = func(
+		context.Context,
+		[]string,
+		dns.ResolveUnresolvedOptions,
+		dns.IPv4LookupFunc,
+	) ([]dns.DNSNameIPv4Resolution, error) {
+		t.Fatal("active resolver called while --active-resolve=false")
+		return nil, nil
+	}
+
+	readDir := t.TempDir()
+	writeDNSArtifactTestPCAP(t, filepath.Join(readDir, "capture.pcap"))
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
+			lookupCalls := 0
+			completeTopologyWithReverseDNS = func(
+				_ context.Context,
+				entries []dns.TopologyEntry,
+				resolver *dns.ReverseResolver,
+				options dns.ReverseDNSLookupOptions,
+			) ([]dns.TopologyEntry, []dns.ReverseDNSLookupRecord, error) {
+				lookupCalls++
+				if resolver != nil {
+					t.Fatalf("command resolver = %#v, want nil/default resolver", resolver)
+				}
+				out := append([]dns.TopologyEntry(nil), entries...)
+				completed := false
+				for i := range out {
+					if out[i].DestinationIP == "8.8.8.8" && strings.TrimSpace(out[i].DNSName) == "" {
+						out[i].DNSName = "ptr.example.com"
+						out[i].DNSSource = "ptr+fcrdns+matrix"
+						completed = true
+					}
+				}
+				if !completed {
+					t.Fatalf("test fixture has no unattributed 8.8.8.8 topology row: %#v", entries)
+				}
+				if options.Progress == nil {
+					t.Fatal("command reverse DNS progress callback = nil")
+				}
+				options.Progress(1, 1)
+				return out, []dns.ReverseDNSLookupRecord{{
+					IP:               "8.8.8.8",
+					Status:           "used_fcrdns",
+					RawPTR:           "ptr.example.com",
+					NormalizedName:   "ptr.example.com",
+					Source:           "ptr+fcrdns+matrix",
+					Reason:           "forward_confirmed",
+					ForwardConfirmed: true,
+					ForwardIPs:       "8.8.8.8",
+				}}, nil
+			}
+
+			outputRoot := t.TempDir()
+			flagReadDir = readDir
+			flagNetID = "net"
+			flagOutputRoot = outputRoot
+			flagFormat = "table"
+			flagFleet = ""
+			flagExportCSV = ""
+			flagConnectivityShort = false
+			flagRadiusIMSI = false
+			flagOnlyTCP = false
+			flagIgnoreNTP = false
+			flagExcludePorts = "53"
+			flagFTPControlPorts = "21,990"
+			flagFTPPassiveMinPort = "30000"
+			flagServerSummaryExcludeUDPPorts = "33434-33534"
+			flagDNSIPFile = ""
+			flagTopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+			flagActiveResolve = false
+			flagActiveResolvers = ""
+			flagReverseDNSLookup = enabled
+			flagDisableSNI = true
+			flagUnsorted = false
+			flagDebug = false
+			flagManifestOut = ""
+			flagPostHooks = nil
+			flagFleetScanWorkers = 0
+			flagEnforcePrivateAsSource = false
+
+			if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
+				t.Fatalf("runDNSExtract(reverse-dns=%v): %v", enabled, err)
+			}
+			wantCalls := 0
+			if enabled {
+				wantCalls = 1
+			}
+			if lookupCalls != wantCalls {
+				t.Fatalf("reverse DNS completion calls = %d, want %d", lookupCalls, wantCalls)
+			}
+
+			runEntries, err := os.ReadDir(filepath.Join(outputRoot, "net"))
+			if err != nil {
+				t.Fatalf("read network output dir: %v", err)
+			}
+			runDir := filepath.Join(outputRoot, "net", runEntries[0].Name())
+			logPath := filepath.Join(runDir, "reverse-dns-lookup-log.csv")
+			manifestBytes, err := os.ReadFile(filepath.Join(runDir, "_run-artifacts.json"))
+			if err != nil {
+				t.Fatalf("read manifest: %v", err)
+			}
+			var manifest RunArtifactsManifest
+			if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+				t.Fatalf("unmarshal manifest: %v", err)
+			}
+			if !enabled {
+				if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+					t.Fatalf("disabled reverse DNS log stat error = %v, want not exist", err)
+				}
+				if _, ok := manifest.Files["reverse_dns_lookup_log"]; ok {
+					t.Fatal("disabled manifest contains reverse_dns_lookup_log")
+				}
+				return
+			}
+
+			logBytes, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read reverse DNS log: %v", err)
+			}
+			if !strings.Contains(string(logBytes), "8.8.8.8,used_fcrdns,ptr.example.com") {
+				t.Fatalf("reverse DNS log missing result: %s", logBytes)
+			}
+			if got := manifest.Files["reverse_dns_lookup_log"]; got != logPath {
+				t.Fatalf("manifest reverse DNS path = %q, want %q", got, logPath)
+			}
+			for _, filename := range []string{"network-topology-matrix.txt", "network-topology-matrix.json", "network-topology-matrix.compact.json", "service-endpoints.txt"} {
+				contents, err := os.ReadFile(filepath.Join(runDir, filename))
+				if err != nil {
+					t.Fatalf("read %s: %v", filename, err)
+				}
+				if !strings.Contains(string(contents), "ptr.example.com") {
+					t.Fatalf("%s does not contain reverse DNS completion: %s", filename, contents)
+				}
+			}
+			unresolvedBytes, err := os.ReadFile(filepath.Join(runDir, "dns-unresolved-dns.txt"))
+			if err != nil {
+				t.Fatalf("read unresolved DNS artifact: %v", err)
+			}
+			if got := unresolvedDNSNamesFromTable(string(unresolvedBytes)); !reflect.DeepEqual(got, []string{"api.example.com", "normal.example"}) {
+				t.Fatalf("PTR completion changed unresolved DNS artifact: %#v", got)
+			}
+		})
+	}
+}
+
 func restoreDNSExtractFlags(t *testing.T) {
 	t.Helper()
 	oldReadDir, oldFleet := flagReadDir, flagFleet
@@ -234,6 +382,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 	oldServerSummaryExcludeUDPPorts := flagServerSummaryExcludeUDPPorts
 	oldDNSIPFile, oldTopologyDNSWindow := flagDNSIPFile, flagTopologyDNSWindow
 	oldActiveResolve, oldActiveResolvers := flagActiveResolve, flagActiveResolvers
+	oldReverseDNSLookup := flagReverseDNSLookup
 	oldDisableSNI, oldUnsorted, oldDebug := flagDisableSNI, flagUnsorted, flagDebug
 	oldManifestOut := flagManifestOut
 	oldPostHooks := append([]string(nil), flagPostHooks...)
@@ -241,6 +390,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 	oldNetID, oldOutputRoot := flagNetID, flagOutputRoot
 	oldEnforcePrivateAsSource := flagEnforcePrivateAsSource
 	oldResolveDNSNamesIPv4 := resolveDNSNamesIPv4
+	oldCompleteTopologyWithReverseDNS := completeTopologyWithReverseDNS
 	t.Cleanup(func() {
 		flagReadDir, flagFleet = oldReadDir, oldFleet
 		flagFormat, flagExportCSV = oldFormat, oldExportCSV
@@ -251,6 +401,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 		flagServerSummaryExcludeUDPPorts = oldServerSummaryExcludeUDPPorts
 		flagDNSIPFile, flagTopologyDNSWindow = oldDNSIPFile, oldTopologyDNSWindow
 		flagActiveResolve, flagActiveResolvers = oldActiveResolve, oldActiveResolvers
+		flagReverseDNSLookup = oldReverseDNSLookup
 		flagDisableSNI, flagUnsorted, flagDebug = oldDisableSNI, oldUnsorted, oldDebug
 		flagManifestOut = oldManifestOut
 		flagPostHooks = oldPostHooks
@@ -258,6 +409,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 		flagNetID, flagOutputRoot = oldNetID, oldOutputRoot
 		flagEnforcePrivateAsSource = oldEnforcePrivateAsSource
 		resolveDNSNamesIPv4 = oldResolveDNSNamesIPv4
+		completeTopologyWithReverseDNS = oldCompleteTopologyWithReverseDNS
 	})
 }
 

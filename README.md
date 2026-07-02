@@ -258,6 +258,18 @@ Each entry contains:
 - `proto`
 - `count`
 
+#### `reverse-dns-lookup-log.csv`
+
+Produced whenever `--reverse-dns-lookup` is enabled, including as a header-only artifact when there are no eligible public IPv4 topology rows. Manifest key: `reverse_dns_lookup_log`.
+
+The log contains one deterministic row per queried IP with these columns:
+
+```text
+ip,status,raw_ptr,normalized_name,source,reason,forward_confirmed,forward_ips,error
+```
+
+PTR and forward-IP lists are canonicalized, sorted, deduplicated, and joined with semicolons. Individual lookup failures are recorded without failing the run; parent cancellation still aborts the command.
+
 #### `export_csv` target
 
 If `--export-csv` is used, the main records are exported as CSV.
@@ -451,6 +463,8 @@ Examples:
 
 The final topology matrix is built by joining connectivity edges back to the best DNS/SNI evidence available, with a configurable age window (`--topology-dns-window`).
 
+When `--reverse-dns-lookup` is enabled, PTR lookup runs after active completion and DNS donation as a last-resort pass over still-unattributed public IPv4 matrix rows. Lookup work is bounded, deduplicated by IP, and uses a two-second timeout per IP. A unique forward-confirmed PTR is preferred, followed by a unique usable raw PTR, then a matching AWS EC2 IP-encoded normalization. Ambiguous, local, reverse-zone, invalid, or mismatched AWS names do not fill topology rows. PTR completion is weak endpoint labeling based on current resolver state; it is not observed DNS evidence and does not establish capture-time truth. PTR-completed names cannot act as donation sources and do not alter `dns-unresolved-dns.txt`.
+
 ### Service endpoint build
 
 The topology matrix is then reduced into unique service endpoint tuples for downstream ingestion.
@@ -470,6 +484,9 @@ Common source labels in `network-topology-matrix.txt` and related outputs:
 | `active+synack` | name was obtained by active resolver lookup and later confirmed by observed connection |
 | `active+conn+synack` | active-resolve name with connectivity-inferred IP |
 | `active+matrix` | an otherwise-unattributed topology row was completed from an optional active-resolve result |
+| `ptr+fcrdns+matrix` | a unique PTR name forward-resolved to the queried public IPv4 and completed an unattributed matrix row |
+| `ptr+matrix` | a unique usable raw PTR name completed an unattributed matrix row without forward confirmation |
+| `ptr-normalized+matrix` | a matching AWS EC2 IP-encoded PTR was normalized and completed an unattributed matrix row |
 | `csv+conn` | DNS came from `dns-ip.csv` fallback on a non-mid-session row |
 | `csv+mid` | DNS came from `dns-ip.csv` fallback for a mid-session row |
 | `mid-session` | connection was observed without usable DNS attribution |
@@ -480,6 +497,7 @@ Important details:
 
 - CSV fallback never acts as a donor for peer completion.
 - Mid-session peer completion is run-local only; it is not persisted back into `dns-ip.csv`.
+- PTR completion runs after donation, cannot donate to other rows, and is not persisted back into `dns-ip.csv`.
 - Strong direct evidence suppresses weaker conflicting CSV fallback where possible.
 
 ## `dns-ip.csv` / `dns-ip.txt` Fallback Map
@@ -588,6 +606,7 @@ This policy is designed to reduce CSV contamination from:
 | `--server-summary-exclude-udp-ports` | port/range set | `33434-33534` | UDP destination ports excluded only from public/private server summary artifacts; empty disables |
 | `--active-resolve` | bool | `false` | resolve unresolved names against external resolvers |
 | `--active-resolvers` | string | empty | comma-separated resolver IPs for active resolve |
+| `--reverse-dns-lookup` | bool | `false` | use bounded PTR/forward-confirmation lookup as last-resort topology completion and write its audit CSV |
 | `--disable-sni` | bool | `false` | skip TLS ClientHello/SNI scan |
 | `--unsorted` | bool | `false` | preserve natural first-seen issuer order in topology output |
 | `--debug` | bool | `false` | emit additional debug artifacts, including detailed fleet trail/unique CSVs and CSV append audit |
