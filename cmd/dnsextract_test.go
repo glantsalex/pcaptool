@@ -165,7 +165,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 	})
 }
 
-func TestActiveResolveFiltersFinalUnresolvedWithoutMutatingDNSIP(t *testing.T) {
+func TestActiveResolveFiltersFinalUnresolvedWritesCompactMatrixWithoutMutatingDNSIP(t *testing.T) {
 	restoreDNSExtractFlags(t)
 
 	readDir := t.TempDir()
@@ -245,6 +245,32 @@ func TestActiveResolveFiltersFinalUnresolvedWithoutMutatingDNSIP(t *testing.T) {
 	matrix := string(matrixBytes)
 	if !strings.Contains(matrix, "normal.example") || !strings.Contains(matrix, "active+matrix") {
 		t.Fatalf("active matrix completion missing from topology:\n%s", matrix)
+	}
+	compactMatrixPath := filepath.Join(runDir, "network-topology-matrix.compact.json")
+	compactMatrixBytes, err := os.ReadFile(compactMatrixPath)
+	if err != nil {
+		t.Fatalf("read compact network topology matrix: %v", err)
+	}
+	var compactMatrix struct {
+		Version int    `json:"version"`
+		Layout  string `json:"layout"`
+	}
+	if err := json.Unmarshal(compactMatrixBytes, &compactMatrix); err != nil {
+		t.Fatalf("unmarshal compact network topology matrix: %v", err)
+	}
+	if compactMatrix.Version != 2 || compactMatrix.Layout != "dict_by_issuer" {
+		t.Fatalf("compact matrix metadata = %#v", compactMatrix)
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(runDir, "_run-artifacts.json"))
+	if err != nil {
+		t.Fatalf("read run artifact manifest: %v", err)
+	}
+	var manifest RunArtifactsManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("unmarshal run artifact manifest: %v", err)
+	}
+	if got := manifest.Files["network_topology_matrix_compact"]; got != compactMatrixPath {
+		t.Fatalf("manifest compact matrix path = %q, want %q", got, compactMatrixPath)
 	}
 
 	unresolvedBytes, err := os.ReadFile(filepath.Join(runDir, "dns-unresolved-dns.txt"))

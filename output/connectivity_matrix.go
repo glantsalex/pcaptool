@@ -147,6 +147,107 @@ func WriteNetworkTopologyMatrixJSON(w io.Writer, entries []dns.TopologyEntry) er
 	return enc.Encode(payload)
 }
 
+type networkTopologyMatrixCompactJSON struct {
+	Version  int                                    `json:"version"`
+	Layout   string                                 `json:"layout"`
+	TimeUnit string                                 `json:"time_unit"`
+	Columns  []string                               `json:"columns"`
+	Dict     networkTopologyMatrixCompactDictionary `json:"dict"`
+	Issuers  [][2]any                               `json:"issuers"`
+}
+
+type networkTopologyMatrixCompactDictionary struct {
+	Issuer []string `json:"issuer"`
+	Dst    []string `json:"dst"`
+	DNS    []string `json:"dns"`
+	Source []string `json:"source"`
+	Proto  []string `json:"proto"`
+}
+
+type compactStringDictionary struct {
+	values []string
+	ids    map[string]int64
+}
+
+func newCompactStringDictionary() *compactStringDictionary {
+	return &compactStringDictionary{
+		values: make([]string, 0),
+		ids:    make(map[string]int64),
+	}
+}
+
+func (d *compactStringDictionary) id(value string) int64 {
+	if id, ok := d.ids[value]; ok {
+		return id
+	}
+	id := int64(len(d.values))
+	d.ids[value] = id
+	d.values = append(d.values, value)
+	return id
+}
+
+type networkTopologyMatrixCompactIssuerGroup struct {
+	issuerID int64
+	rows     [][6]int64
+}
+
+// WriteNetworkTopologyMatrixCompactJSON writes a dictionary-encoded topology
+// matrix. Dictionary IDs and issuer groups follow first-seen input order, and
+// rows within an issuer retain their relative input order.
+func WriteNetworkTopologyMatrixCompactJSON(w io.Writer, entries []dns.TopologyEntry) error {
+	issuerDict := newCompactStringDictionary()
+	dstDict := newCompactStringDictionary()
+	dnsDict := newCompactStringDictionary()
+	sourceDict := newCompactStringDictionary()
+	protoDict := newCompactStringDictionary()
+
+	groups := make([]networkTopologyMatrixCompactIssuerGroup, 0)
+	groupByIssuerID := make(map[int64]int)
+	for _, entry := range entries {
+		issuerID := issuerDict.id(entry.IssuerIP)
+		groupIndex, ok := groupByIssuerID[issuerID]
+		if !ok {
+			groupIndex = len(groups)
+			groupByIssuerID[issuerID] = groupIndex
+			groups = append(groups, networkTopologyMatrixCompactIssuerGroup{issuerID: issuerID})
+		}
+
+		firstMS := int64(0)
+		if !entry.ObservedAt.IsZero() {
+			firstMS = entry.ObservedAt.UTC().UnixMilli()
+		}
+		groups[groupIndex].rows = append(groups[groupIndex].rows, [6]int64{
+			dstDict.id(entry.DestinationIP),
+			dnsDict.id(entry.DNSName),
+			sourceDict.id(entry.DNSSource),
+			protoDict.id(entry.Protocol),
+			int64(entry.Port),
+			firstMS,
+		})
+	}
+
+	issuerGroups := make([][2]any, 0, len(groups))
+	for _, group := range groups {
+		issuerGroups = append(issuerGroups, [2]any{group.issuerID, group.rows})
+	}
+	payload := networkTopologyMatrixCompactJSON{
+		Version:  2,
+		Layout:   "dict_by_issuer",
+		TimeUnit: "unix_ms",
+		Columns:  []string{"dst", "dns", "source", "proto", "port", "first_ms"},
+		Dict: networkTopologyMatrixCompactDictionary{
+			Issuer: issuerDict.values,
+			Dst:    dstDict.values,
+			DNS:    dnsDict.values,
+			Source: sourceDict.values,
+			Proto:  protoDict.values,
+		},
+		Issuers: issuerGroups,
+	}
+
+	return json.NewEncoder(w).Encode(payload)
+}
+
 // WriteTCPEgressEndpoints writes unique public destination IPs with protocol port lists.
 // Output format (compressed):
 //

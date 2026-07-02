@@ -474,6 +474,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 
 	networkTopologyPath := ""
 	networkTopologyJSONPath := ""
+	networkTopologyCompactJSONPath := ""
 	if len(topo) > 0 {
 		mf, err := om.Create("network-topology-matrix.txt")
 		if err != nil {
@@ -495,6 +496,17 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 
 		if err := output.WriteNetworkTopologyMatrixJSON(mjf, topo); err != nil {
 			return fmt.Errorf("write network topology matrix json: %w", err)
+		}
+
+		mcjf, err := om.Create("network-topology-matrix.compact.json")
+		if err != nil {
+			return fmt.Errorf("create compact network topology matrix json: %w", err)
+		}
+		defer mcjf.Close()
+		networkTopologyCompactJSONPath = mcjf.Name()
+
+		if err := output.WriteNetworkTopologyMatrixCompactJSON(mcjf, topo); err != nil {
+			return fmt.Errorf("write compact network topology matrix json: %w", err)
 		}
 	}
 
@@ -614,6 +626,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if networkTopologyJSONPath != "" {
 		filesMap["network_topology_matrix_json"] = networkTopologyJSONPath
+	}
+	if networkTopologyCompactJSONPath != "" {
+		filesMap["network_topology_matrix_compact"] = networkTopologyCompactJSONPath
 	}
 	if unresolvedDNSPath != "" {
 		filesMap["dns_unresolved_dns"] = unresolvedDNSPath
