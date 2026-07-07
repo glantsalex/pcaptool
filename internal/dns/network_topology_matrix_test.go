@@ -568,36 +568,189 @@ func TestBuildNetworkTopologyMatrixEntries_UniqueCSVMidSurvivesConflictingStrong
 	}
 }
 
-func TestIsSafeDNSDonationDonor(t *testing.T) {
+func TestClassifyDNSDonationDonor(t *testing.T) {
 	tests := []struct {
 		name   string
 		source string
-		want   bool
+		want   dnsDonationDonorTier
 	}{
-		{name: "direct DNS", source: "dns+synack", want: true},
-		{name: "direct SNI", source: "sni+synack", want: true},
-		{name: "leading whitespace", source: " dns+synack", want: false},
-		{name: "uppercase", source: "DNS+SYNACK", want: false},
-		{name: "DNS connection inferred", source: "dns+conn+synack", want: false},
-		{name: "SNI connection inferred", source: "sni+conn+synack", want: false},
-		{name: "DNS connection only", source: "dns+conn", want: false},
-		{name: "SNI connection only", source: "sni+conn", want: false},
-		{name: "CSV connection", source: "csv+conn", want: false},
-		{name: "CSV mid-session", source: "csv+mid", want: false},
-		{name: "mid-session", source: "mid-session", want: false},
-		{name: "legacy peer", source: "peer+ipport", want: false},
-		{name: "legacy peer inferred", source: "peer+ipport+conn", want: false},
-		{name: "previous donation", source: "donated+ipport", want: false},
-		{name: "active completion", source: "active+matrix", want: false},
-		{name: "placeholder", source: "placeholder", want: false},
-		{name: "arbitrary future connection", source: "future+conn", want: false},
-		{name: "empty", source: "", want: false},
+		{name: "direct DNS", source: "dns+synack", want: dnsDonationDonorDirect},
+		{name: "direct SNI normalized", source: " SNI+SYNACK ", want: dnsDonationDonorDirect},
+		{name: "DNS connection inferred normalized", source: " DNS+CONN+SYNACK ", want: dnsDonationDonorInferred},
+		{name: "SNI connection inferred", source: "sni+conn+synack", want: dnsDonationDonorNone},
+		{name: "DNS connection only", source: "dns+conn", want: dnsDonationDonorNone},
+		{name: "SNI connection only", source: "sni+conn", want: dnsDonationDonorNone},
+		{name: "CSV connection", source: "csv+conn", want: dnsDonationDonorNone},
+		{name: "CSV mid-session", source: "csv+mid", want: dnsDonationDonorNone},
+		{name: "mid-session", source: "mid-session", want: dnsDonationDonorNone},
+		{name: "legacy peer", source: "peer+ipport", want: dnsDonationDonorNone},
+		{name: "previous donation", source: "donated+ipport", want: dnsDonationDonorNone},
+		{name: "active completion", source: "active+matrix", want: dnsDonationDonorNone},
+		{name: "placeholder", source: "placeholder", want: dnsDonationDonorNone},
+		{name: "arbitrary future connection", source: "future+conn", want: dnsDonationDonorNone},
+		{name: "empty", source: "", want: dnsDonationDonorNone},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isSafeDNSDonationDonor(tt.source); got != tt.want {
-				t.Fatalf("isSafeDNSDonationDonor(%q)=%v, want %v", tt.source, got, tt.want)
+			if got := classifyDNSDonationDonor(tt.source); got != tt.want {
+				t.Fatalf("classifyDNSDonationDonor(%q)=%v, want %v", tt.source, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDNSDonationName(t *testing.T) {
+	tests := []struct {
+		name  string
+		names []string
+		want  string
+	}{
+		{name: "none", want: ""},
+		{name: "one name stays full", names: []string{"api.eu.example.com"}, want: "api.eu.example.com"},
+		{name: "common suffix", names: []string{"web.us.example.com", "api.eu.example.com"}, want: "example.com"},
+		{name: "longer common suffix", names: []string{"b.service.example.com", "a.service.example.com"}, want: "service.example.com"},
+		{name: "total ev charge suffix", names: []string{"evse.total-ev-charge.com", "api.total-ev-charge.com"}, want: "total-ev-charge.com"},
+		{name: "amazonaws suffix", names: []string{"broker.iot.ap-southeast-2.amazonaws.com", "bucket.s3.amazonaws.com"}, want: "amazonaws.com"},
+		{name: "two-label co uk suffix", names: []string{"api.example.co.uk", "web.other.co.uk"}, want: "co.uk"},
+		{name: "one label is insufficient", names: []string{"one.example", "two.example"}, want: ""},
+		{name: "no suffix", names: []string{"api.example.com", "api.example.net"}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			names := make(map[string]struct{}, len(tt.names))
+			for _, name := range tt.names {
+				names[name] = struct{}{}
+			}
+			if got := dnsDonationName(names); got != tt.want {
+				t.Fatalf("dnsDonationName(%v)=%q, want %q", tt.names, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompleteTopologyWithDNSDonationTierSuffixAndRecipientRules(t *testing.T) {
+	const (
+		ip    = "8.8.8.8"
+		proto = "tcp"
+		port  = uint16(443)
+	)
+
+	tests := []struct {
+		name       string
+		donors     []TopologyEntry
+		recipient  TopologyEntry
+		wantName   string
+		wantSource string
+	}{
+		{
+			name:       "A single direct name donates full",
+			donors:     []TopologyEntry{{DestinationIP: ip, DNSName: " API.EXAMPLE.COM. ", DNSSource: "dns+synack", Protocol: proto, Port: port}},
+			recipient:  TopologyEntry{DNSSource: " Mid-Session "},
+			wantName:   "api.example.com",
+			wantSource: "donated+ipport",
+		},
+		{
+			name: "B multiple direct names donate common suffix",
+			donors: []TopologyEntry{
+				{DestinationIP: ip, DNSName: "api.eu.example.com", DNSSource: "dns+synack", Protocol: proto, Port: port},
+				{DestinationIP: ip, DNSName: "web.us.example.com", DNSSource: "sni+synack", Protocol: proto, Port: port},
+			},
+			wantName:   "example.com",
+			wantSource: "donated+ipport",
+		},
+		{
+			name: "C no two-label direct suffix does not donate",
+			donors: []TopologyEntry{
+				{DestinationIP: ip, DNSName: "one.example", DNSSource: "dns+synack", Protocol: proto, Port: port},
+				{DestinationIP: ip, DNSName: "two.example", DNSSource: "dns+synack", Protocol: proto, Port: port},
+			},
+			wantSource: "mid-session",
+		},
+		{
+			name: "D direct tier wins over inferred",
+			donors: []TopologyEntry{
+				{DestinationIP: ip, DNSName: "direct.example.com", DNSSource: "dns+synack", Protocol: proto, Port: port},
+				{DestinationIP: ip, DNSName: "inferred.other.net", DNSSource: "dns+conn+synack", Protocol: proto, Port: port},
+			},
+			wantName:   "direct.example.com",
+			wantSource: "donated+ipport",
+		},
+		{
+			name: "D direct tier prevents inferred fallback",
+			donors: []TopologyEntry{
+				{DestinationIP: ip, DNSName: "one.example", DNSSource: "dns+synack", Protocol: proto, Port: port},
+				{DestinationIP: ip, DNSName: "two.example", DNSSource: "sni+synack", Protocol: proto, Port: port},
+				{DestinationIP: ip, DNSName: "usable.example.com", DNSSource: "dns+conn+synack", Protocol: proto, Port: port},
+			},
+			wantSource: "mid-session",
+		},
+		{
+			name:       "E single inferred name donates full",
+			donors:     []TopologyEntry{{DestinationIP: ip, DNSName: "inferred.example.com", DNSSource: "dns+conn+synack", Protocol: proto, Port: port}},
+			wantName:   "inferred.example.com",
+			wantSource: "donated+ipport+conn",
+		},
+		{
+			name: "F multiple inferred names donate common suffix",
+			donors: []TopologyEntry{
+				{DestinationIP: ip, DNSName: "one.service.example.com", DNSSource: "dns+conn+synack", Protocol: proto, Port: port},
+				{DestinationIP: ip, DNSName: "two.service.example.com", DNSSource: "dns+conn+synack", Protocol: proto, Port: port},
+			},
+			wantName:   "service.example.com",
+			wantSource: "donated+ipport+conn",
+		},
+		{
+			name:       "G SNI inferred cannot donate",
+			donors:     []TopologyEntry{{DestinationIP: ip, DNSName: "unsafe.example.com", DNSSource: "sni+conn+synack", Protocol: proto, Port: port}},
+			wantSource: "mid-session",
+		},
+		{
+			name:       "H exact tuple only",
+			donors:     []TopologyEntry{{DestinationIP: ip, DNSName: "direct.example.com", DNSSource: "dns+synack", Protocol: proto, Port: port + 1}},
+			wantSource: "mid-session",
+		},
+		{
+			name:       "I attributed source cannot receive",
+			donors:     []TopologyEntry{{DestinationIP: ip, DNSName: "direct.example.com", DNSSource: "dns+synack", Protocol: proto, Port: port}},
+			recipient:  TopologyEntry{DNSSource: "csv+mid"},
+			wantSource: "csv+mid",
+		},
+		{
+			name:       "I named PTR recipient remains unchanged",
+			donors:     []TopologyEntry{{DestinationIP: ip, DNSName: "direct.example.com", DNSSource: "dns+synack", Protocol: proto, Port: port}},
+			recipient:  TopologyEntry{DNSName: "ptr.example.net", DNSSource: "ptr+matrix"},
+			wantName:   "ptr.example.net",
+			wantSource: "ptr+matrix",
+		},
+		{
+			name:       "I named CSV recipient remains unchanged",
+			donors:     []TopologyEntry{{DestinationIP: ip, DNSName: "direct.example.com", DNSSource: "dns+synack", Protocol: proto, Port: port}},
+			recipient:  TopologyEntry{DNSName: "csv.example.net", DNSSource: "csv+mid"},
+			wantName:   "csv.example.net",
+			wantSource: "csv+mid",
+		},
+		{
+			name:       "J donated source cannot recursively receive",
+			donors:     []TopologyEntry{{DestinationIP: ip, DNSName: "direct.example.com", DNSSource: "donated+ipport", Protocol: proto, Port: port}},
+			wantSource: "mid-session",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recipient := tt.recipient
+			recipient.DestinationIP = ip
+			recipient.Protocol = " TCP "
+			recipient.Port = port
+			if recipient.DNSSource == "" {
+				recipient.DNSSource = "mid-session"
+			}
+			entries := append(append([]TopologyEntry(nil), tt.donors...), recipient)
+			got := CompleteTopologyWithDNSDonation(entries)[len(entries)-1]
+			if got.DNSName != tt.wantName || got.DNSSource != tt.wantSource {
+				t.Fatalf("recipient=(name %q, source %q), want (%q, %q)", got.DNSName, got.DNSSource, tt.wantName, tt.wantSource)
 			}
 		})
 	}
@@ -610,10 +763,11 @@ func TestCompleteTopologyWithDNSDonationAcceptsDirectDNSAndSNI(t *testing.T) {
 		{IssuerIP: "10.0.0.3", DestinationIP: "8.8.8.8", DNSName: " \t", DNSSource: "mid-session", Protocol: "tcp", Port: 443},
 		{IssuerIP: "10.0.0.4", DestinationIP: "1.1.1.1", DNSName: "SNI.EXAMPLE.COM.", DNSSource: "sni+synack", Protocol: "tcp", Port: 8443},
 		{IssuerIP: "10.0.0.5", DestinationIP: "1.1.1.1", DNSName: "", DNSSource: "mid-session", Protocol: " TCP", Port: 8443},
+		{IssuerIP: "10.0.0.6", DestinationIP: "8.8.8.8", DNSName: "", DNSSource: "", Protocol: "tcp", Port: 443},
 	}
 
 	got := CompleteTopologyWithDNSDonation(in)
-	for _, idx := range []int{2, 4} {
+	for _, idx := range []int{2, 4, 5} {
 		if got[idx].DNSSource != "donated+ipport" {
 			t.Fatalf("row %d source=%q, want donated+ipport: %#v", idx, got[idx].DNSSource, got[idx])
 		}
@@ -623,6 +777,9 @@ func TestCompleteTopologyWithDNSDonationAcceptsDirectDNSAndSNI(t *testing.T) {
 	}
 	if got[4].DNSName != "sni.example.com" {
 		t.Fatalf("canonical SNI donation=%q, want sni.example.com", got[4].DNSName)
+	}
+	if got[5].DNSName != "api.example.com" {
+		t.Fatalf("empty-source recipient donation=%q, want api.example.com", got[5].DNSName)
 	}
 	if in[2].DNSName != " \t" || in[4].DNSName != "" {
 		t.Fatalf("input entries were mutated: %#v", in)
@@ -655,19 +812,28 @@ func TestCompleteTopologyWithDNSDonationIsolatesKeyAndPreservesAttribution(t *te
 
 func TestCompleteTopologyWithDNSDonationRejectsUnsafeSources(t *testing.T) {
 	unsafeSources := []string{
-		"dns+conn+synack",
 		"sni+conn+synack",
 		"dns+conn",
 		"sni+conn",
 		"csv+conn",
 		"csv+mid",
+		"csv+synack",
 		"mid-session",
+		"ptr+matrix",
+		"ptr-normalized+matrix",
+		"ptr+fcrdns+matrix",
+		"tls-cert-san+matrix",
+		"active",
+		"active+synack",
 		"active+matrix",
 		"peer+ipport",
 		"peer+ipport+conn",
 		"donated+ipport",
+		"donated+ipport+conn",
 		"placeholder",
 		"future+conn",
+		"unknown",
+		"",
 	}
 
 	for _, source := range unsafeSources {
@@ -802,7 +968,7 @@ func TestCompleteTopologyWithDNSDonationDoesNotCrossDestinationIP(t *testing.T) 
 	}
 }
 
-func TestCompleteTopologyWithDNSDonationRejectsUniqueInferredDonor(t *testing.T) {
+func TestCompleteTopologyWithDNSDonationUsesUniqueInferredDonor(t *testing.T) {
 	p8883 := uint16(8883)
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
@@ -850,7 +1016,7 @@ func TestCompleteTopologyWithDNSDonationRejectsUniqueInferredDonor(t *testing.T)
 		t.Fatalf("expected 2 rows, got %d: %#v", len(out), out)
 	}
 
-	var foundDonor, foundUnresolvedPeer bool
+	var foundDonor, foundCompletedPeer bool
 	for _, row := range out {
 		if row.IssuerIP == "10.116.12.67" && row.DestinationIP == "13.55.209.128" && row.Port == 8883 {
 			if row.DNSName != "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c" || row.DNSSource != "dns+conn+synack" {
@@ -859,18 +1025,18 @@ func TestCompleteTopologyWithDNSDonationRejectsUniqueInferredDonor(t *testing.T)
 			foundDonor = true
 		}
 		if row.IssuerIP == "10.116.12.7" && row.DestinationIP == "13.55.209.128" && row.Port == 8883 {
-			if row.DNSName != "" || row.DNSSource != "mid-session" {
-				t.Fatalf("inferred donor completed peer row: %#v", row)
+			if row.DNSName != "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c" || row.DNSSource != "donated+ipport+conn" {
+				t.Fatalf("inferred donor did not complete peer row: %#v", row)
 			}
-			foundUnresolvedPeer = true
+			foundCompletedPeer = true
 		}
 	}
-	if !foundDonor || !foundUnresolvedPeer {
-		t.Fatalf("expected unchanged donor and unresolved peer; got %#v", out)
+	if !foundDonor || !foundCompletedPeer {
+		t.Fatalf("expected unchanged donor and completed peer; got %#v", out)
 	}
 }
 
-func TestCompleteTopologyWithDNSDonationDoesNotAmplifyInferredNameAcrossDestinations(t *testing.T) {
+func TestCompleteTopologyWithDNSDonationKeepsInferredDonationOnExactDestination(t *testing.T) {
 	p443 := uint16(443)
 	txTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	txs := []*DNSTransaction{
@@ -911,7 +1077,7 @@ func TestCompleteTopologyWithDNSDonationDoesNotAmplifyInferredNameAcrossDestinat
 		t.Fatalf("expected 4 rows, got %d: %#v", len(out), out)
 	}
 
-	donors, unresolvedPeers := 0, 0
+	donors, completedPeers := 0, 0
 	for _, row := range out {
 		switch row.DNSSource {
 		case "dns+conn+synack":
@@ -919,17 +1085,17 @@ func TestCompleteTopologyWithDNSDonationDoesNotAmplifyInferredNameAcrossDestinat
 				t.Fatalf("unexpected inferred donor name: %#v", row)
 			}
 			donors++
-		case "peer+ipport+conn", "donated+ipport":
-			t.Fatalf("inferred name was amplified to peer: %#v", row)
-		default:
-			if row.DNSName != "" {
-				t.Fatalf("unexpected named non-donor row: %#v", row)
+		case "donated+ipport+conn":
+			if row.DNSName != "www.cisco.com" {
+				t.Fatalf("unexpected inferred donation: %#v", row)
 			}
-			unresolvedPeers++
+			completedPeers++
+		default:
+			t.Fatalf("unexpected row source: %#v", row)
 		}
 	}
-	if donors != 2 || unresolvedPeers != 2 {
-		t.Fatalf("donors=%d unresolved_peers=%d, want 2 each; out=%#v", donors, unresolvedPeers, out)
+	if donors != 2 || completedPeers != 2 {
+		t.Fatalf("donors=%d completed_peers=%d, want 2 each; out=%#v", donors, completedPeers, out)
 	}
 }
 

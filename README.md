@@ -541,13 +541,15 @@ Common source labels in `network-topology-matrix.txt` and related outputs:
 | `csv+conn` | DNS came from `dns-ip.csv` fallback on a non-mid-session row |
 | `csv+mid` | DNS came from `dns-ip.csv` fallback for a mid-session row |
 | `mid-session` | connection was observed without usable DNS attribution |
-| `peer+ipport` | unresolved row was completed from another issuer in the same run using a unique strong donor on the same `(dstIP, proto, port)` |
-| `peer+ipport+conn` | unresolved row was completed from another issuer in the same run using an inferred strong donor on the same `(dstIP, proto, port)` |
+| `donated+ipport` | unresolved row was completed from direct `dns+synack` or `sni+synack` evidence on the same `(dstIP, proto, port)` |
+| `donated+ipport+conn` | unresolved row was completed from inferred `dns+conn+synack` evidence on the same `(dstIP, proto, port)` |
 
 Important details:
 
-- CSV fallback never acts as a donor for peer completion.
-- Mid-session peer completion is run-local only; it is not persisted back into `dns-ip.csv`.
+- CSV fallback, inferred SNI, active resolution, and previously donated names never act as donors.
+- Donation is run-local only; it is not persisted back into `dns-ip.csv`.
+- Direct donors win over inferred donors for an entire exact `(dstIP, proto, port)` tuple.
+- One donor name is copied in full. Multiple names donate only their deterministic longest common DNS-label suffix when it contains at least two labels; otherwise the row remains unresolved.
 - PTR completion runs after donation, cannot donate to other rows, and is not persisted back into `dns-ip.csv`.
 - Strong direct evidence suppresses weaker conflicting CSV fallback where possible.
 
@@ -617,7 +619,7 @@ This policy is designed to reduce CSV contamination from:
 ### Practical heuristics
 
 - TLS SNI is used as a synthetic name source unless disabled
-- unresolved rows can inherit a name from another issuer in the same run when `(dstIP, proto, port)` uniquely matches a strong donor
+- unresolved or `mid-session` rows can inherit a name from another issuer in the same run on an exact `(dstIP, proto, port)` match; direct evidence wins over DNS connectivity inference, and multiple names must share a suffix of at least two labels
 - truncated DNS responses are salvaged only up to the last complete answer; incomplete tail answers are ignored
 
 ### Known limitations

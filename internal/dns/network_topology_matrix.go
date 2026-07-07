@@ -689,16 +689,73 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	return out
 }
 
-// isSafeDNSDonationDonor recognizes only direct, canonical packet evidence.
-// Inferred, CSV, active-resolution, and previously donated sources must never
-// recursively donate names.
-func isSafeDNSDonationDonor(source string) bool {
-	return source == "dns+synack" || source == "sni+synack"
+type dnsDonationDonorTier uint8
+
+const (
+	dnsDonationDonorNone dnsDonationDonorTier = iota
+	dnsDonationDonorInferred
+	dnsDonationDonorDirect
+)
+
+// classifyDNSDonationDonor accepts only the packet-evidence sources that may
+// donate names. In particular, SNI connectivity inference is not a donor, and
+// donated names cannot recursively donate.
+func classifyDNSDonationDonor(source string) dnsDonationDonorTier {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "dns+synack", "sni+synack":
+		return dnsDonationDonorDirect
+	case "dns+conn+synack":
+		return dnsDonationDonorInferred
+	default:
+		return dnsDonationDonorNone
+	}
+}
+
+// dnsDonationName returns the full canonical name for one candidate. For
+// multiple candidates it returns their longest common right-to-left label
+// suffix, provided that suffix contains at least two labels.
+func dnsDonationName(names map[string]struct{}) string {
+	if len(names) == 0 {
+		return ""
+	}
+
+	ordered := make([]string, 0, len(names))
+	for name := range names {
+		ordered = append(ordered, name)
+	}
+	sort.Strings(ordered)
+	if len(ordered) == 1 {
+		return ordered[0]
+	}
+
+	base := strings.Split(ordered[0], ".")
+	common := len(base)
+	for _, name := range ordered[1:] {
+		labels := strings.Split(name, ".")
+		limit := common
+		if len(labels) < limit {
+			limit = len(labels)
+		}
+		matched := 0
+		for matched < limit && base[len(base)-1-matched] == labels[len(labels)-1-matched] {
+			matched++
+		}
+		common = matched
+		if common < 2 {
+			return ""
+		}
+	}
+
+	if common < 2 {
+		return ""
+	}
+	return strings.Join(base[len(base)-common:], ".")
 }
 
 // CompleteTopologyWithDNSDonation fills otherwise-unattributed public IPv4
-// rows from a unique direct DNS/SNI name observed for the exact destination
-// IP, normalized protocol, and port elsewhere in the same run. It never
+// rows from direct or DNS-connection-inferred names observed for the exact
+// destination IP, normalized protocol, and port elsewhere in the same run.
+// Direct evidence wins over inferred evidence for the entire tuple. It never
 // overwrites existing attribution and does not mutate entries.
 func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 	if len(entries) == 0 {
@@ -730,12 +787,17 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		return donationKey{destinationIP: ip, protocol: protocol, port: row.Port}, true
 	}
 
-	donors := make(map[donationKey]map[string]struct{}, len(entries))
+	type donationCandidates struct {
+		direct   map[string]struct{}
+		inferred map[string]struct{}
+	}
+	donors := make(map[donationKey]*donationCandidates, len(entries))
 	for _, row := range entries {
-		if !isSafeDNSDonationDonor(row.DNSSource) {
+		tier := classifyDNSDonationDonor(row.DNSSource)
+		if tier == dnsDonationDonorNone {
 			continue
 		}
-		name := canonicalDNSName(row.DNSName)
+		name := canonicalDNSName(strings.TrimSpace(row.DNSName))
 		if !IsResolvableDNSName(name) {
 			continue
 		}
@@ -743,12 +805,22 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		if !ok {
 			continue
 		}
-		names := donors[key]
-		if names == nil {
-			names = make(map[string]struct{}, 1)
-			donors[key] = names
+		candidates := donors[key]
+		if candidates == nil {
+			candidates = &donationCandidates{}
+			donors[key] = candidates
 		}
-		names[name] = struct{}{}
+		if tier == dnsDonationDonorDirect {
+			if candidates.direct == nil {
+				candidates.direct = make(map[string]struct{}, 1)
+			}
+			candidates.direct[name] = struct{}{}
+		} else {
+			if candidates.inferred == nil {
+				candidates.inferred = make(map[string]struct{}, 1)
+			}
+			candidates.inferred[name] = struct{}{}
+		}
 	}
 	if len(donors) == 0 {
 		return entries
@@ -760,18 +832,30 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		if strings.TrimSpace(row.DNSName) != "" {
 			continue
 		}
+		recipientSource := strings.ToLower(strings.TrimSpace(row.DNSSource))
+		if recipientSource != "" && recipientSource != "mid-session" {
+			continue
+		}
 		key, ok := keyFor(*row)
 		if !ok {
 			continue
 		}
-		names := donors[key]
-		if len(names) != 1 {
+		candidates := donors[key]
+		if candidates == nil {
 			continue
 		}
-		for name := range names {
-			row.DNSName = name
-			row.DNSSource = "donated+ipport"
+		names := candidates.direct
+		source := "donated+ipport"
+		if len(names) == 0 {
+			names = candidates.inferred
+			source = "donated+ipport+conn"
 		}
+		name := dnsDonationName(names)
+		if name == "" {
+			continue
+		}
+		row.DNSName = name
+		row.DNSSource = source
 	}
 	return out
 }
