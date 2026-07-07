@@ -22,7 +22,7 @@ var netIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 //
 // Layout:
 //
-//	<output-root>/<net-id>/<YYYY-MM-DD-HH-mm-ss>/...
+//	<output-root>/<net-id>/pcap-date-YYYY-MM-DD/run-YYYYMMDDTHHMMSSZ/...
 //
 // Notes:
 //   - Timestamps are UTC.
@@ -30,14 +30,22 @@ var netIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 type OutputManager struct {
 	outputRoot string
 	netID      string
+	pcapDate   string
 	runID      string
 	netDir     string
 	runDir     string
 }
 
-// NewOutputManager creates (if needed) the output root/network directory and a unique per-run directory.
-// Relative outputRoot is resolved against the current working directory.
+// NewOutputManager creates a run directory with an unknown PCAP date and the
+// current UTC wall-clock time.
 func NewOutputManager(netID, outputRoot string) (*OutputManager, error) {
+	return NewOutputManagerForRun(netID, outputRoot, time.Time{}, time.Now().UTC())
+}
+
+// NewOutputManagerForRun creates a deterministic PCAP-date/run-time directory.
+// Relative roots resolve against the current working directory. A zero PCAP
+// timestamp uses pcap-date-unknown; a zero run time uses current UTC.
+func NewOutputManagerForRun(netID, outputRoot string, pcapTimestamp, runStartedAt time.Time) (*OutputManager, error) {
 	if strings.TrimSpace(netID) == "" {
 		return nil, fmt.Errorf("--net-id must be non-empty")
 	}
@@ -53,12 +61,20 @@ func NewOutputManager(netID, outputRoot string) (*OutputManager, error) {
 		return nil, fmt.Errorf("resolve output root %q: %w", outputRoot, err)
 	}
 
-	runID := time.Now().UTC().Format("2006-01-02-15-04-05")
+	if runStartedAt.IsZero() {
+		runStartedAt = time.Now().UTC()
+	}
+	pcapDate := "unknown"
+	if !pcapTimestamp.IsZero() {
+		pcapDate = pcapTimestamp.UTC().Format("2006-01-02")
+	}
+	runID := "run-" + runStartedAt.UTC().Format("20060102T150405Z")
 	netDir := filepath.Join(rootDir, filepath.Clean(netID))
-	runDir := filepath.Join(netDir, runID)
+	pcapDateDir := filepath.Join(netDir, "pcap-date-"+pcapDate)
+	runDir := filepath.Join(pcapDateDir, runID)
 
-	if err := os.MkdirAll(netDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create net output dir %q: %w", netDir, err)
+	if err := os.MkdirAll(pcapDateDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create PCAP-date output dir %q: %w", pcapDateDir, err)
 	}
 	if err := os.Mkdir(runDir, 0o755); err != nil {
 		if os.IsExist(err) {
@@ -70,6 +86,7 @@ func NewOutputManager(netID, outputRoot string) (*OutputManager, error) {
 	return &OutputManager{
 		outputRoot: rootDir,
 		netID:      netID,
+		pcapDate:   pcapDate,
 		runID:      runID,
 		netDir:     netDir,
 		runDir:     runDir,
@@ -81,6 +98,14 @@ func (m *OutputManager) OutputRoot() string { return m.outputRoot }
 
 // NetID returns the network identifier.
 func (m *OutputManager) NetID() string { return m.netID }
+
+// PCAPDate returns the UTC capture date used in the output layout, or unknown.
+func (m *OutputManager) PCAPDate() string {
+	if m.pcapDate == "" {
+		return "unknown"
+	}
+	return m.pcapDate
+}
 
 // RunID returns the per-run timestamp ID.
 func (m *OutputManager) RunID() string { return m.runID }

@@ -20,6 +20,8 @@ type RunArtifactsManifest struct {
 	NetID               string            `json:"net_id"`
 	RunDir              string            `json:"run_dir"`
 	OutputRoot          string            `json:"output_root"`
+	PCAPDate            string            `json:"pcap_date"`
+	OutputDir           string            `json:"output_dir"`
 	ReadDir             string            `json:"read_dir"`
 	RunStartedAtUTC     string            `json:"run_started_at_utc"`
 	PCAPFilesCount      int               `json:"pcap_files_count"`
@@ -65,6 +67,8 @@ func writeRunArtifactsManifest(
 		NetID:               om.NetID(),
 		RunDir:              absolutePathOrClean(om.RunDir()),
 		OutputRoot:          absolutePathOrClean(om.OutputRoot()),
+		PCAPDate:            om.PCAPDate(),
+		OutputDir:           absolutePathOrClean(om.RunDir()),
 		ReadDir:             absolutePathOrClean(readDir),
 		RunStartedAtUTC:     runStartedAt.UTC().Format(time.RFC3339Nano),
 		PCAPFilesCount:      pcapFilesCount,

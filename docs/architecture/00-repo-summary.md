@@ -27,17 +27,17 @@ The main downstream contract is not just the human-readable tables. It is the pe
 
 1. `main.main` prints the banner and calls `cmd.Execute()`.
 2. Cobra resolves `dnsextract` and enters `runDNSExtract`.
-3. `cmd.NewOutputManager` creates the run directory at `<output-root>/<net-id>/<run-id>/`.
-4. `pcap.DiscoverPCAPFiles` walks `--read-dir`, filters `.pcap` / `.pcapng` / `.cap`, and sorts the file list.
-5. Optional: `radius.BuildIMSIIndexFromPCAPs` builds a time-aware IP-to-IMSI index from RADIUS Accounting traffic.
-6. `dns.BuildTransactionsWithSNIFromPCAPs` scans the corpus for DNS query/response transactions and, unless disabled, TLS ClientHello SNI observations.
-7. Optional: `dns.FilterOutNTPDNSTransactions` drops NTP/time-sync names.
-8. Optional: `dns.ResolveUnresolvedDNSTransactions` actively resolves unresolved names and marks the evidence as active lookup.
-9. Optional: `dns.LoadIPToDNSFromFile` loads the fallback `dns-ip.csv` map.
-10. `dns.AttachConnectionsAndCollectEdgesFromPCAPs` rescans the corpus to:
+3. `pcap.DiscoverPCAPFiles` walks `--read-dir`, filters `.pcap` / `.pcapng` / `.cap`, and sorts the file list.
+4. Optional: `radius.BuildIMSIIndexFromPCAPs` builds a time-aware IP-to-IMSI index from RADIUS Accounting traffic.
+5. `dns.BuildTransactionsWithSNIFromPCAPs` scans the corpus for DNS query/response transactions and, unless disabled, TLS ClientHello SNI observations.
+6. Optional: `dns.FilterOutNTPDNSTransactions` drops NTP/time-sync names.
+7. Optional active-resolution configuration is validated for later matrix completion.
+8. Optional: `dns.LoadIPToDNSFromFile` loads the fallback `dns-ip.csv` map.
+9. `dns.AttachConnectionsAndCollectEdgesFromPCAPs` rescans the corpus to:
     - collect observed connectivity edges
     - attach connections back to DNS transactions
     - backfill or confirm IP evidence conservatively
+10. `cmd.NewOutputManagerForRun` creates `<output-root>/<net-id>/pcap-date-YYYY-MM-DD/run-YYYYMMDDTHHMMSSZ/` from the earliest packet timestamp and run-start time.
 11. `dns.ToOutputRecords`, `dns.FilterAndDedupRecords`, and `dns.SortOutputRecords` prepare the main DNS table rows.
 12. `dns.BuildNetworkTopologyMatrixEntriesWithOptions` joins connectivity edges with DNS, SNI, active-resolve, and CSV evidence and applies final attribution heuristics.
 13. Secondary outputs are derived from the same run state:

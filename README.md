@@ -98,11 +98,13 @@ The files are processed in sorted path order.
 
 ## Output Layout
 
-Every run creates a unique UTC-stamped directory:
+Every run is grouped by the earliest packet's UTC capture date and a UTC run-start timestamp:
 
 ```text
-<output-root>/<net-id>/<YYYY-MM-DD-HH-mm-ss>/
+<output-root>/<net-id>/pcap-date-YYYY-MM-DD/run-YYYYMMDDTHHMMSSZ/
 ```
+
+If no packet timestamp is available, the date segment is `pcap-date-unknown`.
 
 Defaults:
 
@@ -112,7 +114,7 @@ Defaults:
 Example:
 
 ```text
-pcaptool_output/401240-1/2026-03-22-14-37-12/
+pcaptool_output/401240-1/pcap-date-2026-06-23/run-20260702T143522Z/
 ```
 
 A run always writes `_run-artifacts.json` in the run directory.
@@ -175,6 +177,8 @@ Current top-level fields:
 - `net_id`
 - `run_dir`
 - `output_root`
+- `pcap_date`
+- `output_dir` (same final run directory as `run_dir`)
 - `read_dir`
 - `run_started_at_utc`
 - `pcap_files_count`
@@ -221,6 +225,19 @@ Each entry includes:
 
 This file is intended for downstream tooling that should not parse the human-formatted text matrix.
 
+#### `unique-dns-port-proto.csv`
+
+Deterministic CSV derived from the final network topology matrix. It contains
+one row for every unique `(DNS, port, protocol)` tuple, with columns:
+
+- `dns`
+- `port`
+- `protocol`
+
+The tuple reflects final matrix attribution after enabled completion steps have
+run. An unresolved matrix name is represented by an empty `dns` field. If the
+final matrix is empty, the artifact contains only its header.
+
 #### `dns-issuer-profile.txt`
 
 Per-issuer DNS activity summary:
@@ -258,6 +275,24 @@ Each entry contains:
 - `proto`
 - `count`
 
+#### `active-resolve-log.csv`
+
+Produced whenever `--active-resolve` is enabled, including as a header-only
+artifact when there are no candidate names. Manifest key: `active_resolve_log`.
+
+The log contains one deterministic row per canonical name offered to active
+resolution:
+
+```text
+dns_name,status,configured_resolvers,timeout_seconds,ipv4_answers,matrix_ips,matrix_rows_completed,error
+```
+
+Statuses are `resolved`, `no_ipv4`, `timeout`, `error`, or `skipped_invalid`.
+`matrix_ips` contains returned IPv4 addresses also present in the matrix, while
+`matrix_rows_completed` reports how many rows actually received
+`active+matrix`. The resolver column records configured resolvers, not a claimed
+per-query responder, because the resolver pool does not expose that provenance.
+
 #### `reverse-dns-lookup-log.csv`
 
 Produced whenever `--reverse-dns-lookup` is enabled, including as a header-only artifact when there are no eligible public IPv4 topology rows. Manifest key: `reverse_dns_lookup_log`.
@@ -280,7 +315,7 @@ The log contains one deterministic row per unique unresolved public IPv4 TCP end
 ip,port,status,selected_name,reason,subject_cn,dns_sans,issuer_common_name,not_before,not_after,error,source
 ```
 
-The probe connects by IP without SNI, records only the presented leaf certificate, and uses a bounded worker pool with a two-second timeout per endpoint. SANs are canonicalized but retained in certificate order, including duplicates and rejected names, so first-choice provenance remains visible. The first usable non-wildcard SAN is selected; a valid leading `*.` wildcard is stripped to its base name. If no SAN is usable, a valid non-wildcard subject CN may be selected. Certificate verification is intentionally disabled because this is diagnostic collection, not authentication.
+The probe connects by IP without SNI, records only the presented leaf certificate, and uses a bounded worker pool. The default timeout is 15 seconds per endpoint and covers both TCP connection establishment and TLS certificate handshake; `--tls-cert-lookup-timeout` accepts integer values from 5 through 30 seconds. SANs are canonicalized but retained in certificate order, including duplicates and rejected names, so first-choice provenance remains visible. The first usable non-wildcard SAN is selected; a valid leading `*.` wildcard is stripped to its base name. If no SAN is usable, a valid non-wildcard subject CN may be selected. Certificate verification is intentionally disabled because this is diagnostic collection, not authentication.
 
 Selected certificate labels decorate only the exact unresolved public TCP endpoint that was probed, using source `tls-cert-san+matrix`; existing attribution is never overwritten. This weak endpoint decoration appears in topology and derived endpoint outputs, but it is not observed DNS evidence, cannot donate to other rows, and is not persisted to DNS transactions or `dns-ip.csv`. Presented certificates describe probe-time endpoint state and are not capture-time truth.
 
@@ -438,6 +473,7 @@ This is controlled by `--ignore-ntp`.
 ### Pass 2.5: optional active resolve
 
 If `--active-resolve` is enabled, every name unresolved before active completion is offered to the configured external resolvers. Successful results may complete otherwise unattributed topology rows; names actually attributed in the final topology are then omitted from `dns-unresolved-dns.txt`.
+Lookup outcomes and matrix application counts are recorded in `active-resolve-log.csv`.
 This is intentionally disabled by default because it is not capture-time truth.
 
 ### Pass 3: connection correlation
@@ -623,6 +659,7 @@ This policy is designed to reduce CSV contamination from:
 | `--active-resolvers` | string | empty | comma-separated resolver IPs for active resolve |
 | `--reverse-dns-lookup` | bool | `false` | use bounded PTR/forward-confirmation lookup as last-resort topology completion and write its audit CSV |
 | `--tls-cert-lookup` | bool | `false` | probe unresolved public TLS endpoints, decorate exact matching matrix rows, and write a certificate audit CSV |
+| `--tls-cert-lookup-timeout` | integer seconds | `15` | per-endpoint TCP connection plus TLS certificate handshake timeout; valid range `5..30` |
 | `--disable-sni` | bool | `false` | skip TLS ClientHello/SNI scan |
 | `--unsorted` | bool | `false` | preserve natural first-seen issuer order in topology output |
 | `--debug` | bool | `false` | emit additional debug artifacts, including detailed fleet trail/unique CSVs and CSV append audit |

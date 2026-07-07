@@ -1,7 +1,9 @@
 package dns
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"net"
@@ -187,5 +189,88 @@ func TestResolveDNSNamesIPv4ParentCancellation(t *testing.T) {
 	)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestResolveDNSNamesIPv4WithAuditRecordsAllOutcomes(t *testing.T) {
+	lookup := func(_ context.Context, name string) ([]net.IP, error) {
+		switch name {
+		case "resolved.example.com":
+			return []net.IP{net.ParseIP("8.8.8.8"), net.ParseIP("2001:db8::1"), net.ParseIP("8.8.8.8")}, nil
+		case "no-ipv4.example.com":
+			return []net.IP{net.ParseIP("2001:db8::2")}, nil
+		case "timeout.example.com":
+			return nil, context.DeadlineExceeded
+		case "error.example.com":
+			return nil, errors.New("resolver failed")
+		default:
+			t.Fatalf("unexpected lookup for %q", name)
+			return nil, nil
+		}
+	}
+
+	resolutions, records, err := ResolveDNSNamesIPv4WithAudit(
+		context.Background(),
+		[]string{"resolved.example.com", "RESOLVED.EXAMPLE.COM.", "no-ipv4.example.com", "timeout.example.com", "error.example.com", "host.local"},
+		ResolveUnresolvedOptions{Workers: 4, Timeout: time.Second},
+		lookup,
+	)
+	if err != nil {
+		t.Fatalf("ResolveDNSNamesIPv4WithAudit() error = %v", err)
+	}
+	if want := []DNSNameIPv4Resolution{{DNSName: "resolved.example.com", IPv4s: []string{"8.8.8.8"}}}; !reflect.DeepEqual(resolutions, want) {
+		t.Fatalf("resolutions = %#v, want %#v", resolutions, want)
+	}
+	wantRecords := []ActiveResolveAuditRecord{
+		{DNSName: "error.example.com", Status: "error", Error: "resolver failed"},
+		{DNSName: "host.local", Status: "skipped_invalid"},
+		{DNSName: "no-ipv4.example.com", Status: "no_ipv4"},
+		{DNSName: "resolved.example.com", Status: "resolved", IPv4s: []string{"8.8.8.8"}},
+		{DNSName: "timeout.example.com", Status: "timeout", Error: context.DeadlineExceeded.Error()},
+	}
+	if !reflect.DeepEqual(records, wantRecords) {
+		t.Fatalf("audit records = %#v, want %#v", records, wantRecords)
+	}
+}
+
+func TestWriteActiveResolveAuditCSVDeterministicAndHeaderOnly(t *testing.T) {
+	records := []ActiveResolveAuditRecord{
+		{DNSName: "b.example.com", Status: "error", Error: "lookup, failed"},
+		{
+			DNSName: "a.example.com", Status: "resolved", IPv4s: []string{"1.1.1.1", "8.8.8.8"},
+			MatrixIPs: []string{"8.8.8.8"}, MatrixRowsCompleted: 2,
+		},
+	}
+	options := ResolveUnresolvedOptions{Servers: []string{"9.9.9.9", "1.1.1.1"}, Timeout: 12 * time.Second}
+	var first, second bytes.Buffer
+	if err := WriteActiveResolveAuditCSV(&first, records, options); err != nil {
+		t.Fatalf("WriteActiveResolveAuditCSV() error = %v", err)
+	}
+	if err := WriteActiveResolveAuditCSV(&second, records, options); err != nil {
+		t.Fatalf("second WriteActiveResolveAuditCSV() error = %v", err)
+	}
+	if !bytes.Equal(first.Bytes(), second.Bytes()) {
+		t.Fatalf("active resolve CSV is not deterministic:\n%s\n%s", first.Bytes(), second.Bytes())
+	}
+	rows, err := csv.NewReader(bytes.NewReader(first.Bytes())).ReadAll()
+	if err != nil {
+		t.Fatalf("read active resolve CSV: %v", err)
+	}
+	want := [][]string{
+		{"dns_name", "status", "configured_resolvers", "timeout_seconds", "ipv4_answers", "matrix_ips", "matrix_rows_completed", "error"},
+		{"a.example.com", "resolved", "9.9.9.9;1.1.1.1", "12", "1.1.1.1;8.8.8.8", "8.8.8.8", "2", ""},
+		{"b.example.com", "error", "9.9.9.9;1.1.1.1", "12", "", "", "0", "lookup, failed"},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("active resolve CSV rows = %#v, want %#v", rows, want)
+	}
+
+	var empty bytes.Buffer
+	if err := WriteActiveResolveAuditCSV(&empty, nil, options); err != nil {
+		t.Fatalf("header-only WriteActiveResolveAuditCSV() error = %v", err)
+	}
+	emptyRows, err := csv.NewReader(bytes.NewReader(empty.Bytes())).ReadAll()
+	if err != nil || len(emptyRows) != 1 {
+		t.Fatalf("header-only rows = %#v, error = %v", emptyRows, err)
 	}
 }

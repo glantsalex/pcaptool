@@ -22,6 +22,7 @@ func TestWriteRunArtifactsManifest(t *testing.T) {
 	om := &OutputManager{
 		outputRoot: root,
 		netID:      "net",
+		pcapDate:   "2026-03-10",
 		runID:      "run",
 		netDir:     filepath.Join(root, "net"),
 		runDir:     runDir,
@@ -58,6 +59,9 @@ func TestWriteRunArtifactsManifest(t *testing.T) {
 
 	if got.RunID != "run" || got.NetID != "net" {
 		t.Fatalf("unexpected manifest identity: %+v", got)
+	}
+	if got.PCAPDate != "2026-03-10" || got.OutputDir != runDir || got.RunDir != runDir {
+		t.Fatalf("unexpected manifest output layout: %+v", got)
 	}
 	if got.Files["main_output"] == "" || got.Files["service_endpoints"] == "" {
 		t.Fatalf("expected file entries in manifest, got %+v", got.Files)

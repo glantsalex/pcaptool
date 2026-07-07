@@ -89,7 +89,7 @@ func (e *TLSCertProbeError) Unwrap() error {
 	return e.Err
 }
 
-const defaultTLSCertLookupTimeout = 2 * time.Second
+const defaultTLSCertLookupTimeout = 15 * time.Second
 
 type networkTLSCertProber struct{}
 

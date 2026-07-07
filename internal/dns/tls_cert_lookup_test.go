@@ -208,6 +208,12 @@ func TestProbeTLSCertificatesPerEndpointTimeoutIsNonFatal(t *testing.T) {
 	}
 }
 
+func TestDefaultTLSCertLookupTimeoutIsFifteenSeconds(t *testing.T) {
+	if defaultTLSCertLookupTimeout != 15*time.Second {
+		t.Fatalf("defaultTLSCertLookupTimeout = %s, want 15s", defaultTLSCertLookupTimeout)
+	}
+}
+
 func TestWriteTLSCertLookupCSVDeterministicNumericSortAndHeaderOnly(t *testing.T) {
 	records := []TLSCertLookupRecord{
 		{IP: "11.0.0.1", Port: 443, Status: "used_cert", Reason: "no_dns_names"},

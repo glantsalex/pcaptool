@@ -58,14 +58,14 @@ func init() {
 		&flagNetID,
 		"net-id",
 		"",
-		"Network identifier (required). Used as <output-root>/<net-id>/<run-id>",
+		"Network identifier (required). Used as <output-root>/<net-id>/pcap-date-<date>/run-<UTC>",
 	)
 	rootCmd.PersistentFlags().StringVarP(
 		&flagOutputRoot,
 		"output-root",
 		"o",
 		"pcaptool_output",
-		"Root directory for all outputs. Per-run layout: <output-root>/<net-id>/<run-id>",
+		"Root directory for all outputs. Layout: <output-root>/<net-id>/pcap-date-<date>/run-<UTC>",
 	)
 	rootCmd.PersistentFlags().BoolVar(
 		&flagEnforcePrivateAsSource,

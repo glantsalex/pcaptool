@@ -48,13 +48,14 @@ var (
 	flagActiveResolvers              string
 	flagReverseDNSLookup             bool
 	flagTLSCertLookup                bool
+	flagTLSCertLookupTimeoutSeconds  int
 	flagDisableSNI                   bool
 	flagUnsorted                     bool
 	flagDebug                        bool
 	flagManifestOut                  string
 	flagPostHooks                    []string
 	flagFleetScanWorkers             int
-	resolveDNSNamesIPv4              = dns.ResolveDNSNamesIPv4
+	resolveDNSNamesIPv4WithAudit     = dns.ResolveDNSNamesIPv4WithAudit
 	completeTopologyWithReverseDNS   = dns.CompleteTopologyWithReverseDNS
 	probeTLSCertificates             = dns.ProbeTLSCertificates
 )
@@ -147,6 +148,12 @@ func init() {
 		false,
 		"Probe unresolved public TLS endpoints, decorate exact matching matrix rows, and write a certificate audit CSV.",
 	)
+	cmd.Flags().IntVar(
+		&flagTLSCertLookupTimeoutSeconds,
+		"tls-cert-lookup-timeout",
+		15,
+		"Timeout in seconds for each TLS certificate lookup, including TCP connect and TLS handshake (5..30).",
+	)
 	cmd.Flags().BoolVar(
 		&flagDisableSNI,
 		"disable-sni",
@@ -203,6 +210,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if flagTopologyDNSWindow < 0 {
 		return fmt.Errorf("--topology-dns-window must be >= 0")
 	}
+	if err := validateTLSCertLookupTimeout(flagTLSCertLookupTimeoutSeconds); err != nil {
+		return err
+	}
 	if err := validateFleetScanWorkers(flagFleet, flagFleetScanWorkers); err != nil {
 		return err
 	}
@@ -219,11 +229,6 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--server-summary-exclude-udp-ports: %w", err)
 	}
 
-	om, err := NewOutputManager(flagNetID, flagOutputRoot)
-	if err != nil {
-		return err
-	}
-
 	progress.SetStage("Discovering PCAP files...")
 	files, err := pcap.DiscoverPCAPFiles(flagReadDir)
 	if err != nil {
@@ -231,28 +236,6 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if len(files) == 0 {
 		return fmt.Errorf("no .pcap files found in %q", flagReadDir)
-	}
-
-	var synTrailArtifacts map[string]string
-	if flagFleet != "" {
-		progress.SetStage("Running fleet trail sidecar...")
-		synTrailStartedAt := time.Now()
-		scanWorkers := effectiveFleetScanWorkers(flagFleetScanWorkers, len(files))
-		synTrailArtifacts, err = runSYNTrailSidecar(ctx, om, files, flagFleet, synTrailArtifactOptions{
-			FTPControlPorts:              ftpControlPorts,
-			FTPPassiveMinPort:            ftpPassiveMinPort,
-			ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
-			Debug:                        flagDebug,
-			ScanOptions: syntrail.ScanOptions{
-				Workers:  scanWorkers,
-				Progress: fleetTrailScanProgress(progress.UpdateBar),
-			},
-		})
-		synTrailElapsed := time.Since(synTrailStartedAt).Round(time.Millisecond)
-		if err != nil {
-			return fmt.Errorf("run fleet trail sidecar (elapsed %s): %w", synTrailElapsed, err)
-		}
-		progress.SetStage(fmt.Sprintf("Fleet trail sidecar complete (elapsed %s).", synTrailElapsed))
 	}
 
 	// --------------------------------------------------------------------
@@ -276,7 +259,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	} else {
 		progress.SetStage("Pass 2: scanning DNS + TLS SNI...")
 	}
-	txs, _, truncatedDNSPackets, err := dns.BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
+	txs, pass2Earliest, truncatedDNSPackets, err := dns.BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
 		ctx,
 		files,
 		!flagDisableSNI,
@@ -338,6 +321,37 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	)
 	if err != nil {
 		return err
+	}
+
+	layoutTimestamp := firstPktInfo.Timestamp
+	if layoutTimestamp.IsZero() {
+		layoutTimestamp = pass2Earliest
+	}
+	om, err := NewOutputManagerForRun(flagNetID, flagOutputRoot, layoutTimestamp, runStartedAt)
+	if err != nil {
+		return err
+	}
+
+	var synTrailArtifacts map[string]string
+	if flagFleet != "" {
+		progress.SetStage("Running fleet trail sidecar...")
+		synTrailStartedAt := time.Now()
+		scanWorkers := effectiveFleetScanWorkers(flagFleetScanWorkers, len(files))
+		synTrailArtifacts, err = runSYNTrailSidecar(ctx, om, files, flagFleet, synTrailArtifactOptions{
+			FTPControlPorts:              ftpControlPorts,
+			FTPPassiveMinPort:            ftpPassiveMinPort,
+			ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
+			Debug:                        flagDebug,
+			ScanOptions: syntrail.ScanOptions{
+				Workers:  scanWorkers,
+				Progress: fleetTrailScanProgress(progress.UpdateBar),
+			},
+		})
+		synTrailElapsed := time.Since(synTrailStartedAt).Round(time.Millisecond)
+		if err != nil {
+			return fmt.Errorf("run fleet trail sidecar (elapsed %s): %w", synTrailElapsed, err)
+		}
+		progress.SetStage(fmt.Sprintf("Fleet trail sidecar complete (elapsed %s).", synTrailElapsed))
 	}
 
 	// --------------------------------------------------------------------
@@ -472,17 +486,27 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
 	unresolvedFinal = dns.FilterUnresolvedByTruncatedDNSPackets(unresolvedFinal, truncatedDNSPackets)
 
-	if flagActiveResolve && len(unresolvedFinal) > 0 {
-		progress.SetStage("Pass 4: resolving unresolved DNS names for matrix completion...")
-		names := make([]string, 0, len(unresolvedFinal))
-		for _, row := range unresolvedFinal {
-			names = append(names, row.Name)
+	activeResolveLogPath := ""
+	if flagActiveResolve {
+		var activeResolveRecords []dns.ActiveResolveAuditRecord
+		if len(unresolvedFinal) > 0 {
+			progress.SetStage("Pass 4: resolving unresolved DNS names for matrix completion...")
+			names := make([]string, 0, len(unresolvedFinal))
+			for _, row := range unresolvedFinal {
+				names = append(names, row.Name)
+			}
+			resolvedNames, records, err := resolveDNSNamesIPv4WithAudit(ctx, names, activeResolveOpt, nil)
+			if err != nil {
+				return fmt.Errorf("active resolve for matrix completion: %w", err)
+			}
+			beforeActive := topo
+			topo = dns.CompleteTopologyWithActiveDNS(topo, resolvedNames)
+			activeResolveRecords = annotateActiveResolveRecords(records, beforeActive, topo)
 		}
-		resolvedNames, err := resolveDNSNamesIPv4(ctx, names, activeResolveOpt, nil)
+		activeResolveLogPath, err = writeActiveResolveLog(om, activeResolveRecords, activeResolveOpt)
 		if err != nil {
-			return fmt.Errorf("active resolve for matrix completion: %w", err)
+			return err
 		}
-		topo = dns.CompleteTopologyWithActiveDNS(topo, resolvedNames)
 	}
 	topo = dns.CompleteTopologyWithDNSDonation(topo)
 	// The artifact reflects final topology attribution, including active matrix
@@ -528,6 +552,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if flagTLSCertLookup {
 		progress.SetStage("Pass 4.6: probing TLS certificates for unresolved endpoints...")
 		tlsCertRecords, err := probeTLSCertificates(ctx, topo, nil, dns.TLSCertLookupOptions{
+			Timeout: time.Duration(flagTLSCertLookupTimeoutSeconds) * time.Second,
 			Progress: func(processed, total int) {
 				progress.UpdateBar(processed, total, fmt.Sprintf("processed %d / %d endpoints", processed, total))
 			},
@@ -568,6 +593,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	networkTopologyPath := ""
 	networkTopologyJSONPath := ""
 	networkTopologyCompactJSONPath := ""
+	uniqueDNSPortProtoPath := ""
 	if len(topo) > 0 {
 		mf, err := om.Create("network-topology-matrix.txt")
 		if err != nil {
@@ -601,6 +627,17 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		if err := output.WriteNetworkTopologyMatrixCompactJSON(mcjf, topo); err != nil {
 			return fmt.Errorf("write compact network topology matrix json: %w", err)
 		}
+
+	}
+	scf, err := om.Create("unique-dns-port-proto.csv")
+	if err != nil {
+		return fmt.Errorf("create unique DNS/port/protocol csv: %w", err)
+	}
+	defer scf.Close()
+	uniqueDNSPortProtoPath = scf.Name()
+
+	if err := output.WriteUniqueDNSPortProtoCSV(scf, topo); err != nil {
+		return fmt.Errorf("write unique DNS/port/protocol csv: %w", err)
 	}
 
 	// ---------------------------
@@ -723,6 +760,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if networkTopologyCompactJSONPath != "" {
 		filesMap["network_topology_matrix_compact"] = networkTopologyCompactJSONPath
 	}
+	if uniqueDNSPortProtoPath != "" {
+		filesMap["unique_dns_port_proto"] = uniqueDNSPortProtoPath
+	}
 	if unresolvedDNSPath != "" {
 		filesMap["dns_unresolved_dns"] = unresolvedDNSPath
 	}
@@ -740,6 +780,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if truncatedDNSPacketsPath != "" {
 		filesMap["truncated_dns_packets"] = truncatedDNSPacketsPath
+	}
+	if activeResolveLogPath != "" {
+		filesMap["active_resolve_log"] = activeResolveLogPath
 	}
 	if reverseDNSLookupLogPath != "" {
 		filesMap["reverse_dns_lookup_log"] = reverseDNSLookupLogPath
@@ -773,6 +816,13 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 func validateFleetScanWorkers(_ string, workers int) error {
 	if workers < 0 {
 		return fmt.Errorf("--fleet-scan-workers must be >= 0")
+	}
+	return nil
+}
+
+func validateTLSCertLookupTimeout(seconds int) error {
+	if seconds < 5 || seconds > 30 {
+		return fmt.Errorf("--tls-cert-lookup-timeout must be an integer from 5 to 30 seconds (got %d)", seconds)
 	}
 	return nil
 }
@@ -905,6 +955,68 @@ func writeReverseDNSLookupLog(om *OutputManager, rows []dns.ReverseDNSLookupReco
 		return "", fmt.Errorf("close reverse DNS lookup log: %w", closeErr)
 	}
 	return path, nil
+}
+
+func writeActiveResolveLog(
+	om *OutputManager,
+	rows []dns.ActiveResolveAuditRecord,
+	options dns.ResolveUnresolvedOptions,
+) (string, error) {
+	f, err := om.Create("active-resolve-log.csv")
+	if err != nil {
+		return "", fmt.Errorf("create active resolve log: %w", err)
+	}
+	writeErr := dns.WriteActiveResolveAuditCSV(f, rows, options)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return "", fmt.Errorf("write active resolve log: %w", writeErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close active resolve log: %w", closeErr)
+	}
+	return f.Name(), nil
+}
+
+func annotateActiveResolveRecords(
+	records []dns.ActiveResolveAuditRecord,
+	before, after []dns.TopologyEntry,
+) []dns.ActiveResolveAuditRecord {
+	out := append([]dns.ActiveResolveAuditRecord(nil), records...)
+	for i := range out {
+		answerSet := make(map[string]struct{}, len(out[i].IPv4s))
+		for _, rawIP := range out[i].IPv4s {
+			if ip := net.ParseIP(strings.TrimSpace(rawIP)); ip != nil && ip.To4() != nil {
+				answerSet[ip.To4().String()] = struct{}{}
+			}
+		}
+		matrixSet := make(map[string]struct{}, len(answerSet))
+		for rowIndex, row := range before {
+			ip := net.ParseIP(strings.TrimSpace(row.DestinationIP))
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			canonicalIP := ip.To4().String()
+			if _, ok := answerSet[canonicalIP]; !ok {
+				continue
+			}
+			matrixSet[canonicalIP] = struct{}{}
+			if rowIndex >= len(after) || strings.TrimSpace(row.DNSName) != "" {
+				continue
+			}
+			completed := after[rowIndex]
+			if strings.EqualFold(strings.TrimSpace(completed.DNSSource), "active+matrix") &&
+				strings.EqualFold(strings.TrimSpace(completed.DNSName), strings.TrimSpace(out[i].DNSName)) {
+				out[i].MatrixRowsCompleted++
+			}
+		}
+		out[i].MatrixIPs = make([]string, 0, len(matrixSet))
+		for _, ip := range out[i].IPv4s {
+			if _, ok := matrixSet[ip]; ok {
+				out[i].MatrixIPs = append(out[i].MatrixIPs, ip)
+			}
+		}
+	}
+	return out
 }
 
 func writeTLSCertLookupLog(om *OutputManager, rows []dns.TLSCertLookupRecord) (string, error) {

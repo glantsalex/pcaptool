@@ -8,11 +8,13 @@
 package output
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -145,6 +147,52 @@ func WriteNetworkTopologyMatrixJSON(w io.Writer, entries []dns.TopologyEntry) er
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)
+}
+
+// WriteUniqueDNSPortProtoCSV writes the unique (DNS, port, protocol)
+// tuples present in the final topology matrix. Rows are sorted for stable
+// output, and empty DNS values are preserved as matrix data.
+func WriteUniqueDNSPortProtoCSV(w io.Writer, entries []dns.TopologyEntry) error {
+	type serviceKey struct {
+		dns      string
+		port     uint16
+		protocol string
+	}
+
+	unique := make(map[serviceKey]struct{}, len(entries))
+	for _, entry := range entries {
+		unique[serviceKey{
+			dns:      entry.DNSName,
+			port:     entry.Port,
+			protocol: entry.Protocol,
+		}] = struct{}{}
+	}
+
+	rows := make([]serviceKey, 0, len(unique))
+	for key := range unique {
+		rows = append(rows, key)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].dns != rows[j].dns {
+			return rows[i].dns < rows[j].dns
+		}
+		if rows[i].port != rows[j].port {
+			return rows[i].port < rows[j].port
+		}
+		return rows[i].protocol < rows[j].protocol
+	})
+
+	csvWriter := csv.NewWriter(w)
+	if err := csvWriter.Write([]string{"dns", "port", "protocol"}); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if err := csvWriter.Write([]string{row.dns, strconv.FormatUint(uint64(row.port), 10), row.protocol}); err != nil {
+			return err
+		}
+	}
+	csvWriter.Flush()
+	return csvWriter.Error()
 }
 
 type networkTopologyMatrixCompactJSON struct {

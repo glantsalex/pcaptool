@@ -9,10 +9,14 @@ package dns
 
 import (
 	"context"
+	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,6 +42,17 @@ type IPv4LookupFunc func(context.Context, string) ([]net.IP, error)
 type DNSNameIPv4Resolution struct {
 	DNSName string
 	IPv4s   []string
+}
+
+// ActiveResolveAuditRecord describes one canonical name offered to active
+// resolution and how its result related to the topology matrix.
+type ActiveResolveAuditRecord struct {
+	DNSName             string
+	Status              string
+	IPv4s               []string
+	MatrixIPs           []string
+	MatrixRowsCompleted int
+	Error               string
 }
 
 // makeResolver creates a net.Resolver that uses the given DNS servers (UDP/53)
@@ -141,8 +156,20 @@ func ResolveDNSNamesIPv4(
 	opt ResolveUnresolvedOptions,
 	lookup IPv4LookupFunc,
 ) ([]DNSNameIPv4Resolution, error) {
+	resolutions, _, err := ResolveDNSNamesIPv4WithAudit(ctx, names, opt, lookup)
+	return resolutions, err
+}
+
+// ResolveDNSNamesIPv4WithAudit resolves names exactly like
+// ResolveDNSNamesIPv4 while retaining deterministic per-name outcomes.
+func ResolveDNSNamesIPv4WithAudit(
+	ctx context.Context,
+	names []string,
+	opt ResolveUnresolvedOptions,
+	lookup IPv4LookupFunc,
+) ([]DNSNameIPv4Resolution, []ActiveResolveAuditRecord, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	def := DefaultResolveUnresolvedOptions()
 	if opt.Workers <= 0 {
@@ -156,15 +183,20 @@ func ResolveDNSNamesIPv4(
 	}
 
 	unique := make(map[string]struct{}, len(names))
+	auditByName := make(map[string]ActiveResolveAuditRecord, len(names))
 	for _, raw := range names {
 		name := canonicalDNSName(strings.TrimSpace(raw))
 		if !IsResolvableDNSName(name) {
+			if _, exists := auditByName[name]; !exists {
+				auditByName[name] = ActiveResolveAuditRecord{DNSName: name, Status: "skipped_invalid"}
+			}
 			continue
 		}
 		unique[name] = struct{}{}
 	}
 	if len(unique) == 0 {
-		return nil, nil
+		audit := activeResolveAuditMapValues(auditByName)
+		return []DNSNameIPv4Resolution{}, audit, nil
 	}
 
 	candidates := make([]string, 0, len(unique))
@@ -183,6 +215,7 @@ func ResolveDNSNamesIPv4(
 	type result struct {
 		name string
 		ips  []string
+		err  error
 	}
 
 	workers := min(opt.Workers, len(candidates), 32)
@@ -210,6 +243,11 @@ func ResolveDNSNamesIPv4(
 					ips, err := lookup(lookupCtx, name)
 					cancel()
 					if err != nil {
+						select {
+						case <-ctx.Done():
+							return
+						case results <- result{name: name, err: err}:
+						}
 						continue
 					}
 
@@ -224,9 +262,6 @@ func ResolveDNSNamesIPv4(
 							seen[s] = struct{}{}
 							ipv4s = append(ipv4s, s)
 						}
-					}
-					if len(ipv4s) == 0 {
-						continue
 					}
 					sort.Strings(ipv4s)
 					select {
@@ -256,13 +291,87 @@ func ResolveDNSNamesIPv4(
 
 	out := make([]DNSNameIPv4Resolution, 0, len(candidates))
 	for item := range results {
+		record := ActiveResolveAuditRecord{DNSName: item.name, IPv4s: append([]string(nil), item.ips...)}
+		if item.err != nil {
+			record.Status = activeResolveErrorStatus(item.err)
+			record.Error = item.err.Error()
+			auditByName[item.name] = record
+			continue
+		}
+		if len(item.ips) == 0 {
+			record.Status = "no_ipv4"
+			auditByName[item.name] = record
+			continue
+		}
+		record.Status = "resolved"
+		auditByName[item.name] = record
 		out = append(out, DNSNameIPv4Resolution{DNSName: item.name, IPv4s: item.ips})
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, activeResolveAuditMapValues(auditByName), err
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].DNSName < out[j].DNSName })
-	return out, nil
+	return out, activeResolveAuditMapValues(auditByName), nil
+}
+
+func activeResolveErrorStatus(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	return "error"
+}
+
+func activeResolveAuditMapValues(records map[string]ActiveResolveAuditRecord) []ActiveResolveAuditRecord {
+	out := make([]ActiveResolveAuditRecord, 0, len(records))
+	for _, record := range records {
+		out = append(out, record)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DNSName < out[j].DNSName })
+	return out
+}
+
+// WriteActiveResolveAuditCSV writes deterministic active-resolution outcomes.
+func WriteActiveResolveAuditCSV(w io.Writer, records []ActiveResolveAuditRecord, opt ResolveUnresolvedOptions) error {
+	def := DefaultResolveUnresolvedOptions()
+	if opt.Timeout <= 0 {
+		opt.Timeout = def.Timeout
+	}
+	if len(opt.Servers) == 0 {
+		opt.Servers = append([]string(nil), def.Servers...)
+	}
+
+	rows := append([]ActiveResolveAuditRecord(nil), records...)
+	sort.Slice(rows, func(i, j int) bool { return rows[i].DNSName < rows[j].DNSName })
+	csvWriter := csv.NewWriter(w)
+	if err := csvWriter.Write([]string{
+		"dns_name", "status", "configured_resolvers", "timeout_seconds", "ipv4_answers",
+		"matrix_ips", "matrix_rows_completed", "error",
+	}); err != nil {
+		return fmt.Errorf("write active resolve CSV header: %w", err)
+	}
+	for _, row := range rows {
+		if err := csvWriter.Write([]string{
+			row.DNSName,
+			row.Status,
+			strings.Join(opt.Servers, ";"),
+			strconv.FormatFloat(opt.Timeout.Seconds(), 'f', -1, 64),
+			strings.Join(row.IPv4s, ";"),
+			strings.Join(row.MatrixIPs, ";"),
+			strconv.Itoa(row.MatrixRowsCompleted),
+			row.Error,
+		}); err != nil {
+			return fmt.Errorf("write active resolve CSV row for %q: %w", row.DNSName, err)
+		}
+	}
+	csvWriter.Flush()
+	if err := csvWriter.Error(); err != nil {
+		return fmt.Errorf("flush active resolve CSV: %w", err)
+	}
+	return nil
 }
 
 // ResolveUnresolvedDNSTransactions:

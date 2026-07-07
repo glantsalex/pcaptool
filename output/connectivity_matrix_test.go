@@ -9,6 +9,7 @@ package output
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -73,6 +74,53 @@ func TestWriteNetworkTopologyMatrixJSON(t *testing.T) {
 	}
 	if got.Entries[1].DNSName != "ep2.online-log.worldline.ch" || got.Entries[1].DNSSource != "csv+mid" {
 		t.Fatalf("second entry = %+v", got.Entries[1])
+	}
+}
+
+func TestWriteUniqueDNSPortProtoCSVDeduplicatesAndSorts(t *testing.T) {
+	entries := []dns.TopologyEntry{
+		{DNSName: "b.example", Protocol: "tcp", Port: 443},
+		{DNSName: "a.example", Protocol: "udp", Port: 53},
+		{DNSName: "b.example", Protocol: "tcp", Port: 443},
+		{DNSName: "a.example", Protocol: "tcp", Port: 443},
+		{DNSName: "", Protocol: "tcp", Port: 8443},
+	}
+
+	var first bytes.Buffer
+	if err := WriteUniqueDNSPortProtoCSV(&first, entries); err != nil {
+		t.Fatalf("WriteUniqueDNSPortProtoCSV() error = %v", err)
+	}
+	var second bytes.Buffer
+	if err := WriteUniqueDNSPortProtoCSV(&second, entries); err != nil {
+		t.Fatalf("second WriteUniqueDNSPortProtoCSV() error = %v", err)
+	}
+	if !bytes.Equal(first.Bytes(), second.Bytes()) {
+		t.Fatalf("output is not deterministic:\nfirst:\n%s\nsecond:\n%s", first.Bytes(), second.Bytes())
+	}
+
+	got, err := csv.NewReader(bytes.NewReader(first.Bytes())).ReadAll()
+	if err != nil {
+		t.Fatalf("read CSV: %v", err)
+	}
+	want := [][]string{
+		{"dns", "port", "protocol"},
+		{"", "8443", "tcp"},
+		{"a.example", "53", "udp"},
+		{"a.example", "443", "tcp"},
+		{"b.example", "443", "tcp"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CSV rows = %#v, want %#v", got, want)
+	}
+}
+
+func TestWriteUniqueDNSPortProtoCSVEmptyIsHeaderOnly(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteUniqueDNSPortProtoCSV(&buf, nil); err != nil {
+		t.Fatalf("WriteUniqueDNSPortProtoCSV() error = %v", err)
+	}
+	if got, want := buf.String(), "dns,port,protocol\n"; got != want {
+		t.Fatalf("CSV = %q, want %q", got, want)
 	}
 }
 

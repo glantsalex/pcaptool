@@ -25,14 +25,14 @@ import (
 
 func TestTruncatedDNSPacketsArtifactWrittenAndManifestedOnlyWithDebug(t *testing.T) {
 	restoreDNSExtractFlags(t)
-	resolveDNSNamesIPv4 = func(
+	resolveDNSNamesIPv4WithAudit = func(
 		context.Context,
 		[]string,
 		dns.ResolveUnresolvedOptions,
 		dns.IPv4LookupFunc,
-	) ([]dns.DNSNameIPv4Resolution, error) {
+	) ([]dns.DNSNameIPv4Resolution, []dns.ActiveResolveAuditRecord, error) {
 		t.Fatal("active resolver called while --active-resolve=false")
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	readDir := t.TempDir()
@@ -71,14 +71,7 @@ func TestTruncatedDNSPacketsArtifactWrittenAndManifestedOnlyWithDebug(t *testing
 				t.Fatalf("runDNSExtract(debug=%v): %v", debug, err)
 			}
 
-			runEntries, err := os.ReadDir(filepath.Join(outputRoot, "net"))
-			if err != nil {
-				t.Fatalf("read network output dir: %v", err)
-			}
-			if len(runEntries) != 1 || !runEntries[0].IsDir() {
-				t.Fatalf("run output entries = %#v, want one run directory", runEntries)
-			}
-			runDir := filepath.Join(outputRoot, "net", runEntries[0].Name())
+			runDir := findSingleRunDir(t, outputRoot, "net")
 			artifactPath := filepath.Join(runDir, "truncated-dns-packets.csv")
 
 			manifestPath := filepath.Join(runDir, "_run-artifacts.json")
@@ -89,6 +82,51 @@ func TestTruncatedDNSPacketsArtifactWrittenAndManifestedOnlyWithDebug(t *testing
 			var manifest RunArtifactsManifest
 			if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 				t.Fatalf("unmarshal manifest: %v", err)
+			}
+			if manifest.PCAPDate != "2026-06-28" {
+				t.Fatalf("manifest pcap_date = %q, want 2026-06-28", manifest.PCAPDate)
+			}
+			if manifest.OutputDir != runDir || manifest.RunDir != runDir {
+				t.Fatalf("manifest output dirs = output_dir %q run_dir %q, want %q", manifest.OutputDir, manifest.RunDir, runDir)
+			}
+			if manifest.RunID != filepath.Base(runDir) || !strings.HasPrefix(manifest.RunID, "run-") {
+				t.Fatalf("manifest run_id = %q, run dir = %q", manifest.RunID, runDir)
+			}
+			servicesPath := filepath.Join(runDir, "unique-dns-port-proto.csv")
+			if got := manifest.Files["unique_dns_port_proto"]; got != servicesPath {
+				t.Fatalf("manifest unique_dns_port_proto = %q, want %q", got, servicesPath)
+			}
+			if _, exists := manifest.Files["network_topology_services"]; exists {
+				t.Fatal("manifest contains retired network_topology_services key")
+			}
+			if _, exists := manifest.Files["active_resolve_log"]; exists {
+				t.Fatal("manifest contains active_resolve_log while --active-resolve=false")
+			}
+			if _, err := os.Stat(filepath.Join(runDir, "active-resolve-log.csv")); !os.IsNotExist(err) {
+				t.Fatalf("disabled active-resolve-log.csv stat error = %v, want not exist", err)
+			}
+			if _, err := os.Stat(filepath.Join(runDir, "network-topology-services.csv")); !os.IsNotExist(err) {
+				t.Fatalf("retired network-topology-services.csv stat error = %v, want not exist", err)
+			}
+			servicesFile, err := os.Open(servicesPath)
+			if err != nil {
+				t.Fatalf("open unique DNS/port/protocol CSV: %v", err)
+			}
+			servicesRows, readErr := csv.NewReader(servicesFile).ReadAll()
+			closeErr := servicesFile.Close()
+			if readErr != nil {
+				t.Fatalf("read unique DNS/port/protocol CSV: %v", readErr)
+			}
+			if closeErr != nil {
+				t.Fatalf("close unique DNS/port/protocol CSV: %v", closeErr)
+			}
+			if len(servicesRows) < 2 || !reflect.DeepEqual(servicesRows[0], []string{"dns", "port", "protocol"}) {
+				t.Fatalf("unique DNS/port/protocol rows = %#v, want header and data", servicesRows)
+			}
+			for key, path := range manifest.Files {
+				if !strings.HasPrefix(path, runDir+string(os.PathSeparator)) {
+					t.Fatalf("manifest file %q path = %q, want under %q", key, path, runDir)
+				}
 			}
 			if !debug {
 				if _, err := os.Stat(artifactPath); !os.IsNotExist(err) {
@@ -129,14 +167,14 @@ func TestTruncatedDNSPacketsArtifactWrittenAndManifestedOnlyWithDebug(t *testing
 
 func TestDnsextractFleetArtifactsRespectDebugAndProbeRename(t *testing.T) {
 	restoreDNSExtractFlags(t)
-	resolveDNSNamesIPv4 = func(
+	resolveDNSNamesIPv4WithAudit = func(
 		context.Context,
 		[]string,
 		dns.ResolveUnresolvedOptions,
 		dns.IPv4LookupFunc,
-	) ([]dns.DNSNameIPv4Resolution, error) {
+	) ([]dns.DNSNameIPv4Resolution, []dns.ActiveResolveAuditRecord, error) {
 		t.Fatal("active resolver called while --active-resolve=false")
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	readDir := t.TempDir()
@@ -178,14 +216,7 @@ func TestDnsextractFleetArtifactsRespectDebugAndProbeRename(t *testing.T) {
 			if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
 				t.Fatalf("runDNSExtract(debug=%v): %v", debug, err)
 			}
-			runEntries, err := os.ReadDir(filepath.Join(outputRoot, "net"))
-			if err != nil {
-				t.Fatalf("read network output dir: %v", err)
-			}
-			if len(runEntries) != 1 || !runEntries[0].IsDir() {
-				t.Fatalf("run output entries = %#v, want one run directory", runEntries)
-			}
-			runDir := filepath.Join(outputRoot, "net", runEntries[0].Name())
+			runDir := findSingleRunDir(t, outputRoot, "net")
 			manifestBytes, err := os.ReadFile(filepath.Join(runDir, "_run-artifacts.json"))
 			if err != nil {
 				t.Fatalf("read manifest: %v", err)
@@ -225,14 +256,14 @@ func TestDnsextractFleetArtifactsRespectDebugAndProbeRename(t *testing.T) {
 
 func TestDnsextractReverseDNSLookupArtifactAndManifest(t *testing.T) {
 	restoreDNSExtractFlags(t)
-	resolveDNSNamesIPv4 = func(
+	resolveDNSNamesIPv4WithAudit = func(
 		context.Context,
 		[]string,
 		dns.ResolveUnresolvedOptions,
 		dns.IPv4LookupFunc,
-	) ([]dns.DNSNameIPv4Resolution, error) {
+	) ([]dns.DNSNameIPv4Resolution, []dns.ActiveResolveAuditRecord, error) {
 		t.Fatal("active resolver called while --active-resolve=false")
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	readDir := t.TempDir()
@@ -317,11 +348,7 @@ func TestDnsextractReverseDNSLookupArtifactAndManifest(t *testing.T) {
 				t.Fatalf("reverse DNS completion calls = %d, want %d", lookupCalls, wantCalls)
 			}
 
-			runEntries, err := os.ReadDir(filepath.Join(outputRoot, "net"))
-			if err != nil {
-				t.Fatalf("read network output dir: %v", err)
-			}
-			runDir := filepath.Join(outputRoot, "net", runEntries[0].Name())
+			runDir := findSingleRunDir(t, outputRoot, "net")
 			logPath := filepath.Join(runDir, "reverse-dns-lookup-log.csv")
 			manifestBytes, err := os.ReadFile(filepath.Join(runDir, "_run-artifacts.json"))
 			if err != nil {
@@ -373,14 +400,14 @@ func TestDnsextractReverseDNSLookupArtifactAndManifest(t *testing.T) {
 
 func TestDnsextractTLSCertLookupDecoratesExactEndpointAndIsManifested(t *testing.T) {
 	restoreDNSExtractFlags(t)
-	resolveDNSNamesIPv4 = func(
+	resolveDNSNamesIPv4WithAudit = func(
 		context.Context,
 		[]string,
 		dns.ResolveUnresolvedOptions,
 		dns.IPv4LookupFunc,
-	) ([]dns.DNSNameIPv4Resolution, error) {
+	) ([]dns.DNSNameIPv4Resolution, []dns.ActiveResolveAuditRecord, error) {
 		t.Fatal("active resolver called while --active-resolve=false")
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	readDir := t.TempDir()
@@ -401,6 +428,9 @@ func TestDnsextractTLSCertLookupDecoratesExactEndpointAndIsManifested(t *testing
 		}
 		if options.Progress == nil {
 			t.Fatal("command TLS certificate progress callback = nil")
+		}
+		if options.Timeout != 23*time.Second {
+			t.Fatalf("command TLS certificate timeout = %s, want 23s", options.Timeout)
 		}
 		options.Progress(1, 1)
 		return []dns.TLSCertLookupRecord{{
@@ -446,6 +476,7 @@ func TestDnsextractTLSCertLookupDecoratesExactEndpointAndIsManifested(t *testing
 		flagActiveResolvers = ""
 		flagReverseDNSLookup = false
 		flagTLSCertLookup = enabled
+		flagTLSCertLookupTimeoutSeconds = 23
 		flagDisableSNI = true
 		flagUnsorted = false
 		flagDebug = false
@@ -457,11 +488,7 @@ func TestDnsextractTLSCertLookupDecoratesExactEndpointAndIsManifested(t *testing
 		if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
 			t.Fatalf("runDNSExtract(tls-cert-lookup=%v): %v", enabled, err)
 		}
-		runEntries, err := os.ReadDir(filepath.Join(outputRoot, "net"))
-		if err != nil {
-			t.Fatalf("read network output dir: %v", err)
-		}
-		runDir := filepath.Join(outputRoot, "net", runEntries[0].Name())
+		runDir := findSingleRunDir(t, outputRoot, "net")
 		manifestBytes, err := os.ReadFile(filepath.Join(runDir, "_run-artifacts.json"))
 		if err != nil {
 			t.Fatalf("read manifest: %v", err)
@@ -475,6 +502,7 @@ func TestDnsextractTLSCertLookupDecoratesExactEndpointAndIsManifested(t *testing
 			"network-topology-matrix.txt",
 			"network-topology-matrix.json",
 			"network-topology-matrix.compact.json",
+			"unique-dns-port-proto.csv",
 			"service-endpoints.txt",
 		} {
 			contents, err := os.ReadFile(filepath.Join(runDir, filename))
@@ -513,14 +541,14 @@ func TestDnsextractTLSCertLookupDecoratesExactEndpointAndIsManifested(t *testing
 	if got := enabled.manifest.Files["tls_cert_lookup_log"]; got != enabledLogPath {
 		t.Fatalf("manifest TLS certificate log path = %q, want %q", got, enabledLogPath)
 	}
-	for _, filename := range []string{"network-topology-matrix.txt", "network-topology-matrix.json", "network-topology-matrix.compact.json", "service-endpoints.txt"} {
+	for _, filename := range []string{"network-topology-matrix.txt", "network-topology-matrix.json", "network-topology-matrix.compact.json", "unique-dns-port-proto.csv", "service-endpoints.txt"} {
 		if strings.Contains(string(disabled.files[filename]), "cert.example.com") || strings.Contains(string(disabled.files[filename]), "tls-cert-san+matrix") {
 			t.Fatalf("disabled %s unexpectedly contains TLS certificate decoration: %s", filename, disabled.files[filename])
 		}
 		if !strings.Contains(string(enabled.files[filename]), "cert.example.com") {
 			t.Fatalf("enabled %s missing TLS certificate name: %s", filename, enabled.files[filename])
 		}
-		if filename != "service-endpoints.txt" && !strings.Contains(string(enabled.files[filename]), "tls-cert-san+matrix") {
+		if filename != "service-endpoints.txt" && filename != "unique-dns-port-proto.csv" && !strings.Contains(string(enabled.files[filename]), "tls-cert-san+matrix") {
 			t.Fatalf("enabled %s missing TLS certificate source: %s", filename, enabled.files[filename])
 		}
 	}
@@ -539,13 +567,14 @@ func restoreDNSExtractFlags(t *testing.T) {
 	oldActiveResolve, oldActiveResolvers := flagActiveResolve, flagActiveResolvers
 	oldReverseDNSLookup := flagReverseDNSLookup
 	oldTLSCertLookup := flagTLSCertLookup
+	oldTLSCertLookupTimeoutSeconds := flagTLSCertLookupTimeoutSeconds
 	oldDisableSNI, oldUnsorted, oldDebug := flagDisableSNI, flagUnsorted, flagDebug
 	oldManifestOut := flagManifestOut
 	oldPostHooks := append([]string(nil), flagPostHooks...)
 	oldFleetScanWorkers := flagFleetScanWorkers
 	oldNetID, oldOutputRoot := flagNetID, flagOutputRoot
 	oldEnforcePrivateAsSource := flagEnforcePrivateAsSource
-	oldResolveDNSNamesIPv4 := resolveDNSNamesIPv4
+	oldResolveDNSNamesIPv4WithAudit := resolveDNSNamesIPv4WithAudit
 	oldCompleteTopologyWithReverseDNS := completeTopologyWithReverseDNS
 	oldProbeTLSCertificates := probeTLSCertificates
 	t.Cleanup(func() {
@@ -560,16 +589,49 @@ func restoreDNSExtractFlags(t *testing.T) {
 		flagActiveResolve, flagActiveResolvers = oldActiveResolve, oldActiveResolvers
 		flagReverseDNSLookup = oldReverseDNSLookup
 		flagTLSCertLookup = oldTLSCertLookup
+		flagTLSCertLookupTimeoutSeconds = oldTLSCertLookupTimeoutSeconds
 		flagDisableSNI, flagUnsorted, flagDebug = oldDisableSNI, oldUnsorted, oldDebug
 		flagManifestOut = oldManifestOut
 		flagPostHooks = oldPostHooks
 		flagFleetScanWorkers = oldFleetScanWorkers
 		flagNetID, flagOutputRoot = oldNetID, oldOutputRoot
 		flagEnforcePrivateAsSource = oldEnforcePrivateAsSource
-		resolveDNSNamesIPv4 = oldResolveDNSNamesIPv4
+		resolveDNSNamesIPv4WithAudit = oldResolveDNSNamesIPv4WithAudit
 		completeTopologyWithReverseDNS = oldCompleteTopologyWithReverseDNS
 		probeTLSCertificates = oldProbeTLSCertificates
 	})
+}
+
+func TestTLSCertLookupTimeoutFlagAndValidation(t *testing.T) {
+	restoreDNSExtractFlags(t)
+	flag := dnsextractCommandForTest(t).Flags().Lookup("tls-cert-lookup-timeout")
+	if flag == nil {
+		t.Fatal("--tls-cert-lookup-timeout flag not found")
+	}
+	if flag.DefValue != "15" || flag.Value.Type() != "int" {
+		t.Fatalf("flag default/type = %q/%q, want 15/int", flag.DefValue, flag.Value.Type())
+	}
+	for _, value := range []string{"abc", "45.6"} {
+		if err := flag.Value.Set(value); err == nil {
+			t.Fatalf("setting --tls-cert-lookup-timeout=%q succeeded, want integer parse error", value)
+		}
+	}
+
+	for _, tc := range []struct {
+		seconds int
+		wantErr bool
+	}{
+		{seconds: 4, wantErr: true},
+		{seconds: 5},
+		{seconds: 15},
+		{seconds: 30},
+		{seconds: 31, wantErr: true},
+	} {
+		err := validateTLSCertLookupTimeout(tc.seconds)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("validateTLSCertLookupTimeout(%d) error = %v, wantErr %v", tc.seconds, err, tc.wantErr)
+		}
+	}
 }
 
 func TestActiveResolveFiltersFinalUnresolvedWritesCompactMatrixWithoutMutatingDNSIP(t *testing.T) {
@@ -585,12 +647,12 @@ func TestActiveResolveFiltersFinalUnresolvedWritesCompactMatrixWithoutMutatingDN
 	}
 
 	var resolverCalls int
-	resolveDNSNamesIPv4 = func(
+	resolveDNSNamesIPv4WithAudit = func(
 		_ context.Context,
 		names []string,
 		_ dns.ResolveUnresolvedOptions,
 		lookup dns.IPv4LookupFunc,
-	) ([]dns.DNSNameIPv4Resolution, error) {
+	) ([]dns.DNSNameIPv4Resolution, []dns.ActiveResolveAuditRecord, error) {
 		resolverCalls++
 		if lookup != nil {
 			t.Fatalf("command supplied unexpected lookup override")
@@ -598,8 +660,12 @@ func TestActiveResolveFiltersFinalUnresolvedWritesCompactMatrixWithoutMutatingDN
 		if !reflect.DeepEqual(names, []string{"api.example.com", "normal.example"}) {
 			t.Fatalf("active resolve names = %#v", names)
 		}
-		return []dns.DNSNameIPv4Resolution{
+		resolutions := []dns.DNSNameIPv4Resolution{
 			{DNSName: "normal.example", IPv4s: []string{"8.8.8.8"}},
+		}
+		return resolutions, []dns.ActiveResolveAuditRecord{
+			{DNSName: "api.example.com", Status: "error", Error: "lookup failed"},
+			{DNSName: "normal.example", Status: "resolved", IPv4s: []string{"8.8.8.8"}},
 		}, nil
 	}
 
@@ -636,14 +702,21 @@ func TestActiveResolveFiltersFinalUnresolvedWritesCompactMatrixWithoutMutatingDN
 		t.Fatalf("active resolver calls = %d, want 1", resolverCalls)
 	}
 
-	runEntries, err := os.ReadDir(filepath.Join(outputRoot, "net"))
+	runDir := findSingleRunDir(t, outputRoot, "net")
+	activeResolveLogPath := filepath.Join(runDir, "active-resolve-log.csv")
+	activeResolveLog, err := os.ReadFile(activeResolveLogPath)
 	if err != nil {
-		t.Fatalf("read network output dir: %v", err)
+		t.Fatalf("read active resolve log: %v", err)
 	}
-	if len(runEntries) != 1 || !runEntries[0].IsDir() {
-		t.Fatalf("run output entries = %#v, want one run directory", runEntries)
+	for _, want := range []string{
+		"dns_name,status,configured_resolvers,timeout_seconds,ipv4_answers,matrix_ips,matrix_rows_completed,error",
+		"api.example.com,error,8.8.8.8;1.1.1.1,10,,,0,lookup failed",
+		"normal.example,resolved,8.8.8.8;1.1.1.1,10,8.8.8.8,8.8.8.8,1,",
+	} {
+		if !strings.Contains(string(activeResolveLog), want) {
+			t.Fatalf("active resolve log missing %q:\n%s", want, activeResolveLog)
+		}
 	}
-	runDir := filepath.Join(outputRoot, "net", runEntries[0].Name())
 
 	matrixBytes, err := os.ReadFile(filepath.Join(runDir, "network-topology-matrix.txt"))
 	if err != nil {
@@ -678,6 +751,9 @@ func TestActiveResolveFiltersFinalUnresolvedWritesCompactMatrixWithoutMutatingDN
 	}
 	if got := manifest.Files["network_topology_matrix_compact"]; got != compactMatrixPath {
 		t.Fatalf("manifest compact matrix path = %q, want %q", got, compactMatrixPath)
+	}
+	if got := manifest.Files["active_resolve_log"]; got != activeResolveLogPath {
+		t.Fatalf("manifest active resolve log path = %q, want %q", got, activeResolveLogPath)
 	}
 
 	unresolvedBytes, err := os.ReadFile(filepath.Join(runDir, "dns-unresolved-dns.txt"))
@@ -1043,6 +1119,27 @@ func dnsextractCommandForTest(t *testing.T) *cobra.Command {
 	}
 	t.Fatal("dnsextract command not found")
 	return nil
+}
+
+func findSingleRunDir(t *testing.T, outputRoot, netID string) string {
+	t.Helper()
+	netDir := filepath.Join(outputRoot, netID)
+	dateEntries, err := os.ReadDir(netDir)
+	if err != nil {
+		t.Fatalf("read network output dir %s: %v", netDir, err)
+	}
+	if len(dateEntries) != 1 || !dateEntries[0].IsDir() || !strings.HasPrefix(dateEntries[0].Name(), "pcap-date-") {
+		t.Fatalf("date output entries = %#v, want one pcap-date-* directory", dateEntries)
+	}
+	dateDir := filepath.Join(netDir, dateEntries[0].Name())
+	runEntries, err := os.ReadDir(dateDir)
+	if err != nil {
+		t.Fatalf("read PCAP-date output dir %s: %v", dateDir, err)
+	}
+	if len(runEntries) != 1 || !runEntries[0].IsDir() || !strings.HasPrefix(runEntries[0].Name(), "run-") {
+		t.Fatalf("run output entries = %#v, want one run-* directory", runEntries)
+	}
+	return filepath.Join(dateDir, runEntries[0].Name())
 }
 
 type fleetProgressUpdate struct {
