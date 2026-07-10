@@ -27,12 +27,15 @@ const (
 )
 
 type Edge struct {
-	IssuerIP  string
-	DstIP     string
-	Protocol  L4Proto
-	Port      uint16
-	FirstSeen time.Time
+	IssuerIP      string
+	DstIP         string
+	Protocol      L4Proto
+	Port          uint16
+	FirstSeen     time.Time
+	ObservedTimes []time.Time
 }
+
+const maxEdgeObservedTimes = 128
 
 type Options struct {
 	PendingTTL             time.Duration
@@ -68,7 +71,7 @@ type Collector struct {
 	tcpSyn   map[tcpKey]time.Time
 	udpFirst map[udpKey]time.Time
 
-	edges map[edgeKey]time.Time
+	edges map[edgeKey][]time.Time
 
 	lastSweep time.Time
 
@@ -116,7 +119,7 @@ func NewCollector(opt Options) *Collector {
 		opt:            opt,
 		tcpSyn:         make(map[tcpKey]time.Time, 8192),
 		udpFirst:       make(map[udpKey]time.Time, 8192),
-		edges:          make(map[edgeKey]time.Time, 32768),
+		edges:          make(map[edgeKey][]time.Time, 32768),
 		ftpControlSeen: make(map[pairKey]struct{}, 1024),
 		ftpPassivePend: make(map[pairKey]time.Time, 256),
 		ftpPassivePort: make(map[edgeKey]time.Time, 512),
@@ -159,13 +162,17 @@ func (c *Collector) OnPacket(pkt gopacket.Packet, ts time.Time) {
 
 func (c *Collector) Edges() []Edge {
 	out := make([]Edge, 0, len(c.edges))
-	for k, ts := range c.edges {
+	for k, times := range c.edges {
+		if len(times) == 0 {
+			continue
+		}
 		out = append(out, Edge{
-			IssuerIP:  k.issuer,
-			DstIP:     k.dst,
-			Protocol:  k.proto,
-			Port:      k.port,
-			FirstSeen: ts,
+			IssuerIP:      k.issuer,
+			DstIP:         k.dst,
+			Protocol:      k.proto,
+			Port:          k.port,
+			FirstSeen:     times[0],
+			ObservedTimes: append([]time.Time(nil), times...),
 		})
 	}
 
@@ -187,13 +194,17 @@ func (c *Collector) Edges() []Edge {
 
 func (c *Collector) EdgesByFirstSeen() []Edge {
 	out := make([]Edge, 0, len(c.edges))
-	for k, ts := range c.edges {
+	for k, times := range c.edges {
+		if len(times) == 0 {
+			continue
+		}
 		out = append(out, Edge{
-			IssuerIP:  k.issuer,
-			DstIP:     k.dst,
-			Protocol:  k.proto,
-			Port:      k.port,
-			FirstSeen: ts,
+			IssuerIP:      k.issuer,
+			DstIP:         k.dst,
+			Protocol:      k.proto,
+			Port:          k.port,
+			FirstSeen:     times[0],
+			ObservedTimes: append([]time.Time(nil), times...),
 		})
 	}
 
@@ -214,6 +225,49 @@ func (c *Collector) EdgesByFirstSeen() []Edge {
 	})
 
 	return out
+}
+
+// MergeEdgeObservedTimes keeps a bounded set of edge observations: the earliest
+// timestamp for stable first-seen semantics plus the latest observations for
+// later DNS attribution checks.
+func MergeEdgeObservedTimes(existing []time.Time, additions ...time.Time) []time.Time {
+	times := append([]time.Time(nil), existing...)
+	for _, ts := range additions {
+		if ts.IsZero() {
+			continue
+		}
+		utc := ts.UTC()
+		duplicate := false
+		for _, existingTS := range times {
+			if existingTS.Equal(utc) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		times = append(times, utc)
+	}
+	if len(times) == 0 {
+		return nil
+	}
+	sort.Slice(times, func(i, j int) bool {
+		return times[i].Before(times[j])
+	})
+	if len(times) <= maxEdgeObservedTimes {
+		return times
+	}
+
+	// Preserve the true first observation and the most recent observations.
+	out := make([]time.Time, 0, maxEdgeObservedTimes)
+	out = append(out, times[0])
+	out = append(out, times[len(times)-(maxEdgeObservedTimes-1):]...)
+	return out
+}
+
+func (c *Collector) recordEdgeObservation(ek edgeKey, ts time.Time) {
+	c.edges[ek] = MergeEdgeObservedTimes(c.edges[ek], ts)
 }
 
 func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
@@ -264,9 +318,7 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 		}
 
 		// For SYN/SYN-ACK confirmed edges, observed time is the SYN timestamp.
-		if prev, ok := c.edges[ek]; !ok || synTS.Before(prev) {
-			c.edges[ek] = synTS
-		}
+		c.recordEdgeObservation(ek, synTS)
 		return
 	}
 
@@ -323,9 +375,7 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 		c.ftpControlSeen[pairKey{ek.issuer, ek.dst}] = struct{}{}
 	}
 
-	if prev, ok := c.edges[ek]; !ok || ts.Before(prev) {
-		c.edges[ek] = ts
-	}
+	c.recordEdgeObservation(ek, ts)
 
 }
 
@@ -367,9 +417,7 @@ func (c *Collector) onUDP(srcIP, dstIP net.IP, udp *layers.UDP, ts time.Time) {
 
 	ek := edgeKey{issuer, dst, ProtoUDP, port}
 	// For UDP confirmed edges, keep the first packet timestamp from issuer->dst flow.
-	if prev, ok := c.edges[ek]; !ok || revTS.Before(prev) {
-		c.edges[ek] = revTS
-	}
+	c.recordEdgeObservation(ek, revTS)
 }
 
 func (c *Collector) sweep(now time.Time) {

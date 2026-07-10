@@ -559,7 +559,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 	oldReadDir, oldFleet := flagReadDir, flagFleet
 	oldFormat, oldExportCSV := flagFormat, flagExportCSV
 	oldConnectivityShort, oldRadiusIMSI := flagConnectivityShort, flagRadiusIMSI
-	oldOnlyTCP, oldIgnoreNTP := flagOnlyTCP, flagIgnoreNTP
+	oldOnlyTCP, oldInferDNSFromConnections, oldIgnoreNTP := flagOnlyTCP, flagInferDNSFromConnections, flagIgnoreNTP
 	oldExcludePorts, oldFTPControlPorts := flagExcludePorts, flagFTPControlPorts
 	oldFTPPassiveMinPort := flagFTPPassiveMinPort
 	oldServerSummaryExcludeUDPPorts := flagServerSummaryExcludeUDPPorts
@@ -581,7 +581,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 		flagReadDir, flagFleet = oldReadDir, oldFleet
 		flagFormat, flagExportCSV = oldFormat, oldExportCSV
 		flagConnectivityShort, flagRadiusIMSI = oldConnectivityShort, oldRadiusIMSI
-		flagOnlyTCP, flagIgnoreNTP = oldOnlyTCP, oldIgnoreNTP
+		flagOnlyTCP, flagInferDNSFromConnections, flagIgnoreNTP = oldOnlyTCP, oldInferDNSFromConnections, oldIgnoreNTP
 		flagExcludePorts, flagFTPControlPorts = oldExcludePorts, oldFTPControlPorts
 		flagFTPPassiveMinPort = oldFTPPassiveMinPort
 		flagServerSummaryExcludeUDPPorts = oldServerSummaryExcludeUDPPorts
@@ -631,6 +631,17 @@ func TestTLSCertLookupTimeoutFlagAndValidation(t *testing.T) {
 		if (err != nil) != tc.wantErr {
 			t.Fatalf("validateTLSCertLookupTimeout(%d) error = %v, wantErr %v", tc.seconds, err, tc.wantErr)
 		}
+	}
+}
+
+func TestInferDNSFromConnectionsFlagDefault(t *testing.T) {
+	restoreDNSExtractFlags(t)
+	flag := dnsextractCommandForTest(t).Flags().Lookup("infer-dns-from-connections")
+	if flag == nil {
+		t.Fatal("--infer-dns-from-connections flag not found")
+	}
+	if flag.DefValue != "false" || flag.Value.Type() != "bool" {
+		t.Fatalf("flag default/type = %q/%q, want false/bool", flag.DefValue, flag.Value.Type())
 	}
 }
 

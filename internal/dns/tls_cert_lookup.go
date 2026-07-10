@@ -133,6 +133,71 @@ type tlsCertProbeOutcome struct {
 	err      error
 }
 
+type tlsCertProbeCall struct {
+	done    chan struct{}
+	outcome tlsCertProbeOutcome
+}
+
+type tlsCertProbeCache struct {
+	mu    sync.Mutex
+	calls map[TLSEndpoint]*tlsCertProbeCall
+}
+
+func newTLSCertProbeCache() *tlsCertProbeCache {
+	return &tlsCertProbeCache{calls: make(map[TLSEndpoint]*tlsCertProbeCall)}
+}
+
+func (c *tlsCertProbeCache) probe(
+	ctx context.Context,
+	endpoint TLSEndpoint,
+	prober TLSCertProber,
+	timeout time.Duration,
+) (tlsCertProbeOutcome, error) {
+	if err := ctx.Err(); err != nil {
+		return tlsCertProbeOutcome{}, err
+	}
+	c.mu.Lock()
+	call := c.calls[endpoint]
+	if call == nil {
+		call = &tlsCertProbeCall{done: make(chan struct{})}
+		c.calls[endpoint] = call
+		c.mu.Unlock()
+
+		endpointCtx, cancel := context.WithTimeout(ctx, timeout)
+		result, err := prober.Probe(endpointCtx, endpoint)
+		cancel()
+		outcome := tlsCertProbeOutcome{endpoint: endpoint, result: result, err: err}
+
+		c.mu.Lock()
+		call.outcome = outcome
+		close(call.done)
+		c.mu.Unlock()
+		return outcome, nil
+	}
+	c.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return tlsCertProbeOutcome{}, ctx.Err()
+	case <-call.done:
+		return call.outcome, nil
+	}
+}
+
+func (c *tlsCertProbeCache) outcomes() []tlsCertProbeOutcome {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	outcomes := make([]tlsCertProbeOutcome, 0, len(c.calls))
+	for _, call := range c.calls {
+		select {
+		case <-call.done:
+			outcomes = append(outcomes, call.outcome)
+		default:
+		}
+	}
+	return outcomes
+}
+
 // ProbeTLSCertificates probes unique unresolved public TLS endpoints and
 // returns deterministic audit records. It never mutates or returns topology.
 // Individual endpoint failures are records; parent cancellation is the only
@@ -146,20 +211,30 @@ func ProbeTLSCertificates(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	targetSet := make(map[TLSEndpoint]struct{})
+	type probeChain struct {
+		ip    string
+		ports []uint16
+	}
+	chainByEndpoint := make(map[TLSEndpoint]probeChain, len(entries))
 	for _, entry := range entries {
-		endpoint, ok := tlsCertCandidateEndpoint(entry)
-		if ok {
-			targetSet[endpoint] = struct{}{}
+		ip, ok := tlsCertCandidateIP(entry)
+		if !ok {
+			continue
 		}
+		endpoint := TLSEndpoint{IP: ip, Port: entry.Port}
+		chainByEndpoint[endpoint] = probeChain{ip: ip, ports: tlsCertProbePorts(entry.Port)}
 	}
-	targets := make([]TLSEndpoint, 0, len(targetSet))
-	for endpoint := range targetSet {
-		targets = append(targets, endpoint)
-	}
-	sortTLSEndpoints(targets)
-	if len(targets) == 0 {
+	if len(chainByEndpoint) == 0 {
 		return []TLSCertLookupRecord{}, nil
+	}
+	chainEndpoints := make([]TLSEndpoint, 0, len(chainByEndpoint))
+	for endpoint := range chainByEndpoint {
+		chainEndpoints = append(chainEndpoints, endpoint)
+	}
+	sortTLSEndpoints(chainEndpoints)
+	chains := make([]probeChain, 0, len(chainEndpoints))
+	for _, endpoint := range chainEndpoints {
+		chains = append(chains, chainByEndpoint[endpoint])
 	}
 	if prober == nil {
 		prober = networkTLSCertProber{}
@@ -175,16 +250,17 @@ func ProbeTLSCertificates(
 			workers = 128
 		}
 	}
-	if workers > len(targets) {
-		workers = len(targets)
+	if workers > len(chains) {
+		workers = len(chains)
 	}
 	timeout := options.Timeout
 	if timeout <= 0 {
 		timeout = defaultTLSCertLookupTimeout
 	}
 
-	jobs := make(chan TLSEndpoint, workers)
-	outcomes := make(chan tlsCertProbeOutcome, workers)
+	jobs := make(chan probeChain, workers)
+	completedChains := make(chan struct{}, workers)
+	cache := newTLSCertProbeCache()
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
@@ -194,41 +270,54 @@ func ProbeTLSCertificates(
 				select {
 				case <-ctx.Done():
 					return
-				case endpoint, ok := <-jobs:
+				case chain, ok := <-jobs:
 					if !ok {
 						return
 					}
-					endpointCtx, cancel := context.WithTimeout(ctx, timeout)
-					result, err := prober.Probe(endpointCtx, endpoint)
-					cancel()
-					outcomes <- tlsCertProbeOutcome{endpoint: endpoint, result: result, err: err}
+					for _, port := range chain.ports {
+						outcome, err := cache.probe(ctx, TLSEndpoint{IP: chain.ip, Port: port}, prober, timeout)
+						if err != nil {
+							return
+						}
+						if tlsCertRecordForOutcome(outcome).SelectedName != "" {
+							break
+						}
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case completedChains <- struct{}{}:
+					}
 				}
 			}
 		}()
 	}
 	go func() {
 		defer close(jobs)
-		for _, endpoint := range targets {
+		for _, chain := range chains {
 			select {
 			case <-ctx.Done():
 				return
-			case jobs <- endpoint:
+			case jobs <- chain:
 			}
 		}
 	}()
 	go func() {
 		wg.Wait()
-		close(outcomes)
+		close(completedChains)
 	}()
-
-	records := make([]TLSCertLookupRecord, 0, len(targets))
 	processed := 0
-	for outcome := range outcomes {
-		records = append(records, tlsCertRecordForOutcome(outcome))
+	for range completedChains {
 		processed++
 		if options.Progress != nil {
-			options.Progress(processed, len(targets))
+			options.Progress(processed, len(chains))
 		}
+	}
+
+	outcomes := cache.outcomes()
+	records := make([]TLSCertLookupRecord, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		records = append(records, tlsCertRecordForOutcome(outcome))
 	}
 	sortTLSCertRecords(records)
 	if err := ctx.Err(); err != nil {
@@ -237,18 +326,42 @@ func ProbeTLSCertificates(
 	return records, nil
 }
 
-func tlsCertCandidateEndpoint(entry TopologyEntry) (TLSEndpoint, bool) {
+func tlsCertCandidateIP(entry TopologyEntry) (string, bool) {
 	if strings.ToLower(strings.TrimSpace(entry.Protocol)) != "tcp" {
-		return TLSEndpoint{}, false
+		return "", false
 	}
-	if !isTLSCertLookupPort(entry.Port) {
-		return TLSEndpoint{}, false
+	if entry.Port == 0 || strings.TrimSpace(entry.DNSName) != "" {
+		return "", false
 	}
-	ip, ok := reverseDNSCandidateIP(entry)
+	source := strings.ToLower(strings.TrimSpace(entry.DNSSource))
+	if source != "" && source != "mid-session" {
+		return "", false
+	}
+	ip, ok := canonicalIPv4String(entry.DestinationIP)
 	if !ok {
-		return TLSEndpoint{}, false
+		return "", false
 	}
-	return TLSEndpoint{IP: ip, Port: entry.Port}, true
+	addr, err := netip.ParseAddr(ip)
+	if err != nil || !isPublicIPv4(addr) {
+		return "", false
+	}
+	return ip, true
+}
+
+func tlsCertProbePorts(rowPort uint16) []uint16 {
+	if rowPort == 0 {
+		return nil
+	}
+	ports := make([]uint16, 0, 3)
+	seen := make(map[uint16]struct{}, 3)
+	for _, port := range []uint16{rowPort, 443, 8443} {
+		if _, ok := seen[port]; ok {
+			continue
+		}
+		seen[port] = struct{}{}
+		ports = append(ports, port)
+	}
+	return ports
 }
 
 func tlsCertRecordForOutcome(outcome tlsCertProbeOutcome) TLSCertLookupRecord {
@@ -367,10 +480,6 @@ func isTLSCertTimeout(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-func isTLSCertLookupPort(port uint16) bool {
-	return port == 443 || port == 8443 || port == 8883
-}
-
 // CompleteTopologyWithTLSCertificates decorates otherwise-unattributed TLS
 // topology rows from uniquely selected certificate labels. It returns a copy,
 // never overwrites existing attribution, and reports the number of rows changed.
@@ -382,7 +491,7 @@ func CompleteTopologyWithTLSCertificates(entries []TopologyEntry, records []TLSC
 			continue
 		}
 		name := canonicalCertificateDNSName(record.SelectedName)
-		if !isUsableTLSCertificateName(name) || strings.Contains(name, "*") || !isTLSCertLookupPort(record.Port) {
+		if !isUsableTLSCertificateName(name) || strings.Contains(name, "*") || record.Port == 0 {
 			continue
 		}
 		ip, ok := canonicalIPv4String(record.IP)
@@ -404,18 +513,25 @@ func CompleteTopologyWithTLSCertificates(entries []TopologyEntry, records []TLSC
 
 	decorated := 0
 	for i := range out {
-		endpoint, ok := tlsCertCandidateEndpoint(out[i])
+		ip, ok := tlsCertCandidateIP(out[i])
 		if !ok {
 			continue
 		}
-		names := selectedByEndpoint[endpoint]
-		if len(names) != 1 {
-			continue
-		}
-		for name := range names {
-			out[i].DNSName = name
-			out[i].DNSSource = "tls-cert-san+matrix"
-			decorated++
+		for _, port := range tlsCertProbePorts(out[i].Port) {
+			names := selectedByEndpoint[TLSEndpoint{IP: ip, Port: port}]
+			if len(names) != 1 {
+				continue
+			}
+			for name := range names {
+				out[i].DNSName = name
+				if port == out[i].Port {
+					out[i].DNSSource = "tls-cert-san+matrix"
+				} else {
+					out[i].DNSSource = "tls-cert-san+matrix-fallback"
+				}
+				decorated++
+			}
+			break
 		}
 	}
 	return out, decorated

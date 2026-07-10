@@ -114,6 +114,39 @@ func pickResponseTx(cands []*DNSTransaction, respName string, respTS time.Time) 
 	return nil
 }
 
+func addDNSTransaction(
+	txMap map[TxKey][]*DNSTransaction,
+	byLookup map[txLookupKey][]*DNSTransaction,
+	key TxKey,
+	tx *DNSTransaction,
+) {
+	txMap[key] = append(txMap[key], tx)
+	lk := makeTxLookupKey(key.Issuer, key.SrcPort, key.Resolver, key.Proto, key.ID)
+	byLookup[lk] = append(byLookup[lk], tx)
+}
+
+func newResponseOnlyDNSTransaction(ts time.Time, issuerIP, resolverIP net.IP, dnsName, fileBase string, answers []net.IP) *DNSTransaction {
+	dnsName = canonicalDNSName(dnsName)
+	if dnsName == "" || len(answers) == 0 {
+		return nil
+	}
+	tx := &DNSTransaction{
+		RequestTime:  ts.UTC(),
+		IssuerIP:     append(net.IP(nil), issuerIP...),
+		DNSName:      dnsName,
+		ResolverIP:   append(net.IP(nil), resolverIP...),
+		NameEvidence: EvDNSAnswer,
+		PCAPFile:     filepath.Base(fileBase),
+	}
+	for _, ip := range answers {
+		tx.AddResolvedIP(ip, EvDNSAnswer)
+	}
+	if len(tx.ResolvedIPs) == 0 {
+		return nil
+	}
+	return tx
+}
+
 func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 	md := pkt.Metadata()
 	if md == nil {
@@ -218,10 +251,7 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 			ResolverIP:  append(net.IP(nil), dstIP...),
 			PCAPFile:    filepath.Base(fileBase),
 		}
-		e.txMap[key] = append(e.txMap[key], tx)
-
-		lk := makeTxLookupKey(key.Issuer, key.SrcPort, key.Resolver, key.Proto, key.ID)
-		e.byLookup[lk] = append(e.byLookup[lk], tx)
+		addDNSTransaction(e.txMap, e.byLookup, key, tx)
 		return
 	}
 
@@ -245,10 +275,7 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 				ResolverIP:  append(net.IP(nil), dstIP...),
 				PCAPFile:    filepath.Base(fileBase),
 			}
-			e.txMap[key] = append(e.txMap[key], tx)
-
-			lk := makeTxLookupKey(key.Issuer, key.SrcPort, key.Resolver, key.Proto, key.ID)
-			e.byLookup[lk] = append(e.byLookup[lk], tx)
+			addDNSTransaction(e.txMap, e.byLookup, key, tx)
 			return
 		}
 	}
@@ -256,15 +283,17 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 	// --- Responses ---
 	if (d != nil && d.QR) || (captureTruncated && srcPort == 53) {
 		var (
-			answers  []net.IP
-			respName string
-			respID   uint16
+			answers               []net.IP
+			respName              string
+			respID                uint16
+			canCreateResponseOnly bool
 		)
 
 		if d != nil && d.QR {
 			respID = d.ID
 			if len(d.Questions) > 0 {
 				respName = canonicalDNSName(string(d.Questions[0].Name))
+				canCreateResponseOnly = respName != "" && d.Questions[0].Type == layers.DNSTypeA
 			}
 		}
 
@@ -285,6 +314,9 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 				if respName == "" {
 					respName = rawName
 				}
+				if rawName != "" {
+					canCreateResponseOnly = true
+				}
 				answers = append(answers, rawAnswers...)
 			}
 		}
@@ -301,12 +333,24 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 			respID,
 		)
 		cands := e.byLookup[lk]
-		if len(cands) == 0 {
-			return
-		}
-
 		tx := pickResponseTx(cands, respName, ts.UTC())
 		if tx == nil {
+			if !canCreateResponseOnly {
+				return
+			}
+			tx = newResponseOnlyDNSTransaction(ts, dstIP, srcIP, respName, fileBase, answers)
+			if tx == nil {
+				return
+			}
+			key := TxKey{
+				Issuer:   dstIP.String(),
+				SrcPort:  dstPort,
+				Resolver: srcIP.String(),
+				Proto:    proto,
+				ID:       respID,
+				Name:     respName,
+			}
+			addDNSTransaction(e.txMap, e.byLookup, key, tx)
 			return
 		}
 
@@ -476,6 +520,12 @@ func extractDNSResponseFromRaw(payload []byte, proto L4Proto, captureTruncated b
 		off = next
 		if off+4 > len(msg) {
 			return 0, "", nil, false
+		}
+		if i == 0 {
+			qType := binary.BigEndian.Uint16(msg[off : off+2])
+			if qType != uint16(layers.DNSTypeA) {
+				return 0, "", nil, false
+			}
 		}
 		off += 4
 	}

@@ -29,13 +29,12 @@ func TestProbeTLSCertificatesCandidatesClassificationAndDeterminism(t *testing.T
 	entries := []TopologyEntry{
 		{DestinationIP: "8.8.8.8", Protocol: " TCP ", Port: 443, DNSSource: "mid-session"},
 		{DestinationIP: " 8.8.8.8 ", Protocol: "tcp", Port: 443, DNSName: "NONE", DNSSource: "NO ATTRIBUTION"},
-		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 8443, DNSName: "[no-dns-attribution]"},
+		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 8443, DNSSource: "mid-session"},
 		{DestinationIP: "1.1.1.1", Protocol: "tcp", Port: 8883, DNSSource: "mid-session"},
 		{DestinationIP: "9.9.9.9", Protocol: "tcp", Port: 443, DNSSource: "mid-session"},
 		{DestinationIP: "11.0.0.1", Protocol: "tcp", Port: 443, DNSSource: "mid-session"},
 		{DestinationIP: "10.0.0.1", Protocol: "tcp", Port: 443, DNSSource: "mid-session"},
 		{DestinationIP: "8.8.4.4", Protocol: "udp", Port: 443, DNSSource: "mid-session"},
-		{DestinationIP: "8.8.4.4", Protocol: "tcp", Port: 9443, DNSSource: "mid-session"},
 		{DestinationIP: "8.8.4.4", Protocol: "tcp", Port: 443, DNSName: "known.example", DNSSource: "dns+synack"},
 		{DestinationIP: "not-an-ip", Protocol: "tcp", Port: 443, DNSSource: "mid-session"},
 	}
@@ -90,6 +89,7 @@ func TestProbeTLSCertificatesCandidatesClassificationAndDeterminism(t *testing.T
 		{IP: "8.8.8.8", Port: 8443},
 		{IP: "9.9.9.9", Port: 443},
 		{IP: "11.0.0.1", Port: 443},
+		{IP: "11.0.0.1", Port: 8443},
 	}
 	if len(records) != len(wantEndpoints) {
 		t.Fatalf("record count = %d, want %d: %#v", len(records), len(wantEndpoints), records)
@@ -133,8 +133,73 @@ func TestProbeTLSCertificatesCandidatesClassificationAndDeterminism(t *testing.T
 	if record := recordByEndpoint[TLSEndpoint{IP: "11.0.0.1", Port: 443}]; record.Reason != "no_dns_names" || record.SelectedName != "" || record.Source != "" {
 		t.Fatalf("invalid SAN record = %#v", record)
 	}
-	if len(progress) != len(wantEndpoints) || progress[len(progress)-1] != [2]int{len(wantEndpoints), len(wantEndpoints)} {
+	const wantCompletedChains = 5
+	if len(progress) != wantCompletedChains || progress[len(progress)-1] != [2]int{wantCompletedChains, wantCompletedChains} {
 		t.Fatalf("progress = %#v", progress)
+	}
+}
+
+func TestProbeTLSCertificatesProgressIsLiveAndDeduplicatesChains(t *testing.T) {
+	entries := []TopologyEntry{
+		{DestinationIP: "1.1.1.1", Protocol: "tcp", Port: 5000, DNSSource: "mid-session"},
+		{DestinationIP: " 1.1.1.1 ", Protocol: " TCP ", Port: 5000},
+		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 8883, DNSSource: "mid-session"},
+	}
+	blockedStarted := make(chan struct{})
+	releaseBlocked := make(chan struct{})
+	progress := make(chan [2]int, 2)
+	var mu sync.Mutex
+	calls := make(map[TLSEndpoint]int)
+	prober := tlsCertProberFunc(func(_ context.Context, endpoint TLSEndpoint) (TLSCertProbeResult, error) {
+		mu.Lock()
+		calls[endpoint]++
+		mu.Unlock()
+		if endpoint.IP == "8.8.8.8" {
+			close(blockedStarted)
+			<-releaseBlocked
+		}
+		return TLSCertProbeResult{Leaf: &x509.Certificate{DNSNames: []string{"exact.example.com"}}}, nil
+	})
+
+	type probeResult struct {
+		records []TLSCertLookupRecord
+		err     error
+	}
+	resultCh := make(chan probeResult, 1)
+	go func() {
+		records, err := ProbeTLSCertificates(context.Background(), entries, prober, TLSCertLookupOptions{
+			Workers: 2,
+			Progress: func(processed, total int) {
+				progress <- [2]int{processed, total}
+			},
+		})
+		resultCh <- probeResult{records: records, err: err}
+	}()
+
+	<-blockedStarted
+	select {
+	case got := <-progress:
+		if got != [2]int{1, 2} {
+			t.Fatalf("first live progress = %v, want [1 2]", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no progress reported while another unique chain was still blocked")
+	}
+	close(releaseBlocked)
+	if got := <-progress; got != [2]int{2, 2} {
+		t.Fatalf("final progress = %v, want [2 2]", got)
+	}
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("ProbeTLSCertificates() error = %v", result.err)
+	}
+	if len(result.records) != 2 {
+		t.Fatalf("records = %#v, want two unique exact endpoint attempts", result.records)
+	}
+	for _, endpoint := range []TLSEndpoint{{IP: "1.1.1.1", Port: 5000}, {IP: "8.8.8.8", Port: 8883}} {
+		if calls[endpoint] != 1 {
+			t.Fatalf("Probe(%#v) calls = %d, want 1", endpoint, calls[endpoint])
+		}
 	}
 }
 
@@ -203,8 +268,13 @@ func TestProbeTLSCertificatesPerEndpointTimeoutIsNonFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("per-endpoint timeout returned operation error: %v", err)
 	}
-	if len(records) != 1 || records[0].Status != "timeout" || records[0].Reason != "timeout" {
+	if len(records) != 2 {
 		t.Fatalf("timeout records = %#v", records)
+	}
+	for _, record := range records {
+		if record.Status != "timeout" || record.Reason != "timeout" {
+			t.Fatalf("timeout record = %#v", record)
+		}
 	}
 }
 
@@ -212,6 +282,258 @@ func TestDefaultTLSCertLookupTimeoutIsFifteenSeconds(t *testing.T) {
 	if defaultTLSCertLookupTimeout != 15*time.Second {
 		t.Fatalf("defaultTLSCertLookupTimeout = %s, want 15s", defaultTLSCertLookupTimeout)
 	}
+}
+
+func TestTLSCertProbePorts(t *testing.T) {
+	tests := []struct {
+		port uint16
+		want []uint16
+	}{
+		{port: 5000, want: []uint16{5000, 443, 8443}},
+		{port: 8883, want: []uint16{8883, 443, 8443}},
+		{port: 443, want: []uint16{443, 8443}},
+		{port: 8443, want: []uint16{8443, 443}},
+		{port: 0, want: nil},
+	}
+	for _, tt := range tests {
+		if got := tlsCertProbePorts(tt.port); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("tlsCertProbePorts(%d) = %v, want %v", tt.port, got, tt.want)
+		}
+	}
+}
+
+func TestProbeTLSCertificatesUsesOrderedFallbackAndStopsOnUsableName(t *testing.T) {
+	entries := []TopologyEntry{{DestinationIP: "8.8.8.8", Protocol: " TCP ", Port: 5000, DNSSource: " Mid-Session "}}
+	var calls []TLSEndpoint
+	prober := tlsCertProberFunc(func(_ context.Context, endpoint TLSEndpoint) (TLSCertProbeResult, error) {
+		calls = append(calls, endpoint)
+		switch endpoint.Port {
+		case 5000:
+			return TLSCertProbeResult{Leaf: &x509.Certificate{DNSNames: []string{"router.local"}}}, nil
+		case 443:
+			return TLSCertProbeResult{Leaf: &x509.Certificate{DNSNames: []string{"fallback.example.com"}}}, nil
+		default:
+			t.Fatalf("unexpected probe after usable fallback: %#v", endpoint)
+			return TLSCertProbeResult{}, nil
+		}
+	})
+
+	records, err := ProbeTLSCertificates(context.Background(), entries, prober, TLSCertLookupOptions{Workers: 1})
+	if err != nil {
+		t.Fatalf("ProbeTLSCertificates() error = %v", err)
+	}
+	wantCalls := []TLSEndpoint{{IP: "8.8.8.8", Port: 5000}, {IP: "8.8.8.8", Port: 443}}
+	if !reflect.DeepEqual(calls, wantCalls) {
+		t.Fatalf("probe calls = %#v, want %#v", calls, wantCalls)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %#v, want two attempted endpoints", records)
+	}
+	got, decorated := CompleteTopologyWithTLSCertificates(entries, records)
+	if decorated != 1 || got[0].DNSName != "fallback.example.com" || got[0].DNSSource != "tls-cert-san+matrix-fallback" {
+		t.Fatalf("fallback completion = %#v, decorated=%d", got, decorated)
+	}
+}
+
+func TestProbeTLSCertificatesUsesExactCustomPortAndSkipsFallback(t *testing.T) {
+	entries := []TopologyEntry{{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 5000, DNSSource: "mid-session"}}
+	var calls []TLSEndpoint
+	records, err := ProbeTLSCertificates(context.Background(), entries, tlsCertProberFunc(func(_ context.Context, endpoint TLSEndpoint) (TLSCertProbeResult, error) {
+		calls = append(calls, endpoint)
+		if endpoint.Port != 5000 {
+			t.Fatalf("fallback port called after usable exact SAN: %#v", endpoint)
+		}
+		return TLSCertProbeResult{Leaf: &x509.Certificate{DNSNames: []string{"exact-custom.example.com"}}}, nil
+	}), TLSCertLookupOptions{Workers: 1})
+	if err != nil {
+		t.Fatalf("ProbeTLSCertificates() error = %v", err)
+	}
+	wantCalls := []TLSEndpoint{{IP: "8.8.8.8", Port: 5000}}
+	if !reflect.DeepEqual(calls, wantCalls) || len(records) != 1 {
+		t.Fatalf("calls=%#v records=%#v, want exact custom port only", calls, records)
+	}
+	got, decorated := CompleteTopologyWithTLSCertificates(entries, records)
+	if decorated != 1 || got[0].DNSName != "exact-custom.example.com" || got[0].DNSSource != "tls-cert-san+matrix" {
+		t.Fatalf("exact custom-port completion = %#v, decorated=%d", got, decorated)
+	}
+}
+
+func TestProbeTLSCertificatesFallsThroughExactAnd443To8443(t *testing.T) {
+	entries := []TopologyEntry{{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 5000, DNSSource: "mid-session"}}
+	var calls []TLSEndpoint
+	records, err := ProbeTLSCertificates(context.Background(), entries, tlsCertProberFunc(func(_ context.Context, endpoint TLSEndpoint) (TLSCertProbeResult, error) {
+		calls = append(calls, endpoint)
+		switch endpoint.Port {
+		case 5000:
+			return TLSCertProbeResult{}, errors.New("connection refused")
+		case 443:
+			return TLSCertProbeResult{Leaf: &x509.Certificate{DNSNames: []string{"router.local"}}}, nil
+		case 8443:
+			return TLSCertProbeResult{Leaf: &x509.Certificate{DNSNames: []string{"last-fallback.example.com"}}}, nil
+		default:
+			t.Fatalf("unexpected endpoint: %#v", endpoint)
+			return TLSCertProbeResult{}, nil
+		}
+	}), TLSCertLookupOptions{Workers: 1})
+	if err != nil {
+		t.Fatalf("ProbeTLSCertificates() error = %v", err)
+	}
+	wantCalls := []TLSEndpoint{
+		{IP: "8.8.8.8", Port: 5000},
+		{IP: "8.8.8.8", Port: 443},
+		{IP: "8.8.8.8", Port: 8443},
+	}
+	if !reflect.DeepEqual(calls, wantCalls) || len(records) != 3 {
+		t.Fatalf("calls=%#v records=%#v, want full fallback chain", calls, records)
+	}
+	got, decorated := CompleteTopologyWithTLSCertificates(entries, records)
+	if decorated != 1 || got[0].DNSName != "last-fallback.example.com" || got[0].DNSSource != "tls-cert-san+matrix-fallback" {
+		t.Fatalf("8443 fallback completion = %#v, decorated=%d", got, decorated)
+	}
+}
+
+func TestProbeTLSCertificatesUsesExact8883AndStops(t *testing.T) {
+	entries := []TopologyEntry{{DestinationIP: "1.1.1.1", Protocol: "tcp", Port: 8883}}
+	var calls []TLSEndpoint
+	records, err := ProbeTLSCertificates(context.Background(), entries, tlsCertProberFunc(func(_ context.Context, endpoint TLSEndpoint) (TLSCertProbeResult, error) {
+		calls = append(calls, endpoint)
+		return TLSCertProbeResult{Leaf: &x509.Certificate{DNSNames: []string{"mqtt.example.com"}}}, nil
+	}), TLSCertLookupOptions{Workers: 1})
+	if err != nil {
+		t.Fatalf("ProbeTLSCertificates() error = %v", err)
+	}
+	wantCalls := []TLSEndpoint{{IP: "1.1.1.1", Port: 8883}}
+	if !reflect.DeepEqual(calls, wantCalls) || len(records) != 1 {
+		t.Fatalf("calls=%#v records=%#v, want exact 8883 only", calls, records)
+	}
+	got, decorated := CompleteTopologyWithTLSCertificates(entries, records)
+	if decorated != 1 || got[0].DNSName != "mqtt.example.com" || got[0].DNSSource != "tls-cert-san+matrix" {
+		t.Fatalf("exact 8883 completion = %#v, decorated=%d", got, decorated)
+	}
+}
+
+func TestProbeTLSCertificatesSharesExactEndpointAttemptsByIPAndPort(t *testing.T) {
+	entries := []TopologyEntry{
+		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 5000},
+		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 443},
+	}
+	var mu sync.Mutex
+	calls := make(map[TLSEndpoint]int)
+	prober := tlsCertProberFunc(func(_ context.Context, endpoint TLSEndpoint) (TLSCertProbeResult, error) {
+		mu.Lock()
+		calls[endpoint]++
+		mu.Unlock()
+		if endpoint.Port == 5000 {
+			return TLSCertProbeResult{}, errors.New("not TLS")
+		}
+		return TLSCertProbeResult{Leaf: &x509.Certificate{DNSNames: []string{"shared.example.com"}}}, nil
+	})
+	records, err := ProbeTLSCertificates(context.Background(), entries, prober, TLSCertLookupOptions{Workers: 2})
+	if err != nil {
+		t.Fatalf("ProbeTLSCertificates() error = %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %#v, want one per exact endpoint", records)
+	}
+	for _, endpoint := range []TLSEndpoint{{IP: "8.8.8.8", Port: 5000}, {IP: "8.8.8.8", Port: 443}} {
+		if calls[endpoint] != 1 {
+			t.Fatalf("Probe(%#v) calls = %d, want 1", endpoint, calls[endpoint])
+		}
+	}
+}
+
+func TestProbeTLSCertificatesCacheKeyIncludesPortForSameIPRows(t *testing.T) {
+	entries := []TopologyEntry{
+		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 5000, DNSSource: "mid-session"},
+		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 8883, DNSSource: "mid-session"},
+	}
+	var mu sync.Mutex
+	calls := make(map[TLSEndpoint]int)
+	prober := tlsCertProberFunc(func(_ context.Context, endpoint TLSEndpoint) (TLSCertProbeResult, error) {
+		mu.Lock()
+		calls[endpoint]++
+		mu.Unlock()
+		var name string
+		switch endpoint.Port {
+		case 5000:
+			name = "custom.example.com"
+		case 8883:
+			name = "mqtt.example.com"
+		default:
+			t.Fatalf("unexpected fallback probe: %#v", endpoint)
+		}
+		return TLSCertProbeResult{Leaf: &x509.Certificate{DNSNames: []string{name}}}, nil
+	})
+	records, err := ProbeTLSCertificates(context.Background(), entries, prober, TLSCertLookupOptions{Workers: 2})
+	if err != nil {
+		t.Fatalf("ProbeTLSCertificates() error = %v", err)
+	}
+	for _, endpoint := range []TLSEndpoint{{IP: "8.8.8.8", Port: 5000}, {IP: "8.8.8.8", Port: 8883}} {
+		if calls[endpoint] != 1 {
+			t.Fatalf("Probe(%#v) calls = %d, want 1", endpoint, calls[endpoint])
+		}
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %#v, want two exact endpoints", records)
+	}
+	got, decorated := CompleteTopologyWithTLSCertificates(entries, records)
+	if decorated != 2 {
+		t.Fatalf("decorated = %d, want 2: %#v", decorated, got)
+	}
+	if got[0].DNSName != "custom.example.com" || got[0].DNSSource != "tls-cert-san+matrix" {
+		t.Fatalf("tcp/5000 row = %#v", got[0])
+	}
+	if got[1].DNSName != "mqtt.example.com" || got[1].DNSSource != "tls-cert-san+matrix" {
+		t.Fatalf("tcp/8883 row = %#v", got[1])
+	}
+}
+
+func TestProbeTLSCertificatesStrictCandidateEligibility(t *testing.T) {
+	entries := []TopologyEntry{
+		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 5000},
+		{DestinationIP: "8.8.8.8", Protocol: "udp", Port: 5000},
+		{DestinationIP: "10.0.0.1", Protocol: "tcp", Port: 5000},
+		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 5000, DNSName: "known.example.com"},
+		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 5000, DNSSource: "csv+mid"},
+		{DestinationIP: "8.8.8.8", Protocol: "tcp", Port: 0},
+	}
+	var calls []TLSEndpoint
+	_, err := ProbeTLSCertificates(context.Background(), entries, tlsCertProberFunc(func(_ context.Context, endpoint TLSEndpoint) (TLSCertProbeResult, error) {
+		calls = append(calls, endpoint)
+		return TLSCertProbeResult{Leaf: &x509.Certificate{DNSNames: []string{"exact.example.com"}}}, nil
+	}), TLSCertLookupOptions{Workers: 2})
+	if err != nil {
+		t.Fatalf("ProbeTLSCertificates() error = %v", err)
+	}
+	want := []TLSEndpoint{{IP: "8.8.8.8", Port: 5000}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("eligible probe calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestTLSCertProbeCacheWaitHonorsContext(t *testing.T) {
+	cache := newTLSCertProbeCache()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	prober := tlsCertProberFunc(func(context.Context, TLSEndpoint) (TLSCertProbeResult, error) {
+		close(started)
+		<-release
+		return TLSCertProbeResult{}, nil
+	})
+	endpoint := TLSEndpoint{IP: "8.8.8.8", Port: 443}
+	ownerDone := make(chan struct{})
+	go func() {
+		defer close(ownerDone)
+		_, _ = cache.probe(context.Background(), endpoint, prober, time.Second)
+	}()
+	<-started
+	waitCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := cache.probe(waitCtx, endpoint, prober, time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting cache probe error = %v, want context.Canceled", err)
+	}
+	close(release)
+	<-ownerDone
 }
 
 func TestWriteTLSCertLookupCSVDeterministicNumericSortAndHeaderOnly(t *testing.T) {
@@ -337,15 +659,18 @@ func TestCompleteTopologyWithTLSCertificatesDecoratesOnlyExactEligibleRows(t *te
 	original := append([]TopologyEntry(nil), entries...)
 
 	got, decorated := CompleteTopologyWithTLSCertificates(entries, records)
-	if decorated != 2 {
-		t.Fatalf("decorated rows = %d, want 2", decorated)
+	if decorated != 3 {
+		t.Fatalf("decorated rows = %d, want 3", decorated)
 	}
-	for _, i := range []int{0, 1} {
-		if got[i].DNSName != "cert.example.com" || got[i].DNSSource != "tls-cert-san+matrix" {
-			t.Fatalf("decorated row %d = %#v", i, got[i])
+	if got[0].DNSName != "cert.example.com" || got[0].DNSSource != "tls-cert-san+matrix" {
+		t.Fatalf("exact-port decorated row = %#v", got[0])
+	}
+	for _, i := range []int{2, 5} {
+		if got[i].DNSName != "cert.example.com" || got[i].DNSSource != "tls-cert-san+matrix-fallback" {
+			t.Fatalf("fallback decorated row %d = %#v", i, got[i])
 		}
 	}
-	for _, i := range []int{2, 3, 4, 5, 6, 7} {
+	for _, i := range []int{1, 3, 4, 6, 7} {
 		if got[i] != entries[i] {
 			t.Fatalf("row %d unexpectedly changed: got %#v want %#v", i, got[i], entries[i])
 		}

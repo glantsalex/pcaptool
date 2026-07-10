@@ -309,15 +309,17 @@ PTR and forward-IP lists are canonicalized, sorted, deduplicated, and joined wit
 
 Produced whenever `--tls-cert-lookup` is enabled, including as a header-only artifact when no eligible endpoints exist. Manifest key: `tls_cert_lookup_log`.
 
-The log contains one deterministic row per unique unresolved public IPv4 TCP endpoint on port `443`, `8443`, or `8883`:
+The log contains one deterministic row per unique public IPv4 TCP endpoint actually probed for a strictly unattributed topology row:
 
 ```text
 ip,port,status,selected_name,reason,subject_cn,dns_sans,issuer_common_name,not_before,not_after,error,source
 ```
 
+Eligible rows have an empty DNS name, an empty or `mid-session` source, a nonzero port, normalized TCP protocol, and a public IPv4 destination. Each row first probes its exact port, then falls back to `443` and `8443` without duplicating a port already attempted. Probing stops at the first endpoint whose certificate yields a usable selected name; a certificate with no usable SAN or CN does not stop fallback. Exact IP-and-port attempts are shared across rows, while each unique attempt retains its own timeout.
+
 The probe connects by IP without SNI, records only the presented leaf certificate, and uses a bounded worker pool. The default timeout is 15 seconds per endpoint and covers both TCP connection establishment and TLS certificate handshake; `--tls-cert-lookup-timeout` accepts integer values from 5 through 30 seconds. SANs are canonicalized but retained in certificate order, including duplicates and rejected names, so first-choice provenance remains visible. The first usable non-wildcard SAN is selected; a valid leading `*.` wildcard is stripped to its base name. If no SAN is usable, a valid non-wildcard subject CN may be selected. Certificate verification is intentionally disabled because this is diagnostic collection, not authentication.
 
-Selected certificate labels decorate only the exact unresolved public TCP endpoint that was probed, using source `tls-cert-san+matrix`; existing attribution is never overwritten. This weak endpoint decoration appears in topology and derived endpoint outputs, but it is not observed DNS evidence, cannot donate to other rows, and is not persisted to DNS transactions or `dns-ip.csv`. Presented certificates describe probe-time endpoint state and are not capture-time truth.
+Selected certificate labels from the row's exact port use source `tls-cert-san+matrix`; labels selected from port `443` or `8443` fallback use `tls-cert-san+matrix-fallback`. Existing attribution is never overwritten. This weak endpoint decoration appears in topology and derived endpoint outputs, but it is not observed DNS evidence, cannot donate to other rows, and is not persisted to DNS transactions or `dns-ip.csv`. Presented certificates describe probe-time endpoint state and are not capture-time truth.
 
 #### `export_csv` target
 
@@ -486,6 +488,10 @@ This is where the tool learns:
 - whether a name-to-IP mapping was actually observed in traffic
 
 This pass also uses `--exclude-ports` and `--enforce-private-as-source`.
+By default, DNS names are attached to connections only when packet evidence
+contains an exact DNS/SNI name-to-destination mapping. The older issuer-only
+query/connection timing fallback is available only with
+`--infer-dns-from-connections`.
 
 Passive FTP data-edge suppression recognizes control channels on `--ftp-control-ports`.
 The default is `21,990`. Syntax is a strict, non-empty comma-separated list of ports in the range `1..65535`; empty entries are rejected. The supplied value replaces the default set and affects only passive FTP/FTPS edge suppression.
@@ -538,17 +544,17 @@ Common source labels in `network-topology-matrix.txt` and related outputs:
 | `ptr+matrix` | a unique usable raw PTR name completed an unattributed matrix row without forward confirmation |
 | `ptr-normalized+matrix` | a matching AWS EC2 IP-encoded PTR was normalized and completed an unattributed matrix row |
 | `tls-cert-san+matrix` | an unresolved public TLS endpoint was decorated from the first usable leaf-certificate SAN, stripped wildcard base, or CN fallback |
+| `tls-cert-san+matrix-fallback` | an unresolved public TCP endpoint was decorated from a usable certificate name found on fallback port `443` or `8443` after its exact port yielded none |
 | `csv+conn` | DNS came from `dns-ip.csv` fallback on a non-mid-session row |
 | `csv+mid` | DNS came from `dns-ip.csv` fallback for a mid-session row |
 | `mid-session` | connection was observed without usable DNS attribution |
 | `donated+ipport` | unresolved row was completed from direct `dns+synack` or `sni+synack` evidence on the same `(dstIP, proto, port)` |
-| `donated+ipport+conn` | unresolved row was completed from inferred `dns+conn+synack` evidence on the same `(dstIP, proto, port)` |
 
 Important details:
 
-- CSV fallback, inferred SNI, active resolution, and previously donated names never act as donors.
+- CSV fallback, inferred DNS/SNI (`dns+conn+synack` / `sni+conn+synack`), active resolution, TLS certificate decoration (exact or fallback), and previously donated names never act as donors.
 - Donation is run-local only; it is not persisted back into `dns-ip.csv`.
-- Direct donors win over inferred donors for an entire exact `(dstIP, proto, port)` tuple.
+- Only direct `dns+synack` and `sni+synack` rows can donate.
 - One donor name is copied in full. Multiple names donate only their deterministic longest common DNS-label suffix when it contains at least two labels; otherwise the row remains unresolved.
 - PTR completion runs after donation, cannot donate to other rows, and is not persisted back into `dns-ip.csv`.
 - Strong direct evidence suppresses weaker conflicting CSV fallback where possible.
@@ -619,7 +625,7 @@ This policy is designed to reduce CSV contamination from:
 ### Practical heuristics
 
 - TLS SNI is used as a synthetic name source unless disabled
-- unresolved or `mid-session` rows can inherit a name from another issuer in the same run on an exact `(dstIP, proto, port)` match; direct evidence wins over DNS connectivity inference, and multiple names must share a suffix of at least two labels
+- unresolved or `mid-session` rows can inherit a name from another issuer in the same run on an exact `(dstIP, proto, port)` match, but only from direct `dns+synack` / `sni+synack` evidence; multiple direct names must share a suffix of at least two labels
 - truncated DNS responses are salvaged only up to the last complete answer; incomplete tail answers are ignored
 
 ### Known limitations
@@ -651,6 +657,7 @@ This policy is designed to reduce CSV contamination from:
 | `--short`, `-s` | bool | `false` | squash topology to one row per issuer/DNS/port |
 | `--radius-imsi` | bool | `false` | map issuer IPs to IMSI via RADIUS Accounting data |
 | `--only-tcp` | bool | `false` | only correlate TCP connections |
+| `--infer-dns-from-connections` | bool | `false` | opt in to issuer-only query/connection timing inference when DNS answers are missing |
 | `--ignore-ntp` | bool | `true` | drop NTP-like DNS names using heuristic filtering |
 | `--dns-ip-file` | string | empty | path to fallback DNS/IP map used for last-resort attribution |
 | `--exclude-ports` | string | `53` | comma-separated destination/server ports to exclude from topology correlation |

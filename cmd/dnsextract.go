@@ -37,6 +37,7 @@ var (
 	flagConnectivityShort            bool
 	flagRadiusIMSI                   bool
 	flagOnlyTCP                      bool
+	flagInferDNSFromConnections      bool
 	flagIgnoreNTP                    bool
 	flagExcludePorts                 string
 	flagFTPControlPorts              string
@@ -88,6 +89,12 @@ func init() {
 		"map issuer IPs to IMSI using RADIUS Accounting records")
 	cmd.Flags().BoolVar(&flagOnlyTCP, "only-tcp", false,
 		"only consider TCP connections when correlating DNS")
+	cmd.Flags().BoolVar(
+		&flagInferDNSFromConnections,
+		"infer-dns-from-connections",
+		false,
+		"Infer DNS-to-IP mappings from issuer-only query/connection timing when DNS answers are missing. Disabled by default.",
+	)
 	cmd.Flags().BoolVar(
 		&flagIgnoreNTP,
 		"ignore-ntp",
@@ -313,6 +320,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		files,
 		txs,
 		flagOnlyTCP,
+		flagInferDNSFromConnections,
 		excludeSet,
 		flagEnforcePrivateAsSource,
 		ipToDNS,

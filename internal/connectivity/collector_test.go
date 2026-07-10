@@ -117,6 +117,54 @@ func TestCollector_EdgesByFirstSeenOrdersNaturally(t *testing.T) {
 	}
 }
 
+func TestCollector_EdgesRetainBoundedRepeatedObservations(t *testing.T) {
+	opt := DefaultOptions()
+	c := NewCollector(opt)
+
+	ts := time.Unix(1700000250, 0).UTC()
+
+	c.OnPacket(mustPacketIPv4TCP(t, "10.0.0.9", "80.80.80.80", 50000, 443, true, false), ts)
+	c.OnPacket(mustPacketIPv4TCP(t, "80.80.80.80", "10.0.0.9", 443, 50000, true, true), ts.Add(10*time.Millisecond))
+
+	later := ts.Add(2 * time.Minute)
+	c.OnPacket(mustPacketIPv4TCP(t, "10.0.0.9", "80.80.80.80", 50001, 443, true, false), later)
+	c.OnPacket(mustPacketIPv4TCP(t, "80.80.80.80", "10.0.0.9", 443, 50001, true, true), later.Add(10*time.Millisecond))
+
+	edges := c.EdgesByFirstSeen()
+	if len(edges) != 1 {
+		t.Fatalf("expected one endpoint edge, got %#v", edges)
+	}
+	if !edges[0].FirstSeen.Equal(ts) {
+		t.Fatalf("expected first seen %s, got %s", ts, edges[0].FirstSeen)
+	}
+	if len(edges[0].ObservedTimes) != 2 {
+		t.Fatalf("expected two observed times, got %#v", edges[0].ObservedTimes)
+	}
+	if !edges[0].ObservedTimes[0].Equal(ts) || !edges[0].ObservedTimes[1].Equal(later) {
+		t.Fatalf("unexpected observed times: %#v", edges[0].ObservedTimes)
+	}
+}
+
+func TestMergeEdgeObservedTimesKeepsFirstAndLatestWithinBound(t *testing.T) {
+	base := time.Unix(1700000275, 0).UTC()
+	var additions []time.Time
+	for i := 0; i < maxEdgeObservedTimes+10; i++ {
+		additions = append(additions, base.Add(time.Duration(i)*time.Second))
+	}
+
+	got := MergeEdgeObservedTimes(nil, additions...)
+	if len(got) != maxEdgeObservedTimes {
+		t.Fatalf("expected %d bounded observations, got %d", maxEdgeObservedTimes, len(got))
+	}
+	if !got[0].Equal(base) {
+		t.Fatalf("expected first observation to be preserved, got %s", got[0])
+	}
+	wantLatest := base.Add(time.Duration(maxEdgeObservedTimes+9) * time.Second)
+	if !got[len(got)-1].Equal(wantLatest) {
+		t.Fatalf("expected latest observation %s to be preserved, got %s", wantLatest, got[len(got)-1])
+	}
+}
+
 func TestCollector_FTPPassiveReplySuppressesExactDataPort(t *testing.T) {
 	opt := DefaultOptions()
 	opt.FTPPassiveMinPort = 30000

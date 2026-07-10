@@ -159,6 +159,35 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		}
 	}
 
+	edgeObservedTimes := func(e connectivity.Edge) []time.Time {
+		if len(e.ObservedTimes) == 0 {
+			if e.FirstSeen.IsZero() {
+				return nil
+			}
+			return []time.Time{e.FirstSeen.UTC()}
+		}
+		out := make([]time.Time, 0, len(e.ObservedTimes))
+		seen := make(map[time.Time]struct{}, len(e.ObservedTimes))
+		for _, ts := range e.ObservedTimes {
+			if ts.IsZero() {
+				continue
+			}
+			ts = ts.UTC()
+			if _, ok := seen[ts]; ok {
+				continue
+			}
+			seen[ts] = struct{}{}
+			out = append(out, ts)
+		}
+		if len(out) == 0 && !e.FirstSeen.IsZero() {
+			out = append(out, e.FirstSeen.UTC())
+		}
+		sort.Slice(out, func(i, j int) bool {
+			return out[i].Before(out[j])
+		})
+		return out
+	}
+
 	compatScore := func(tx *DNSTransaction, e connectivity.Edge) (int, bool) {
 		if tx == nil {
 			return 0, false
@@ -190,64 +219,67 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		return score, true
 	}
 
-	pickBestTxForEdge := func(bucket []*DNSTransaction, e connectivity.Edge) *DNSTransaction {
+	pickBestTxForEdge := func(bucket []*DNSTransaction, e connectivity.Edge) (*DNSTransaction, time.Time) {
 		if len(bucket) == 0 {
-			return nil
-		}
-
-		edgeTS := e.FirstSeen.UTC()
-		lo := 0
-		hi := len(bucket)
-
-		if !edgeTS.IsZero() {
-			// Only txs observed at/before edge first-seen.
-			hi = sort.Search(len(bucket), func(i int) bool {
-				return bucket[i].RequestTime.After(edgeTS)
-			})
-			if opt.MaxDNSAge > 0 {
-				start := edgeTS.Add(-opt.MaxDNSAge)
-				lo = sort.Search(len(bucket), func(i int) bool {
-					return !bucket[i].RequestTime.Before(start)
-				})
-			}
-		}
-
-		if lo >= hi {
-			return nil
+			return nil, time.Time{}
 		}
 
 		var (
-			best      *DNSTransaction
-			bestScore = -1
-			bestDT    = time.Duration(1<<63 - 1)
+			best           *DNSTransaction
+			bestObservedAt time.Time
+			bestScore      = -1
+			bestDT         = time.Duration(1<<63 - 1)
 		)
 
-		for i := lo; i < hi; i++ {
-			tx := bucket[i]
-			score, ok := compatScore(tx, e)
-			if !ok {
+		for _, edgeTS := range edgeObservedTimes(e) {
+			lo := 0
+			hi := len(bucket)
+
+			if !edgeTS.IsZero() {
+				// Only txs observed at/before this edge observation.
+				hi = sort.Search(len(bucket), func(i int) bool {
+					return bucket[i].RequestTime.After(edgeTS)
+				})
+				if opt.MaxDNSAge > 0 {
+					start := edgeTS.Add(-opt.MaxDNSAge)
+					lo = sort.Search(len(bucket), func(i int) bool {
+						return !bucket[i].RequestTime.Before(start)
+					})
+				}
+			}
+
+			if lo >= hi {
 				continue
 			}
 
-			dt := time.Duration(0)
-			if !edgeTS.IsZero() {
-				if tx.RequestTime.After(edgeTS) {
+			for i := lo; i < hi; i++ {
+				tx := bucket[i]
+				score, ok := compatScore(tx, e)
+				if !ok {
 					continue
 				}
-				dt = edgeTS.Sub(tx.RequestTime)
-			}
 
-			if best == nil ||
-				score > bestScore ||
-				(score == bestScore && dt < bestDT) ||
-				(score == bestScore && dt == bestDT && tx.RequestTime.After(best.RequestTime)) {
-				best = tx
-				bestScore = score
-				bestDT = dt
+				dt := time.Duration(0)
+				if !edgeTS.IsZero() {
+					if tx.RequestTime.After(edgeTS) {
+						continue
+					}
+					dt = edgeTS.Sub(tx.RequestTime)
+				}
+
+				if best == nil ||
+					score > bestScore ||
+					(score == bestScore && dt < bestDT) ||
+					(score == bestScore && dt == bestDT && tx.RequestTime.After(best.RequestTime)) {
+					best = tx
+					bestObservedAt = edgeTS
+					bestScore = score
+					bestDT = dt
+				}
 			}
 		}
 
-		return best
+		return best, bestObservedAt
 	}
 
 	seen := make(map[string]int, len(edges)*2)
@@ -256,12 +288,20 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	sourceRank := func(src string) int {
 		s := strings.ToLower(strings.TrimSpace(src))
 		switch s {
-		case "dns+synack", "dns+conn+synack",
-			"sni+synack", "sni+conn+synack",
-			"active+synack", "active+conn+synack":
-			return 30
+		case "dns+synack", "sni+synack":
+			return 50
+		case "dns+conn+synack", "sni+conn+synack":
+			return 40
+		case "active+synack", "active+conn+synack":
+			return 35
 		case "csv+conn", "csv+mid":
+			return 30
+		case "donated+ipport":
+			return 25
+		case "active+matrix", "ptr+fcrdns+matrix", "ptr+matrix", "ptr-normalized+matrix", "tls-cert-san+matrix":
 			return 20
+		case "tls-cert-san+matrix-fallback":
+			return 15
 		case "mid-session":
 			return 10
 		case "":
@@ -304,8 +344,15 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		}
 
 		issuer := issuerRaw
+		observedAt := e.FirstSeen.UTC()
+		if observedAt.IsZero() {
+			if times := edgeObservedTimes(e); len(times) > 0 {
+				observedAt = times[0]
+			}
+		}
+
 		if issuerLabel != nil {
-			if lbl := issuerLabel(issuerRaw, e.FirstSeen); lbl != "" {
+			if lbl := issuerLabel(issuerRaw, observedAt); lbl != "" {
 				issuer = strings.TrimSpace(lbl)
 			}
 		}
@@ -319,7 +366,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 				// Keep one row per key, but prefer stronger attribution source.
 				if sourceRank(src) > sourceRank(out[idx].DNSSource) {
 					out[idx].DNSSource = src
-					out[idx].ObservedAt = e.FirstSeen.UTC()
+					out[idx].ObservedAt = observedAt
 				}
 				return
 			}
@@ -331,7 +378,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 				DNSSource:     src,
 				Protocol:      proto,
 				Port:          e.Port,
-				ObservedAt:    e.FirstSeen.UTC(),
+				ObservedAt:    observedAt,
 			})
 		}
 
@@ -344,7 +391,10 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		}
 
 		// Canonical dstIP is used for map keys.
-		bestTx := pickBestTxForEdge(txByIssuerDst[joinKey{issuer: issuerRaw, dstIP: dstIP}], e)
+		bestTx, matchedObservedAt := pickBestTxForEdge(txByIssuerDst[joinKey{issuer: issuerRaw, dstIP: dstIP}], e)
+		if !matchedObservedAt.IsZero() {
+			observedAt = matchedObservedAt
+		}
 		if bestTx == nil {
 			issuerIP := net.ParseIP(issuerRaw)
 
@@ -693,19 +743,15 @@ type dnsDonationDonorTier uint8
 
 const (
 	dnsDonationDonorNone dnsDonationDonorTier = iota
-	dnsDonationDonorInferred
 	dnsDonationDonorDirect
 )
 
 // classifyDNSDonationDonor accepts only the packet-evidence sources that may
-// donate names. In particular, SNI connectivity inference is not a donor, and
-// donated names cannot recursively donate.
+// donate names. Connection-inferred and donated names cannot recursively donate.
 func classifyDNSDonationDonor(source string) dnsDonationDonorTier {
 	switch strings.ToLower(strings.TrimSpace(source)) {
 	case "dns+synack", "sni+synack":
 		return dnsDonationDonorDirect
-	case "dns+conn+synack":
-		return dnsDonationDonorInferred
 	default:
 		return dnsDonationDonorNone
 	}
@@ -753,10 +799,9 @@ func dnsDonationName(names map[string]struct{}) string {
 }
 
 // CompleteTopologyWithDNSDonation fills otherwise-unattributed public IPv4
-// rows from direct or DNS-connection-inferred names observed for the exact
-// destination IP, normalized protocol, and port elsewhere in the same run.
-// Direct evidence wins over inferred evidence for the entire tuple. It never
-// overwrites existing attribution and does not mutate entries.
+// rows from direct DNS/SNI names observed for the exact destination IP,
+// normalized protocol, and port elsewhere in the same run. It never overwrites
+// existing attribution and does not mutate entries.
 func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 	if len(entries) == 0 {
 		return entries
@@ -787,11 +832,7 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		return donationKey{destinationIP: ip, protocol: protocol, port: row.Port}, true
 	}
 
-	type donationCandidates struct {
-		direct   map[string]struct{}
-		inferred map[string]struct{}
-	}
-	donors := make(map[donationKey]*donationCandidates, len(entries))
+	donors := make(map[donationKey]map[string]struct{}, len(entries))
 	for _, row := range entries {
 		tier := classifyDNSDonationDonor(row.DNSSource)
 		if tier == dnsDonationDonorNone {
@@ -805,22 +846,12 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		if !ok {
 			continue
 		}
-		candidates := donors[key]
-		if candidates == nil {
-			candidates = &donationCandidates{}
-			donors[key] = candidates
+		names := donors[key]
+		if names == nil {
+			names = make(map[string]struct{}, 1)
+			donors[key] = names
 		}
-		if tier == dnsDonationDonorDirect {
-			if candidates.direct == nil {
-				candidates.direct = make(map[string]struct{}, 1)
-			}
-			candidates.direct[name] = struct{}{}
-		} else {
-			if candidates.inferred == nil {
-				candidates.inferred = make(map[string]struct{}, 1)
-			}
-			candidates.inferred[name] = struct{}{}
-		}
+		names[name] = struct{}{}
 	}
 	if len(donors) == 0 {
 		return entries
@@ -844,18 +875,12 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		if candidates == nil {
 			continue
 		}
-		names := candidates.direct
-		source := "donated+ipport"
-		if len(names) == 0 {
-			names = candidates.inferred
-			source = "donated+ipport+conn"
-		}
-		name := dnsDonationName(names)
+		name := dnsDonationName(candidates)
 		if name == "" {
 			continue
 		}
 		row.DNSName = name
-		row.DNSSource = source
+		row.DNSSource = "donated+ipport"
 	}
 	return out
 }

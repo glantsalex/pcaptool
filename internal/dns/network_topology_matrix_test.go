@@ -218,6 +218,114 @@ func TestCompleteTopologyWithActiveDNSDoesNotMutateTransactionsOrCSVLearning(t *
 	}
 }
 
+func TestNetworkTopologyMatrixCanAttributeEndpointSeenBeforeDNSWhenLaterObservationMatchesDNS(t *testing.T) {
+	const (
+		issuer = "10.118.216.226"
+		dst    = "18.158.161.168"
+		name   = "edge.platform.gridx.ai"
+	)
+
+	firstSeen := time.Date(2026, 7, 8, 0, 0, 42, 51_357_000, time.UTC)
+	dnsTime := firstSeen.Add(2 * time.Minute)
+	laterSyn := dnsTime.Add(500 * time.Millisecond)
+
+	txs := []*DNSTransaction{
+		{
+			RequestTime:  dnsTime,
+			IssuerIP:     net.ParseIP(issuer),
+			DNSName:      name,
+			ResolvedIPs:  []net.IP{net.ParseIP(dst)},
+			NameEvidence: EvDNSAnswer,
+			ResolvedIPEvidence: map[string]Evidence{
+				dst: EvDNSAnswer,
+			},
+		},
+	}
+	edges := []connectivity.Edge{
+		{
+			IssuerIP:      issuer,
+			DstIP:         dst,
+			Protocol:      connectivity.ProtoTCP,
+			Port:          443,
+			FirstSeen:     firstSeen,
+			ObservedTimes: []time.Time{firstSeen, laterSyn},
+		},
+	}
+
+	opt := DefaultTopologyBuildOptions()
+	opt.MaxDNSAge = time.Second
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, opt)
+
+	if len(got) != 1 {
+		t.Fatalf("expected one endpoint row, got %d: %#v", len(got), got)
+	}
+	row := got[0]
+	if row.IssuerIP != issuer || row.DestinationIP != dst || row.Protocol != "tcp" || row.Port != 443 {
+		t.Fatalf("unexpected endpoint row: %#v", row)
+	}
+	if row.DNSName != name || row.DNSSource != "dns+synack" {
+		t.Fatalf("expected later observation to produce dns+synack attribution, got %#v", row)
+	}
+	if !row.ObservedAt.Equal(laterSyn) {
+		t.Fatalf("expected observed_at to use DNS-matched later observation %s, got %s", laterSyn, row.ObservedAt)
+	}
+}
+
+func TestNetworkTopologyMatrixUsesLaterObservationForMultiAResponse(t *testing.T) {
+	const (
+		issuer = "10.244.201.9"
+		dst    = "3.64.65.68"
+		otherA = "3.67.27.1"
+		name   = "evse.total-ev-charge.com"
+	)
+
+	firstSeen := time.Date(2026, 7, 8, 0, 0, 32, 752_531_055, time.UTC)
+	dnsTime := time.Date(2026, 7, 8, 0, 33, 34, 923_939_000, time.UTC)
+	laterSyn := dnsTime.Add(121 * time.Millisecond)
+
+	txs := []*DNSTransaction{
+		{
+			RequestTime:  dnsTime,
+			IssuerIP:     net.ParseIP(issuer),
+			DNSName:      name,
+			ResolvedIPs:  []net.IP{net.ParseIP(dst), net.ParseIP(otherA)},
+			NameEvidence: EvDNSAnswer,
+			ResolvedIPEvidence: map[string]Evidence{
+				dst:    EvDNSAnswer,
+				otherA: EvDNSAnswer,
+			},
+		},
+	}
+	edges := []connectivity.Edge{
+		{
+			IssuerIP:      issuer,
+			DstIP:         dst,
+			Protocol:      connectivity.ProtoTCP,
+			Port:          9999,
+			FirstSeen:     firstSeen,
+			ObservedTimes: []time.Time{firstSeen, laterSyn},
+		},
+	}
+
+	opt := DefaultTopologyBuildOptions()
+	opt.MaxDNSAge = 500 * time.Millisecond
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, opt)
+
+	if len(got) != 1 {
+		t.Fatalf("expected one endpoint row, got %d: %#v", len(got), got)
+	}
+	row := got[0]
+	if row.IssuerIP != issuer || row.DestinationIP != dst || row.Protocol != "tcp" || row.Port != 9999 {
+		t.Fatalf("unexpected endpoint row: %#v", row)
+	}
+	if row.DNSName != name || row.DNSSource != "dns+synack" {
+		t.Fatalf("expected multi-A DNS response to match later observation, got %#v", row)
+	}
+	if !row.ObservedAt.Equal(laterSyn) {
+		t.Fatalf("expected observed_at to use DNS-matched later observation %s, got %s", laterSyn, row.ObservedAt)
+	}
+}
+
 func TestBuildNetworkTopologyMatrixEntries_SortsIssuersByEndpointCountDesc(t *testing.T) {
 	// 10.0.0.9 has two unique endpoints (same dst, different ports).
 	// 10.0.0.10 has one endpoint.
@@ -576,7 +684,7 @@ func TestClassifyDNSDonationDonor(t *testing.T) {
 	}{
 		{name: "direct DNS", source: "dns+synack", want: dnsDonationDonorDirect},
 		{name: "direct SNI normalized", source: " SNI+SYNACK ", want: dnsDonationDonorDirect},
-		{name: "DNS connection inferred normalized", source: " DNS+CONN+SYNACK ", want: dnsDonationDonorInferred},
+		{name: "DNS connection inferred normalized", source: " DNS+CONN+SYNACK ", want: dnsDonationDonorNone},
 		{name: "SNI connection inferred", source: "sni+conn+synack", want: dnsDonationDonorNone},
 		{name: "DNS connection only", source: "dns+conn", want: dnsDonationDonorNone},
 		{name: "SNI connection only", source: "sni+conn", want: dnsDonationDonorNone},
@@ -687,19 +795,17 @@ func TestCompleteTopologyWithDNSDonationTierSuffixAndRecipientRules(t *testing.T
 			wantSource: "mid-session",
 		},
 		{
-			name:       "E single inferred name donates full",
+			name:       "E single inferred name cannot donate",
 			donors:     []TopologyEntry{{DestinationIP: ip, DNSName: "inferred.example.com", DNSSource: "dns+conn+synack", Protocol: proto, Port: port}},
-			wantName:   "inferred.example.com",
-			wantSource: "donated+ipport+conn",
+			wantSource: "mid-session",
 		},
 		{
-			name: "F multiple inferred names donate common suffix",
+			name: "F multiple inferred names cannot donate",
 			donors: []TopologyEntry{
 				{DestinationIP: ip, DNSName: "one.service.example.com", DNSSource: "dns+conn+synack", Protocol: proto, Port: port},
 				{DestinationIP: ip, DNSName: "two.service.example.com", DNSSource: "dns+conn+synack", Protocol: proto, Port: port},
 			},
-			wantName:   "service.example.com",
-			wantSource: "donated+ipport+conn",
+			wantSource: "mid-session",
 		},
 		{
 			name:       "G SNI inferred cannot donate",
@@ -823,6 +929,7 @@ func TestCompleteTopologyWithDNSDonationRejectsUnsafeSources(t *testing.T) {
 		"ptr-normalized+matrix",
 		"ptr+fcrdns+matrix",
 		"tls-cert-san+matrix",
+		"tls-cert-san+matrix-fallback",
 		"active",
 		"active+synack",
 		"active+matrix",
@@ -968,7 +1075,7 @@ func TestCompleteTopologyWithDNSDonationDoesNotCrossDestinationIP(t *testing.T) 
 	}
 }
 
-func TestCompleteTopologyWithDNSDonationUsesUniqueInferredDonor(t *testing.T) {
+func TestCompleteTopologyWithDNSDonationDoesNotUseUniqueInferredDonor(t *testing.T) {
 	p8883 := uint16(8883)
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
@@ -1016,7 +1123,7 @@ func TestCompleteTopologyWithDNSDonationUsesUniqueInferredDonor(t *testing.T) {
 		t.Fatalf("expected 2 rows, got %d: %#v", len(out), out)
 	}
 
-	var foundDonor, foundCompletedPeer bool
+	var foundDonor, foundUncompletedPeer bool
 	for _, row := range out {
 		if row.IssuerIP == "10.116.12.67" && row.DestinationIP == "13.55.209.128" && row.Port == 8883 {
 			if row.DNSName != "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c" || row.DNSSource != "dns+conn+synack" {
@@ -1025,18 +1132,18 @@ func TestCompleteTopologyWithDNSDonationUsesUniqueInferredDonor(t *testing.T) {
 			foundDonor = true
 		}
 		if row.IssuerIP == "10.116.12.7" && row.DestinationIP == "13.55.209.128" && row.Port == 8883 {
-			if row.DNSName != "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c" || row.DNSSource != "donated+ipport+conn" {
-				t.Fatalf("inferred donor did not complete peer row: %#v", row)
+			if row.DNSName != "" || row.DNSSource != "mid-session" {
+				t.Fatalf("inferred donor completed peer row unexpectedly: %#v", row)
 			}
-			foundCompletedPeer = true
+			foundUncompletedPeer = true
 		}
 	}
-	if !foundDonor || !foundCompletedPeer {
-		t.Fatalf("expected unchanged donor and completed peer; got %#v", out)
+	if !foundDonor || !foundUncompletedPeer {
+		t.Fatalf("expected unchanged donor and uncompleted peer; got %#v", out)
 	}
 }
 
-func TestCompleteTopologyWithDNSDonationKeepsInferredDonationOnExactDestination(t *testing.T) {
+func TestCompleteTopologyWithDNSDonationRejectsInferredDonationOnExactDestination(t *testing.T) {
 	p443 := uint16(443)
 	txTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	txs := []*DNSTransaction{
@@ -1077,25 +1184,43 @@ func TestCompleteTopologyWithDNSDonationKeepsInferredDonationOnExactDestination(
 		t.Fatalf("expected 4 rows, got %d: %#v", len(out), out)
 	}
 
-	donors, completedPeers := 0, 0
+	donors, unresolvedPeers := 0, 0
 	for _, row := range out {
-		switch row.DNSSource {
-		case "dns+conn+synack":
+		switch {
+		case row.DNSSource == "dns+conn+synack":
 			if row.DNSName != "www.cisco.com" {
 				t.Fatalf("unexpected inferred donor name: %#v", row)
 			}
 			donors++
-		case "donated+ipport+conn":
-			if row.DNSName != "www.cisco.com" {
-				t.Fatalf("unexpected inferred donation: %#v", row)
-			}
-			completedPeers++
+		case row.DNSSource == "mid-session" && row.DNSName == "":
+			unresolvedPeers++
 		default:
 			t.Fatalf("unexpected row source: %#v", row)
 		}
 	}
-	if donors != 2 || completedPeers != 2 {
-		t.Fatalf("donors=%d completed_peers=%d, want 2 each; out=%#v", donors, completedPeers, out)
+	if donors != 2 || unresolvedPeers != 2 {
+		t.Fatalf("donors=%d unresolved_peers=%d, want 2 each; out=%#v", donors, unresolvedPeers, out)
+	}
+}
+
+func TestCompleteTopologyWithDNSDonationDirectDonorStillDonatesWhenInferredPresent(t *testing.T) {
+	const (
+		ip    = "8.8.8.8"
+		proto = "tcp"
+		port  = uint16(443)
+	)
+
+	got := CompleteTopologyWithDNSDonation([]TopologyEntry{
+		{IssuerIP: "10.0.0.1", DestinationIP: ip, DNSName: "direct.example.com", DNSSource: "dns+synack", Protocol: proto, Port: port},
+		{IssuerIP: "10.0.0.2", DestinationIP: ip, DNSName: "inferred.example.net", DNSSource: "dns+conn+synack", Protocol: proto, Port: port},
+		{IssuerIP: "10.0.0.3", DestinationIP: ip, DNSSource: "mid-session", Protocol: proto, Port: port},
+	})
+
+	if got[2].DNSName != "direct.example.com" || got[2].DNSSource != "donated+ipport" {
+		t.Fatalf("direct donor did not complete peer row while inferred donor was present: %#v", got)
+	}
+	if got[1].DNSName != "inferred.example.net" || got[1].DNSSource != "dns+conn+synack" {
+		t.Fatalf("inferred donor row was mutated: %#v", got)
 	}
 }
 

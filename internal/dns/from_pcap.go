@@ -240,8 +240,10 @@ func pickFallbackTxUniq(txs []*DNSTransaction, ts time.Time, win time.Duration) 
 // AttachConnectionsAndCollectEdgesFromPCAPs runs the existing DNS→connection correlation
 // logic (Pass 3) and, in the same scan, collects ground-truth connectivity edges.
 //
-// Edges are deduped by (issuerIP, dstIP, protocol, port) and are IPv4-only.
-// DNS attribution is joined later when building the topology matrix.
+// Edges are keyed by (issuerIP, dstIP, protocol, port), IPv4-only, and retain
+// bounded observation timestamps so DNS attribution can evaluate more than the
+// first packet seen for long-running endpoint tuples. DNS attribution is joined
+// later when building the topology matrix.
 //
 // This function is intentionally file-parallel. Each worker builds a local edge set
 // and the main goroutine merges the per-file edge slices to avoid lock contention.
@@ -250,6 +252,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 	files []string,
 	txs []*DNSTransaction,
 	onlyTCP bool,
+	inferDNSFromConnections bool,
 	excludePorts map[uint16]struct{},
 	enforcePrivateAsSource bool,
 	ipToDNS map[string][]string,
@@ -263,24 +266,26 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 
 	// issuer -> txs sorted by RequestTime (for conservative fallback matching)
 	issuerTxs := make(map[string][]*DNSTransaction, 4096)
-	for _, tx := range txs {
-		// Skip already-finalized (e.g., synthetic SNI txs)
-		if tx.DestinationPort != nil && *tx.DestinationPort > 0 {
-			continue
+	if inferDNSFromConnections {
+		for _, tx := range txs {
+			// Skip already-finalized (e.g., synthetic SNI txs)
+			if tx.DestinationPort != nil && *tx.DestinationPort > 0 {
+				continue
+			}
+			if !LooksLikeResolvableDNSName(tx.DNSName) {
+				continue
+			}
+			issuer := tx.IssuerIP.String()
+			if issuer == "" {
+				continue
+			}
+			issuerTxs[issuer] = append(issuerTxs[issuer], tx)
 		}
-		if !LooksLikeResolvableDNSName(tx.DNSName) {
-			continue
+		for k := range issuerTxs {
+			sort.Slice(issuerTxs[k], func(i, j int) bool {
+				return issuerTxs[k][i].RequestTime.Before(issuerTxs[k][j].RequestTime)
+			})
 		}
-		issuer := tx.IssuerIP.String()
-		if issuer == "" {
-			continue
-		}
-		issuerTxs[issuer] = append(issuerTxs[issuer], tx)
-	}
-	for k := range issuerTxs {
-		sort.Slice(issuerTxs[k], func(i, j int) bool {
-			return issuerTxs[k][i].RequestTime.Before(issuerTxs[k][j].RequestTime)
-		})
 	}
 
 	type update struct {
@@ -542,7 +547,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 
 				if ok {
 					tx = findLatestTxBefore(txsForKey, ts)
-				} else {
+				} else if inferDNSFromConnections {
 					// HARDENING #1: never issuer-only fallback for UDP (too ambiguous; causes name poisoning).
 					if proto == L4ProtoUDP {
 						if debugDNSFallback {
@@ -568,6 +573,8 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 						debugDNSFallbackf("fallback-selected issuer=%s name=%q resolver=%v dst=%s:%d proto=%s dt=%s eligible=%d unresolved=%d resolvedIPs=%d",
 							srcIPStr, tx.DNSName, tx.ResolverIP, dstIPStr, dstPort, proto, ts.Sub(tx.RequestTime), eligibleCnt, unresCnt, tx.ResolvedIPCount())
 					}
+				} else {
+					continue
 				}
 
 				if tx == nil {
@@ -679,9 +686,9 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 		port   uint16
 	}
 
-	// Flatten per-file edges in discovered file order and preserve the first
-	// occurrence of each endpoint tuple.
-	seenEdges := make(map[edgeKey]struct{}, 65536)
+	// Flatten per-file edges in discovered file order while preserving bounded
+	// observation timestamps for duplicate endpoint tuples.
+	seenEdges := make(map[edgeKey]int, 65536)
 	var out []connectivity.Edge
 	for _, batch := range edgeBatches {
 		for _, e := range batch {
@@ -691,10 +698,21 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 				proto:  e.Protocol,
 				port:   e.Port,
 			}
-			if _, ok := seenEdges[k]; ok {
+			if idx, ok := seenEdges[k]; ok {
+				times := e.ObservedTimes
+				if len(times) == 0 && !e.FirstSeen.IsZero() {
+					times = []time.Time{e.FirstSeen}
+				}
+				out[idx].ObservedTimes = connectivity.MergeEdgeObservedTimes(out[idx].ObservedTimes, times...)
+				if len(out[idx].ObservedTimes) > 0 {
+					out[idx].FirstSeen = out[idx].ObservedTimes[0]
+				}
 				continue
 			}
-			seenEdges[k] = struct{}{}
+			if len(e.ObservedTimes) == 0 && !e.FirstSeen.IsZero() {
+				e.ObservedTimes = []time.Time{e.FirstSeen.UTC()}
+			}
+			seenEdges[k] = len(out)
 			out = append(out, e)
 		}
 	}
@@ -802,7 +820,7 @@ func allowConnectionInferredDNSBackfill(candidateDNS string, ipStr string, ipToD
 }
 
 func AttachConnectionsFromPCAPs(ctx context.Context, files []string, txs []*DNSTransaction, onlyTCP bool) error {
-	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, onlyTCP, nil, false, nil, nil, 0)
+	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, onlyTCP, true, nil, false, nil, nil, 0)
 	return err
 }
 
@@ -995,14 +1013,16 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 			// --- Responses ---
 			if d.QR {
 				var (
-					answers  []net.IP
-					respName string
-					respID   uint16
+					answers               []net.IP
+					respName              string
+					respID                uint16
+					canCreateResponseOnly bool
 				)
 
 				respID = d.ID
 				if len(d.Questions) > 0 {
 					respName = canonicalDNSName(string(d.Questions[0].Name))
+					canCreateResponseOnly = respName != "" && d.Questions[0].Type == layers.DNSTypeA
 				}
 
 				for _, ans := range d.Answers {
@@ -1036,12 +1056,24 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 					respID,
 				)
 				cands := byLookup[lk]
-				if len(cands) == 0 {
-					continue
-				}
-
 				tx := pickResponseTx(cands, respName, ts.UTC())
 				if tx == nil {
+					if !canCreateResponseOnly {
+						continue
+					}
+					tx = newResponseOnlyDNSTransaction(ts, dstIP, srcIP, respName, path, answers)
+					if tx == nil {
+						continue
+					}
+					key := TxKey{
+						Issuer:   dstIP.String(),
+						SrcPort:  dstPort,
+						Resolver: srcIP.String(),
+						Proto:    proto,
+						ID:       respID,
+						Name:     respName,
+					}
+					addDNSTransaction(txMap, byLookup, key, tx)
 					continue
 				}
 
