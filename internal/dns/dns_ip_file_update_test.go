@@ -73,6 +73,107 @@ func TestStrongObservedIPDNSPairsFromTransactions(t *testing.T) {
 	}
 }
 
+func TestDNSIPCSVExportsNormalizedDNSForNormalizedDirectEvidence(t *testing.T) {
+	got := StrongObservedIPDNSPairsFromTopology([]TopologyEntry{{
+		DestinationIP:       "3.64.65.68",
+		DNSName:             "evse.total-ev-charge.com",
+		DNSSource:           "dns+synack+norm",
+		ObservedDNSName:     "prod-ef.g2mobility.com",
+		NormalizedDNSName:   "evse.total-ev-charge.com",
+		NormalizationRuleID: "dns_normalize_tcsevplatform_evse",
+		Protocol:            "tcp",
+		Port:                9999,
+	}})
+
+	if names := got["3.64.65.68"]; len(names) != 1 || names[0] != "evse.total-ev-charge.com" {
+		t.Fatalf("normalized export names = %#v, want normalized DNS only", names)
+	}
+	for ip, names := range got {
+		for _, name := range names {
+			if name == "prod-ef.g2mobility.com" {
+				t.Fatalf("raw observed DNS exported for %s: %#v", ip, names)
+			}
+		}
+	}
+}
+
+func TestDNSIPCSVStillExportsRawDNSForUnnormalizedDirectEvidence(t *testing.T) {
+	got := StrongObservedIPDNSPairsFromTopology([]TopologyEntry{{
+		DestinationIP: "18.158.161.168",
+		DNSName:       "edge.platform.gridx.ai",
+		DNSSource:     "dns+synack",
+		Protocol:      "tcp",
+		Port:          443,
+	}})
+
+	if names := got["18.158.161.168"]; len(names) != 1 || names[0] != "edge.platform.gridx.ai" {
+		t.Fatalf("raw direct export names = %#v, want edge.platform.gridx.ai", names)
+	}
+}
+
+func TestDNSIPCSVDoesNotExportDonatedNormalizedRows(t *testing.T) {
+	got := StrongObservedIPDNSPairsFromTopology([]TopologyEntry{{
+		DestinationIP: "3.64.65.68",
+		DNSName:       "evse.total-ev-charge.com",
+		DNSSource:     "donated+ipport+norm",
+		Protocol:      "tcp",
+		Port:          9999,
+	}})
+	if len(got) != 0 {
+		t.Fatalf("donated normalized row exported unexpectedly: %#v", got)
+	}
+}
+
+func TestDNSIPCSVDoesNotExportConnInferredRows(t *testing.T) {
+	got := StrongObservedIPDNSPairsFromTopology([]TopologyEntry{{
+		DestinationIP: "193.179.205.46",
+		DNSName:       "www.cisco.com",
+		DNSSource:     "dns+conn+synack",
+		Protocol:      "tcp",
+		Port:          11325,
+	}})
+	if len(got) != 0 {
+		t.Fatalf("conn-inferred row exported unexpectedly: %#v", got)
+	}
+}
+
+func TestDNSIPCSVExportUsesNormalizationOutput(t *testing.T) {
+	rules := mustLoadDNSNormalizationRules(t, `
+rules:
+  - rule_id: dns_normalize_tcsevplatform_evse
+    type: dns_normalize
+    net_id: 404163-1
+    match:
+      protocol: tcp
+      ports: [9999]
+      observed_dns: [prod-ef.g2mobility.com]
+    set:
+      normalized_dns: evse.total-ev-charge.com
+`)
+	topo, audit := ApplyDNSNormalization("404163-1", []TopologyEntry{{
+		DestinationIP: "3.64.65.68",
+		DNSName:       "prod-ef.g2mobility.com",
+		DNSSource:     "dns+synack",
+		Protocol:      "tcp",
+		Port:          9999,
+	}}, rules)
+	if len(audit) != 1 {
+		t.Fatalf("expected one normalization audit row, got %#v", audit)
+	}
+
+	learned := StrongObservedIPDNSPairsFromTopology(topo)
+	_, newPairs := MergeIPToDNSMaps(nil, learned)
+	if len(newPairs) != 1 {
+		t.Fatalf("newPairs = %#v, want one normalized pair", newPairs)
+	}
+	if newPairs[0].DNS != "evse.total-ev-charge.com" || newPairs[0].IP != "3.64.65.68" {
+		t.Fatalf("new pair = %#v, want normalized DNS/IP", newPairs[0])
+	}
+	if newPairs[0].DNS == "prod-ef.g2mobility.com" {
+		t.Fatalf("raw DNS exported unexpectedly: %#v", newPairs)
+	}
+}
+
 func TestLoadIPToDNSFromFile_DNSIPFormatCanonicalizesEVSEPair(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dns-ip.csv")
 	if err := os.WriteFile(path, []byte("EVSE.Total-EV-Charge.COM., 63.183.18.177\n"), 0o644); err != nil {

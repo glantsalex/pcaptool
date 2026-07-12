@@ -69,6 +69,9 @@ func mergeDNSTransaction(dst, src *DNSTransaction) {
 		}
 		dst.AddResolvedIP(ip4, ev)
 	}
+	for _, cname := range src.CNAMETargets {
+		dst.AddCNAMETarget(cname)
+	}
 
 	if dst.ResolverIP == nil && src.ResolverIP != nil {
 		dst.ResolverIP = append(net.IP(nil), src.ResolverIP...)

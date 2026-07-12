@@ -62,7 +62,7 @@ func TestExtractDNSResponseFromRaw_UDPTruncatedSalvagesCompleteARecord(t *testin
 	// Keep the first complete answer and only the start of the second one.
 	truncated := full[:len(full)-2]
 
-	id, name, answers, ok := extractDNSResponseFromRaw(truncated, L4ProtoUDP, true)
+	id, name, answers, _, ok := extractDNSResponseFromRaw(truncated, L4ProtoUDP, true)
 	if !ok {
 		t.Fatalf("expected response salvage success")
 	}
@@ -82,7 +82,7 @@ func TestExtractDNSResponseFromRaw_UDPTruncatedSalvagesCompleteARecord(t *testin
 
 func TestExtractDNSResponseFromRaw_RejectsQueryPayload(t *testing.T) {
 	raw := buildRawDNSQuery("example.com", uint16(layers.DNSTypeA))
-	if _, _, _, ok := extractDNSResponseFromRaw(raw, L4ProtoUDP, true); ok {
+	if _, _, _, _, ok := extractDNSResponseFromRaw(raw, L4ProtoUDP, true); ok {
 		t.Fatalf("expected query payload to be rejected as response")
 	}
 }

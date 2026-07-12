@@ -219,6 +219,9 @@ Each entry includes:
 - `destination_ip`
 - `dns_name`
 - `dns_source`
+- `observed_dns_name` (only when a DNS normalization rule changed the row)
+- `normalized_dns_name` (only when a DNS normalization rule changed the row)
+- `normalization_rule_id` (only when a DNS normalization rule changed the row)
 - `protocol`
 - `port`
 - `observed_at_utc`
@@ -233,6 +236,31 @@ one row for every unique `(DNS, port, protocol)` tuple, with columns:
 - `dns`
 - `port`
 - `protocol`
+
+#### `dns-normalization-audit.csv`
+
+Produced only when `--dns-normalization-rules` is set and at least one topology
+row is normalized. Manifest key: `dns_normalization_audit`.
+
+Columns:
+
+- `net_id`
+- `rule_id`
+- `issuer_ip`
+- `destination_ip`
+- `protocol`
+- `port`
+- `observed_dns`
+- `normalized_dns`
+- `original_source`
+- `normalized_source`
+- `cname_required`
+- `cname_matched`
+- `cname_chain`
+
+The text topology matrix shows only the effective DNS name. The JSON topology
+matrix additionally preserves the observed DNS name, normalized DNS name, and
+normalization rule id for normalized rows.
 
 The tuple reflects final matrix attribution after enabled completion steps have
 run. An unresolved matrix name is represented by an empty `dns` field. If the
@@ -534,6 +562,7 @@ Common source labels in `network-topology-matrix.txt` and related outputs:
 | Label | Meaning |
 |---|---|
 | `dns+synack` | direct DNS answer parsed from PCAP and observed connection confirmation |
+| `dns+synack+norm` | direct `dns+synack` row normalized by a configured `dns_normalize` rule |
 | `dns+conn+synack` | DNS name came from packet evidence, but the IP was backfilled from observed connectivity because the answer was incomplete or truncated |
 | `sni+synack` | name came from TLS SNI and was confirmed by observed connection |
 | `sni+conn+synack` | SNI-derived name with connectivity-backed IP inference |
@@ -549,15 +578,44 @@ Common source labels in `network-topology-matrix.txt` and related outputs:
 | `csv+mid` | DNS came from `dns-ip.csv` fallback for a mid-session row |
 | `mid-session` | connection was observed without usable DNS attribution |
 | `donated+ipport` | unresolved row was completed from direct `dns+synack` or `sni+synack` evidence on the same `(dstIP, proto, port)` |
+| `donated+ipport+norm` | unresolved row was completed from normalized direct `dns+synack+norm` evidence on the same `(dstIP, proto, port)` |
 
 Important details:
 
 - CSV fallback, inferred DNS/SNI (`dns+conn+synack` / `sni+conn+synack`), active resolution, TLS certificate decoration (exact or fallback), and previously donated names never act as donors.
 - Donation is run-local only; it is not persisted back into `dns-ip.csv`.
-- Only direct `dns+synack` and `sni+synack` rows can donate.
+- Only direct `dns+synack`, normalized direct `dns+synack+norm`, and `sni+synack` rows can donate.
 - One donor name is copied in full. Multiple names donate only their deterministic longest common DNS-label suffix when it contains at least two labels; otherwise the row remains unresolved.
 - PTR completion runs after donation, cannot donate to other rows, and is not persisted back into `dns-ip.csv`.
 - Strong direct evidence suppresses weaker conflicting CSV fallback where possible.
+- DNS normalization rules apply after raw topology rows are built and before donation. They currently support only `type: dns_normalize`, only rewrite `dns+synack` rows, and preserve observed/normalized DNS metadata in JSON plus `dns-normalization-audit.csv`.
+
+Minimal rule file example:
+
+```yaml
+rules:
+  - rule_id: dns_normalize_tcsevplatform_evse
+    type: dns_normalize
+    net_id: 404163-1
+    match:
+      protocol: tcp
+      ports: [9999, 443]
+      observed_dns:
+        - prod-ef.g2mobility.com
+        - irve.61mobility.fr
+        - evse-psa.total-ev-charge.com
+        - total-ev-charge.com
+        - "*.total-ev-charge.com"
+      cname_contains:
+        - iot.tcsevplatform.alzp.tgscloud.net
+    set:
+      normalized_dns: evse.total-ev-charge.com
+```
+
+`observed_dns` matching is case-insensitive and trims trailing dots. It supports
+exact names and simple `*` glob patterns. If `cname_contains` is configured, a
+row must have captured CNAME evidence that exactly matches, glob-matches, or
+contains one of the configured CNAME values.
 
 ## `dns-ip.csv` / `dns-ip.txt` Fallback Map
 
@@ -660,6 +718,7 @@ This policy is designed to reduce CSV contamination from:
 | `--infer-dns-from-connections` | bool | `false` | opt in to issuer-only query/connection timing inference when DNS answers are missing |
 | `--ignore-ntp` | bool | `true` | drop NTP-like DNS names using heuristic filtering |
 | `--dns-ip-file` | string | empty | path to fallback DNS/IP map used for last-resort attribution |
+| `--dns-normalization-rules` | string | empty | optional YAML file with `dns_normalize` rules applied to direct DNS topology rows before donation |
 | `--exclude-ports` | string | `53` | comma-separated destination/server ports to exclude from topology correlation |
 | `--ftp-control-ports` | string | `21,990` | strict comma-separated passive FTP/FTPS control ports; replaces the default set |
 | `--ftp-passive-min-port` | port | `30000` | minimum destination port heuristically suppressed after a configured FTP/FTPS control channel is observed |

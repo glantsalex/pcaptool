@@ -44,6 +44,7 @@ var (
 	flagFTPPassiveMinPort            string
 	flagServerSummaryExcludeUDPPorts string
 	flagDNSIPFile                    string
+	flagDNSNormalizationRules        string
 	flagTopologyDNSWindow            time.Duration
 	flagActiveResolve                bool
 	flagActiveResolvers              string
@@ -106,6 +107,12 @@ func init() {
 		"dns-ip-file",
 		"",
 		"CSV file containing DNS,IP pairs used as last-resort IP->DNS attribution (e.g. dns,ip). An adjacent topology-<net-id>.csv is overlaid when present. IPv4 only.",
+	)
+	cmd.Flags().StringVar(
+		&flagDNSNormalizationRules,
+		"dns-normalization-rules",
+		"",
+		"Optional YAML rules file for normalizing selected direct DNS topology names before donation.",
 	)
 	cmd.Flags().StringVar(
 		&flagExcludePorts,
@@ -465,12 +472,25 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	var learnedAudit []dns.IPDNSAppendAuditRecord
 	var learnedNewPairs []dns.IPDNSPair
+
+	topoOpt := dns.DefaultTopologyBuildOptions()
+	topoOpt.MaxDNSAge = flagTopologyDNSWindow
+	topoOpt.SortOutput = !flagUnsorted
+	topo := dns.BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, issuerFn, ipToDNS, topoOpt)
+	var dnsNormalizationAudit []dns.DNSNormalizationAudit
+	if strings.TrimSpace(flagDNSNormalizationRules) != "" {
+		rules, err := dns.LoadDNSNormalizationRules(flagDNSNormalizationRules)
+		if err != nil {
+			return fmt.Errorf("load --dns-normalization-rules: %w", err)
+		}
+		topo, dnsNormalizationAudit = dns.ApplyDNSNormalization(flagNetID, topo, rules)
+	}
 	if strings.TrimSpace(flagDNSIPFile) != "" {
-		learned := dns.StrongObservedIPDNSPairsFromTransactions(txs)
+		learned := dns.StrongObservedIPDNSPairsFromTopology(topo)
 		merged, newPairs := dns.MergeIPToDNSMaps(ipToDNS, learned)
 		learnedNewPairs = newPairs
 		if flagDebug {
-			learnedAudit = dns.BuildIPDNSAppendAuditRecords(txs, newPairs)
+			learnedAudit = dns.BuildIPDNSAppendAuditRecordsFromTopology(topo, newPairs)
 		}
 		if len(newPairs) > 0 {
 			if err := dns.AppendIPDNSPairsToFile(flagDNSIPFile, newPairs); err != nil {
@@ -479,11 +499,6 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		}
 		ipToDNS = merged
 	}
-
-	topoOpt := dns.DefaultTopologyBuildOptions()
-	topoOpt.MaxDNSAge = flagTopologyDNSWindow
-	topoOpt.SortOutput = !flagUnsorted
-	topo := dns.BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, issuerFn, ipToDNS, topoOpt)
 	if flagConnectivityShort {
 		topo = dns.SquashNetworkTopologyShortWithOptions(topo, !flagUnsorted)
 	}
@@ -746,11 +761,21 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		ipDNSAppendAuditPath = om.Path("ip-dns-append-audit.txt")
 	}
 	truncatedDNSPacketsPath := ""
-	if flagDebug {
-		truncatedDNSPacketsPath, err = writeTruncatedDNSPacketsCSV(om, truncatedDNSPackets)
+	truncatedDNSPacketsPath, err = writeTruncatedDNSPacketsCSV(om, truncatedDNSPackets)
+	if err != nil {
+		return fmt.Errorf("write truncated DNS packets: %w", err)
+	}
+	dnsNormalizationAuditPath := ""
+	if len(dnsNormalizationAudit) > 0 {
+		f, err := om.Create("dns-normalization-audit.csv")
 		if err != nil {
-			return fmt.Errorf("write truncated DNS packets: %w", err)
+			return fmt.Errorf("create DNS normalization audit: %w", err)
 		}
+		defer f.Close()
+		if err := dns.WriteDNSNormalizationAuditCSV(f, dnsNormalizationAudit); err != nil {
+			return fmt.Errorf("write DNS normalization audit: %w", err)
+		}
+		dnsNormalizationAuditPath = f.Name()
 	}
 	filesMap := map[string]string{
 		"main_output":       mainOutputPath,
@@ -788,6 +813,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 	if truncatedDNSPacketsPath != "" {
 		filesMap["truncated_dns_packets"] = truncatedDNSPacketsPath
+	}
+	if dnsNormalizationAuditPath != "" {
+		filesMap["dns_normalization_audit"] = dnsNormalizationAuditPath
 	}
 	if activeResolveLogPath != "" {
 		filesMap["active_resolve_log"] = activeResolveLogPath

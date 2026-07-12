@@ -23,7 +23,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestTruncatedDNSPacketsArtifactWrittenAndManifestedOnlyWithDebug(t *testing.T) {
+func TestTruncatedDNSPacketsArtifactWrittenAndManifestedWithAndWithoutDebug(t *testing.T) {
 	restoreDNSExtractFlags(t)
 	resolveDNSNamesIPv4WithAudit = func(
 		context.Context,
@@ -128,29 +128,20 @@ func TestTruncatedDNSPacketsArtifactWrittenAndManifestedOnlyWithDebug(t *testing
 					t.Fatalf("manifest file %q path = %q, want under %q", key, path, runDir)
 				}
 			}
-			if !debug {
-				if _, err := os.Stat(artifactPath); !os.IsNotExist(err) {
-					t.Fatalf("non-debug truncated DNS artifact stat error = %v, want not exist", err)
-				}
-				if got, ok := manifest.Files["truncated_dns_packets"]; ok {
-					t.Fatalf("non-debug manifest contains truncated_dns_packets = %q", got)
-				}
-			} else {
-				f, err := os.Open(artifactPath)
-				if err != nil {
-					t.Fatalf("open truncated DNS artifact: %v", err)
-				}
-				records, err := csv.NewReader(f).ReadAll()
-				f.Close()
-				if err != nil {
-					t.Fatalf("read truncated DNS artifact: %v", err)
-				}
-				if len(records) != 3 || records[1][2] != "api.exampl" || records[2][2] != "api.exampl" {
-					t.Fatalf("unexpected truncated DNS CSV records: %#v", records)
-				}
-				if got := manifest.Files["truncated_dns_packets"]; got != artifactPath {
-					t.Fatalf("manifest truncated_dns_packets = %q, want %q", got, artifactPath)
-				}
+			f, err := os.Open(artifactPath)
+			if err != nil {
+				t.Fatalf("open truncated DNS artifact: %v", err)
+			}
+			records, err := csv.NewReader(f).ReadAll()
+			f.Close()
+			if err != nil {
+				t.Fatalf("read truncated DNS artifact: %v", err)
+			}
+			if len(records) != 3 || records[1][2] != "api.exampl" || records[2][2] != "api.exampl" {
+				t.Fatalf("unexpected truncated DNS CSV records: %#v", records)
+			}
+			if got := manifest.Files["truncated_dns_packets"]; got != artifactPath {
+				t.Fatalf("manifest truncated_dns_packets = %q, want %q", got, artifactPath)
 			}
 
 			unresolvedBytes, err := os.ReadFile(filepath.Join(runDir, "dns-unresolved-dns.txt"))
@@ -563,7 +554,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 	oldExcludePorts, oldFTPControlPorts := flagExcludePorts, flagFTPControlPorts
 	oldFTPPassiveMinPort := flagFTPPassiveMinPort
 	oldServerSummaryExcludeUDPPorts := flagServerSummaryExcludeUDPPorts
-	oldDNSIPFile, oldTopologyDNSWindow := flagDNSIPFile, flagTopologyDNSWindow
+	oldDNSIPFile, oldDNSNormalizationRules, oldTopologyDNSWindow := flagDNSIPFile, flagDNSNormalizationRules, flagTopologyDNSWindow
 	oldActiveResolve, oldActiveResolvers := flagActiveResolve, flagActiveResolvers
 	oldReverseDNSLookup := flagReverseDNSLookup
 	oldTLSCertLookup := flagTLSCertLookup
@@ -585,7 +576,7 @@ func restoreDNSExtractFlags(t *testing.T) {
 		flagExcludePorts, flagFTPControlPorts = oldExcludePorts, oldFTPControlPorts
 		flagFTPPassiveMinPort = oldFTPPassiveMinPort
 		flagServerSummaryExcludeUDPPorts = oldServerSummaryExcludeUDPPorts
-		flagDNSIPFile, flagTopologyDNSWindow = oldDNSIPFile, oldTopologyDNSWindow
+		flagDNSIPFile, flagDNSNormalizationRules, flagTopologyDNSWindow = oldDNSIPFile, oldDNSNormalizationRules, oldTopologyDNSWindow
 		flagActiveResolve, flagActiveResolvers = oldActiveResolve, oldActiveResolvers
 		flagReverseDNSLookup = oldReverseDNSLookup
 		flagTLSCertLookup = oldTLSCertLookup
@@ -642,6 +633,17 @@ func TestInferDNSFromConnectionsFlagDefault(t *testing.T) {
 	}
 	if flag.DefValue != "false" || flag.Value.Type() != "bool" {
 		t.Fatalf("flag default/type = %q/%q, want false/bool", flag.DefValue, flag.Value.Type())
+	}
+}
+
+func TestDNSNormalizationRulesFlagDefault(t *testing.T) {
+	restoreDNSExtractFlags(t)
+	flag := dnsextractCommandForTest(t).Flags().Lookup("dns-normalization-rules")
+	if flag == nil {
+		t.Fatal("--dns-normalization-rules flag not found")
+	}
+	if flag.DefValue != "" || flag.Value.Type() != "string" {
+		t.Fatalf("flag default/type = %q/%q, want empty/string", flag.DefValue, flag.Value.Type())
 	}
 }
 

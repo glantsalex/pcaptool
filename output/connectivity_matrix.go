@@ -114,13 +114,16 @@ type networkTopologyMatrixJSON struct {
 }
 
 type networkTopologyMatrixJSONEntry struct {
-	IssuerIP      string `json:"issuer_ip"`
-	DestinationIP string `json:"destination_ip"`
-	DNSName       string `json:"dns_name"`
-	DNSSource     string `json:"dns_source"`
-	Protocol      string `json:"protocol"`
-	Port          uint16 `json:"port"`
-	ObservedAtUTC string `json:"observed_at_utc,omitempty"`
+	IssuerIP            string `json:"issuer_ip"`
+	DestinationIP       string `json:"destination_ip"`
+	DNSName             string `json:"dns_name"`
+	DNSSource           string `json:"dns_source"`
+	ObservedDNSName     string `json:"observed_dns_name,omitempty"`
+	NormalizedDNSName   string `json:"normalized_dns_name,omitempty"`
+	NormalizationRuleID string `json:"normalization_rule_id,omitempty"`
+	Protocol            string `json:"protocol"`
+	Port                uint16 `json:"port"`
+	ObservedAtUTC       string `json:"observed_at_utc,omitempty"`
 }
 
 // WriteNetworkTopologyMatrixJSON writes the topology matrix in machine-readable JSON.
@@ -131,12 +134,15 @@ func WriteNetworkTopologyMatrixJSON(w io.Writer, entries []dns.TopologyEntry) er
 	}
 	for _, entry := range entries {
 		row := networkTopologyMatrixJSONEntry{
-			IssuerIP:      entry.IssuerIP,
-			DestinationIP: entry.DestinationIP,
-			DNSName:       entry.DNSName,
-			DNSSource:     entry.DNSSource,
-			Protocol:      entry.Protocol,
-			Port:          entry.Port,
+			IssuerIP:            entry.IssuerIP,
+			DestinationIP:       entry.DestinationIP,
+			DNSName:             entry.DNSName,
+			DNSSource:           entry.DNSSource,
+			ObservedDNSName:     entry.ObservedDNSName,
+			NormalizedDNSName:   entry.NormalizedDNSName,
+			NormalizationRuleID: entry.NormalizationRuleID,
+			Protocol:            entry.Protocol,
+			Port:                entry.Port,
 		}
 		if !entry.ObservedAt.IsZero() {
 			row.ObservedAtUTC = entry.ObservedAt.UTC().Format(time.RFC3339Nano)

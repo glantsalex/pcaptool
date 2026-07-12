@@ -12,6 +12,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,72 @@ func TestWriteNetworkTopologyMatrixJSON(t *testing.T) {
 	}
 	if got.Entries[1].DNSName != "ep2.online-log.worldline.ch" || got.Entries[1].DNSSource != "csv+mid" {
 		t.Fatalf("second entry = %+v", got.Entries[1])
+	}
+}
+
+func TestTextOutputUsesEffectiveDNSOnly(t *testing.T) {
+	entries := []dns.TopologyEntry{{
+		IssuerIP:            "10.116.194.47",
+		DestinationIP:       "3.64.65.68",
+		DNSName:             "evse.total-ev-charge.com",
+		DNSSource:           "dns+synack+norm",
+		ObservedDNSName:     "prod-ef.g2mobility.com",
+		NormalizedDNSName:   "evse.total-ev-charge.com",
+		NormalizationRuleID: "dns_normalize_tcsevplatform_evse",
+		Protocol:            "tcp",
+		Port:                9999,
+	}}
+	var buf bytes.Buffer
+	if err := WriteNetworkTopologyMatrix(&buf, entries); err != nil {
+		t.Fatalf("WriteNetworkTopologyMatrix() error = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "evse.total-ev-charge.com") {
+		t.Fatalf("text output missing effective DNS: %s", out)
+	}
+	if strings.Contains(out, "prod-ef.g2mobility.com") {
+		t.Fatalf("text output leaked observed DNS: %s", out)
+	}
+}
+
+func TestJSONOutputPreservesObservedAndNormalizedDNS(t *testing.T) {
+	entries := []dns.TopologyEntry{{
+		IssuerIP:            "10.116.194.47",
+		DestinationIP:       "3.64.65.68",
+		DNSName:             "evse.total-ev-charge.com",
+		DNSSource:           "dns+synack+norm",
+		ObservedDNSName:     "prod-ef.g2mobility.com",
+		NormalizedDNSName:   "evse.total-ev-charge.com",
+		NormalizationRuleID: "dns_normalize_tcsevplatform_evse",
+		Protocol:            "tcp",
+		Port:                9999,
+	}}
+	var buf bytes.Buffer
+	if err := WriteNetworkTopologyMatrixJSON(&buf, entries); err != nil {
+		t.Fatalf("WriteNetworkTopologyMatrixJSON() error = %v", err)
+	}
+	var got struct {
+		Entries []struct {
+			DNSName             string `json:"dns_name"`
+			DNSSource           string `json:"dns_source"`
+			ObservedDNSName     string `json:"observed_dns_name"`
+			NormalizedDNSName   string `json:"normalized_dns_name"`
+			NormalizationRuleID string `json:"normalization_rule_id"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(got.Entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(got.Entries))
+	}
+	row := got.Entries[0]
+	if row.DNSName != "evse.total-ev-charge.com" ||
+		row.DNSSource != "dns+synack+norm" ||
+		row.ObservedDNSName != "prod-ef.g2mobility.com" ||
+		row.NormalizedDNSName != "evse.total-ev-charge.com" ||
+		row.NormalizationRuleID != "dns_normalize_tcsevplatform_evse" {
+		t.Fatalf("json row = %+v", row)
 	}
 }
 

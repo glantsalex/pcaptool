@@ -1014,6 +1014,7 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 			if d.QR {
 				var (
 					answers               []net.IP
+					cnames                []string
 					respName              string
 					respID                uint16
 					canCreateResponseOnly bool
@@ -1029,10 +1030,15 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 					if ans.Type == layers.DNSTypeA && len(ans.IP) > 0 {
 						answers = append(answers, append(net.IP(nil), ans.IP...))
 					}
+					if ans.Type == layers.DNSTypeCNAME && len(ans.CNAME) > 0 {
+						if cname := canonicalDNSName(string(ans.CNAME)); cname != "" {
+							cnames = append(cnames, cname)
+						}
+					}
 				}
 
 				if captureTruncated && srcPort == 53 {
-					rawID, rawName, rawAnswers, ok := extractDNSResponseFromRaw(payload, proto, true)
+					rawID, rawName, rawAnswers, rawCNAMEs, ok := extractDNSResponseFromRaw(payload, proto, true)
 					if ok {
 						if respID == 0 {
 							respID = rawID
@@ -1041,6 +1047,7 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 							respName = rawName
 						}
 						answers = append(answers, rawAnswers...)
+						cnames = append(cnames, rawCNAMEs...)
 					}
 				}
 
@@ -1061,7 +1068,7 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 					if !canCreateResponseOnly {
 						continue
 					}
-					tx = newResponseOnlyDNSTransaction(ts, dstIP, srcIP, respName, path, answers)
+					tx = newResponseOnlyDNSTransaction(ts, dstIP, srcIP, respName, path, answers, cnames)
 					if tx == nil {
 						continue
 					}
@@ -1080,6 +1087,9 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 				tx.NameEvidence = EvDNSAnswer
 				for _, ip := range answers {
 					tx.AddResolvedIP(ip, EvDNSAnswer)
+				}
+				for _, cname := range cnames {
+					tx.AddCNAMETarget(cname)
 				}
 				if len(tx.ResolvedIPs) > 0 {
 					tx.ResolverIP = append(net.IP(nil), srcIP...)

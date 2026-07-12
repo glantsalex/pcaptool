@@ -1,6 +1,9 @@
 package dns
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // IPDNSAppendAuditRecord describes provenance for one newly appended DNS,IP pair.
 type IPDNSAppendAuditRecord struct {
@@ -161,5 +164,110 @@ func BuildIPDNSAppendAuditRecords(txs []*DNSTransaction, pairs []IPDNSPair) []IP
 		return out[i].IP < out[j].IP
 	})
 
+	return out
+}
+
+// BuildIPDNSAppendAuditRecordsFromTopology returns provenance for newly
+// appended DNS/IP pairs learned from effective topology rows.
+func BuildIPDNSAppendAuditRecordsFromTopology(entries []TopologyEntry, pairs []IPDNSPair) []IPDNSAppendAuditRecord {
+	if len(entries) == 0 || len(pairs) == 0 {
+		return nil
+	}
+
+	type pairKey struct {
+		ip  string
+		dns string
+	}
+	want := make(map[pairKey]struct{}, len(pairs))
+	for _, p := range pairs {
+		ip, ok := canonicalIPv4String(p.IP)
+		if !ok {
+			continue
+		}
+		dns := canonicalDNSName(p.DNS)
+		if dns == "" {
+			continue
+		}
+		want[pairKey{ip: ip, dns: dns}] = struct{}{}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+
+	best := make(map[pairKey]IPDNSAppendAuditRecord, len(want))
+	for _, row := range entries {
+		source := strings.ToLower(strings.TrimSpace(row.DNSSource))
+		if source != "dns+synack" && source != "dns+synack+norm" {
+			continue
+		}
+		ip, ok := canonicalIPv4String(row.DestinationIP)
+		if !ok {
+			continue
+		}
+		dns := row.DNSName
+		if source == "dns+synack+norm" && strings.TrimSpace(row.NormalizedDNSName) != "" {
+			dns = row.NormalizedDNSName
+		}
+		dns = canonicalDNSName(dns)
+		if dns == "" {
+			continue
+		}
+		k := pairKey{ip: ip, dns: dns}
+		if _, ok := want[k]; !ok {
+			continue
+		}
+		observedAt := ""
+		if !row.ObservedAt.IsZero() {
+			observedAt = row.ObservedAt.UTC().Format("2006-01-02 15:04:05.000000000Z07:00")
+		}
+		rec := IPDNSAppendAuditRecord{
+			DNS:        dns,
+			IP:         ip,
+			Evidence:   row.DNSSource,
+			ObservedAt: observedAt,
+			IssuerIP:   row.IssuerIP,
+			Protocol:   row.Protocol,
+			Port:       row.Port,
+		}
+		cur, exists := best[k]
+		if !exists || cur.ObservedAt == "" ||
+			(observedAt != "" && observedAt < cur.ObservedAt) ||
+			(observedAt == cur.ObservedAt && row.IssuerIP < cur.IssuerIP) {
+			best[k] = rec
+		}
+	}
+
+	out := make([]IPDNSAppendAuditRecord, 0, len(pairs))
+	for _, p := range pairs {
+		ip, ok := canonicalIPv4String(p.IP)
+		if !ok {
+			continue
+		}
+		dns := canonicalDNSName(p.DNS)
+		if dns == "" {
+			continue
+		}
+		if rec, ok := best[pairKey{ip: ip, dns: dns}]; ok {
+			out = append(out, rec)
+			continue
+		}
+		out = append(out, IPDNSAppendAuditRecord{DNS: dns, IP: ip})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ObservedAt == "" && out[j].ObservedAt != "" {
+			return false
+		}
+		if out[i].ObservedAt != "" && out[j].ObservedAt == "" {
+			return true
+		}
+		if out[i].ObservedAt != out[j].ObservedAt {
+			return out[i].ObservedAt < out[j].ObservedAt
+		}
+		if out[i].DNS != out[j].DNS {
+			return out[i].DNS < out[j].DNS
+		}
+		return out[i].IP < out[j].IP
+	})
 	return out
 }

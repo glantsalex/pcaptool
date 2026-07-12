@@ -31,7 +31,7 @@ func TestExtractDNSResponseFromRawSalvagesCompleteARecordFromCaptureTruncatedPac
 		t.Fatalf("fixture is not a DNS response from port 53: src port %d", udp.SrcPort)
 	}
 
-	id, qname, ips, ok := extractDNSResponseFromRaw(udp.Payload, L4ProtoUDP, true)
+	id, qname, ips, _, ok := extractDNSResponseFromRaw(udp.Payload, L4ProtoUDP, true)
 	if !ok {
 		t.Fatalf("extractDNSResponseFromRaw() failed to salvage DNS response evidence")
 	}

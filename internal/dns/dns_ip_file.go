@@ -343,6 +343,57 @@ func StrongObservedIPDNSPairsFromTransactions(txs []*DNSTransaction) map[string]
 	return out
 }
 
+// StrongObservedIPDNSPairsFromTopology extracts durable DNS/IP cache candidates
+// from effective topology rows. It is normalization-aware: dns+synack+norm rows
+// export the effective normalized DNS name, never the observed/raw name.
+func StrongObservedIPDNSPairsFromTopology(entries []TopologyEntry) map[string][]string {
+	out := make(map[string][]string, 1024)
+	seen := make(map[string]map[string]struct{}, 1024)
+
+	add := func(ip, dnsName string) {
+		ip, ok := canonicalIPv4String(ip)
+		if !ok {
+			return
+		}
+		parsed := net.ParseIP(ip)
+		if parsed == nil || parsed.IsPrivate() {
+			return
+		}
+		dnsName = canonicalDNSName(dnsName)
+		if dnsName == "" {
+			return
+		}
+		names := seen[ip]
+		if names == nil {
+			names = make(map[string]struct{}, 2)
+			seen[ip] = names
+		}
+		if _, ok := names[dnsName]; ok {
+			return
+		}
+		names[dnsName] = struct{}{}
+		out[ip] = append(out[ip], dnsName)
+	}
+
+	for _, row := range entries {
+		source := strings.ToLower(strings.TrimSpace(row.DNSSource))
+		switch source {
+		case "dns+synack":
+			add(row.DestinationIP, row.DNSName)
+		case "dns+synack+norm":
+			dnsName := row.NormalizedDNSName
+			if strings.TrimSpace(dnsName) == "" {
+				dnsName = row.DNSName
+			}
+			add(row.DestinationIP, dnsName)
+		default:
+			continue
+		}
+	}
+
+	return out
+}
+
 func AppendIPDNSPairsToFile(path string, pairs []IPDNSPair) error {
 	if len(pairs) == 0 {
 		return nil

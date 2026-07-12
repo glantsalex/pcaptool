@@ -30,6 +30,7 @@ type DNSTransaction struct {
 	IssuerIP        net.IP
 	DNSName         string
 	ResolvedIPs     []net.IP
+	CNAMETargets    []string
 	ResolverIP      net.IP
 	DestinationPort *uint16
 
@@ -127,6 +128,22 @@ func (tx *DNSTransaction) addResolvedIPLocked(ip net.IP, ev Evidence) {
 	tx.ResolvedIPs = append(tx.ResolvedIPs, append(net.IP(nil), ip4...))
 	tx.ensureEvidenceMap()
 	tx.ResolvedIPEvidence[s] |= ev
+}
+
+// AddCNAMETarget records a visible CNAME target from a DNS response.
+func (tx *DNSTransaction) AddCNAMETarget(name string) {
+	name = canonicalDNSName(name)
+	if name == "" {
+		return
+	}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	for _, existing := range tx.CNAMETargets {
+		if existing == name {
+			return
+		}
+	}
+	tx.CNAMETargets = append(tx.CNAMETargets, name)
 }
 
 // AddResolvedIP adds ip to ResolvedIPs if missing and ORs evidence flags.

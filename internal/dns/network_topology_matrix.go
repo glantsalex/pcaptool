@@ -23,13 +23,17 @@ import (
 //
 //	Issuer | Destination IP | DNS Name | Protocol | Port
 type TopologyEntry struct {
-	IssuerIP      string
-	DestinationIP string
-	DNSName       string
-	DNSSource     string // e.g. dns+synack, sni+synack, active+synack, csv+synack
-	Protocol      string // "tcp" or "udp"
-	Port          uint16
-	ObservedAt    time.Time
+	IssuerIP            string
+	DestinationIP       string
+	DNSName             string
+	DNSSource           string // e.g. dns+synack, sni+synack, active+synack, csv+synack
+	Protocol            string // "tcp" or "udp"
+	Port                uint16
+	ObservedAt          time.Time
+	ObservedDNSName     string
+	NormalizedDNSName   string
+	NormalizationRuleID string
+	CNAMEChain          string
 }
 
 // TopologyBuildOptions controls how strictly edges are matched back to DNS txs.
@@ -285,33 +289,6 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	seen := make(map[string]int, len(edges)*2)
 	out := make([]TopologyEntry, 0, len(edges)*2)
 
-	sourceRank := func(src string) int {
-		s := strings.ToLower(strings.TrimSpace(src))
-		switch s {
-		case "dns+synack", "sni+synack":
-			return 50
-		case "dns+conn+synack", "sni+conn+synack":
-			return 40
-		case "active+synack", "active+conn+synack":
-			return 35
-		case "csv+conn", "csv+mid":
-			return 30
-		case "donated+ipport":
-			return 25
-		case "active+matrix", "ptr+fcrdns+matrix", "ptr+matrix", "ptr-normalized+matrix", "tls-cert-san+matrix":
-			return 20
-		case "tls-cert-san+matrix-fallback":
-			return 15
-		case "mid-session":
-			return 10
-		case "":
-			return 0
-		default:
-			// Any non-empty evidence-like source that's not explicitly ranked.
-			return 15
-		}
-	}
-
 	for _, e := range edges {
 		if strings.TrimSpace(e.IssuerIP) == "" || strings.TrimSpace(e.DstIP) == "" || e.Port == 0 {
 			continue
@@ -364,7 +341,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			key := issuer + "|" + dstIP + "|" + dnsName + "|" + proto + "|" + itoa16(e.Port)
 			if idx, ok := seen[key]; ok {
 				// Keep one row per key, but prefer stronger attribution source.
-				if sourceRank(src) > sourceRank(out[idx].DNSSource) {
+				if topologySourceRank(src) > topologySourceRank(out[idx].DNSSource) {
 					out[idx].DNSSource = src
 					out[idx].ObservedAt = observedAt
 				}
@@ -424,6 +401,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			continue
 		}
 		dnsName := normalize(bestTx.DNSName)
+		cnameChain := append([]string(nil), bestTx.CNAMETargets...)
 		src := ""
 		if dnsName != "" {
 			ev := bestTx.NameEvidence
@@ -435,7 +413,18 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 				src = EvidenceString(ev)
 			}
 		}
+		beforeLen := len(out)
 		emit(dnsName, src)
+		if len(cnameChain) > 0 && len(out) > 0 {
+			idx := len(out) - 1
+			if len(out) == beforeLen {
+				key := issuer + "|" + dstIP + "|" + dnsName + "|" + proto + "|" + itoa16(e.Port)
+				if seenIdx, ok := seen[key]; ok {
+					idx = seenIdx
+				}
+			}
+			out[idx].CNAMEChain = mergeTopologyCNAMEChain(out[idx].CNAMEChain, cnameChain)
+		}
 	}
 
 	// ------------------------------------------------------------
@@ -580,7 +569,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 
 		isPreferredDNS := func(src string) bool {
 			s := strings.ToLower(strings.TrimSpace(src))
-			return s == "dns+synack" || s == "dns+conn+synack"
+			return s == "dns+synack" || s == "dns+synack+norm" || s == "dns+conn+synack"
 		}
 
 		isCSVFallback := func(src string) bool {
@@ -750,10 +739,36 @@ const (
 // donate names. Connection-inferred and donated names cannot recursively donate.
 func classifyDNSDonationDonor(source string) dnsDonationDonorTier {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "dns+synack", "sni+synack":
+	case "dns+synack", "dns+synack+norm", "sni+synack":
 		return dnsDonationDonorDirect
 	default:
 		return dnsDonationDonorNone
+	}
+}
+
+func topologySourceRank(src string) int {
+	s := strings.ToLower(strings.TrimSpace(src))
+	switch s {
+	case "dns+synack", "sni+synack", "dns+synack+norm":
+		return 50
+	case "dns+conn+synack", "sni+conn+synack":
+		return 40
+	case "active+synack", "active+conn+synack":
+		return 35
+	case "csv+conn", "csv+mid":
+		return 30
+	case "donated+ipport", "donated+ipport+norm":
+		return 25
+	case "active+matrix", "ptr+fcrdns+matrix", "ptr+matrix", "ptr-normalized+matrix", "tls-cert-san+matrix":
+		return 20
+	case "tls-cert-san+matrix-fallback":
+		return 15
+	case "mid-session":
+		return 10
+	case "":
+		return 0
+	default:
+		return 15
 	}
 }
 
@@ -832,7 +847,12 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		return donationKey{destinationIP: ip, protocol: protocol, port: row.Port}, true
 	}
 
-	donors := make(map[donationKey]map[string]struct{}, len(entries))
+	type donationCandidates struct {
+		names          map[string]struct{}
+		hasNormalized  bool
+		nameNormalized map[string]bool
+	}
+	donors := make(map[donationKey]*donationCandidates, len(entries))
 	for _, row := range entries {
 		tier := classifyDNSDonationDonor(row.DNSSource)
 		if tier == dnsDonationDonorNone {
@@ -846,12 +866,19 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		if !ok {
 			continue
 		}
-		names := donors[key]
-		if names == nil {
-			names = make(map[string]struct{}, 1)
-			donors[key] = names
+		candidates := donors[key]
+		if candidates == nil {
+			candidates = &donationCandidates{
+				names:          make(map[string]struct{}, 1),
+				nameNormalized: make(map[string]bool, 1),
+			}
+			donors[key] = candidates
 		}
-		names[name] = struct{}{}
+		candidates.names[name] = struct{}{}
+		if strings.EqualFold(strings.TrimSpace(row.DNSSource), "dns+synack+norm") {
+			candidates.hasNormalized = true
+			candidates.nameNormalized[name] = true
+		}
 	}
 	if len(donors) == 0 {
 		return entries
@@ -875,12 +902,51 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		if candidates == nil {
 			continue
 		}
-		name := dnsDonationName(candidates)
+		name := dnsDonationName(candidates.names)
 		if name == "" {
 			continue
 		}
 		row.DNSName = name
 		row.DNSSource = "donated+ipport"
+		if candidates.nameNormalized[name] || candidates.hasNormalized {
+			row.DNSSource = "donated+ipport+norm"
+		}
+	}
+	return out
+}
+
+func mergeTopologyCNAMEChain(existing string, additions []string) string {
+	out := splitTopologyCNAMEChain(existing)
+	seen := make(map[string]struct{}, len(out)+len(additions))
+	for _, name := range out {
+		if name = canonicalDNSName(name); name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	for _, name := range additions {
+		name = canonicalDNSName(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return strings.Join(out, ";")
+}
+
+func splitTopologyCNAMEChain(chain string) []string {
+	if strings.TrimSpace(chain) == "" {
+		return nil
+	}
+	parts := strings.Split(chain, ";")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if name := canonicalDNSName(part); name != "" {
+			out = append(out, name)
+		}
 	}
 	return out
 }
