@@ -52,6 +52,24 @@ func TestParseStrictPortSet(t *testing.T) {
 	}
 }
 
+func TestEnsurePortExcluded(t *testing.T) {
+	got := ensurePortExcluded(nil, 123)
+	if _, ok := got[123]; !ok {
+		t.Fatalf("ensurePortExcluded(nil, 123) missing 123: %#v", got)
+	}
+
+	existing := map[uint16]struct{}{53: {}}
+	got = ensurePortExcluded(existing, 123)
+	if got == nil || len(got) != 2 {
+		t.Fatalf("ensurePortExcluded existing = %#v, want two ports", got)
+	}
+	for _, port := range []uint16{53, 123} {
+		if _, ok := got[port]; !ok {
+			t.Fatalf("ensurePortExcluded missing port %d: %#v", port, got)
+		}
+	}
+}
+
 func TestParseOptionalPortRangeSet(t *testing.T) {
 	tests := []struct {
 		name    string

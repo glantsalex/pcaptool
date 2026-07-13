@@ -73,7 +73,7 @@ pcaptool dnsextract \
   --net-id 401240-1 \
   --read-dir /path/to/pcaps \
   --dns-ip-file ~/.local/share/pcaptool/dns-ip.csv \
-  --exclude-ports 53,123 \
+  --exclude-ports 53 \
   --enforce-private-as-source
 ```
 
@@ -495,10 +495,14 @@ The tool scans the corpus and builds `DNSTransaction` objects from:
 
 This pass is where names and directly parsed DNS answer IPs are collected.
 
-### Pass 2.1: optional NTP-name filtering
+### Pass 2.1: optional NTP transport suppression
 
-By default, the tool removes NTP-like names using a heuristic filter.
-This is controlled by `--ignore-ntp`.
+By default, `--ignore-ntp` suppresses actual NTP transport edges by adding
+destination/server port `123` to topology correlation exclusions.
+
+DNS evidence is preserved even when a hostname looks time-related. For example,
+`time.example.com` can still produce `dns+synack` attribution for HTTPS or other
+non-NTP traffic when the DNS response directly maps the name to the destination IP.
 
 ### Pass 2.5: optional active resolve
 
@@ -579,13 +583,19 @@ Common source labels in `network-topology-matrix.txt` and related outputs:
 | `mid-session` | connection was observed without usable DNS attribution |
 | `donated+ipport` | unresolved row was completed from direct `dns+synack` or `sni+synack` evidence on the same `(dstIP, proto, port)` |
 | `donated+ipport+norm` | unresolved row was completed from normalized direct `dns+synack+norm` evidence on the same `(dstIP, proto, port)` |
+| `donated+ipport-private` | unresolved private-destination row was completed from direct `dns+synack` or `sni+synack` evidence on the same `(dstIP, proto, port)` when `--allow-private-dns-donation` is set |
+| `donated+ipport-private+norm` | unresolved private-destination row was completed from normalized direct `dns+synack+norm` evidence on the same `(dstIP, proto, port)` when `--allow-private-dns-donation` is set |
+| `donated+ip` | unresolved or CSV-fallback public IPv4 row was completed from the same run's unique direct `dns+synack` identity for that destination IP |
+| `donated+ip+norm` | unresolved or CSV-fallback public IPv4 row was completed from the same run's unique normalized direct `dns+synack+norm` identity for that destination IP |
 
 Important details:
 
 - CSV fallback, inferred DNS/SNI (`dns+conn+synack` / `sni+conn+synack`), active resolution, TLS certificate decoration (exact or fallback), and previously donated names never act as donors.
 - Donation is run-local only; it is not persisted back into `dns-ip.csv`.
-- Only direct `dns+synack`, normalized direct `dns+synack+norm`, and `sni+synack` rows can donate.
-- One donor name is copied in full. Multiple names donate only their deterministic longest common DNS-label suffix when it contains at least two labels; otherwise the row remains unresolved.
+- Exact `(dstIP, proto, port)` donation can use direct `dns+synack`, normalized direct `dns+synack+norm`, and `sni+synack` rows.
+- Public IPv4 destination donation across issuers/protocols/ports runs after exact donation and can use only current-run direct `dns+synack` and normalized direct `dns+synack+norm` rows. It fills unresolved rows and upgrades `csv+mid` / `csv+conn` fallback rows only when the destination IP has exactly one canonical effective DNS identity after normalization. Ambiguous IPs are left unchanged.
+- Private destination donation is disabled by default. When `--allow-private-dns-donation` is set, donation is still exact `(dstIP, proto, port)` only and still refuses CSV, PTR, TLS, active, inferred `+conn`, and previously donated sources. Private destinations never receive IP-level `donated+ip` attribution.
+- Exact donation keeps priority over IP-level donation. One exact donor name is copied in full. Multiple exact names donate only their deterministic longest common DNS-label suffix when it contains at least two labels; otherwise the row remains unresolved.
 - PTR completion runs after donation, cannot donate to other rows, and is not persisted back into `dns-ip.csv`.
 - Strong direct evidence suppresses weaker conflicting CSV fallback where possible.
 - DNS normalization rules apply after raw topology rows are built and before donation. They currently support only `type: dns_normalize`, only rewrite `dns+synack` rows, and preserve observed/normalized DNS metadata in JSON plus `dns-normalization-audit.csv`.
@@ -683,7 +693,7 @@ This policy is designed to reduce CSV contamination from:
 ### Practical heuristics
 
 - TLS SNI is used as a synthetic name source unless disabled
-- unresolved or `mid-session` rows can inherit a name from another issuer in the same run on an exact `(dstIP, proto, port)` match, but only from direct `dns+synack` / `sni+synack` evidence; multiple direct names must share a suffix of at least two labels
+- unresolved or `mid-session` rows can inherit a name from another issuer in the same run on an exact `(dstIP, proto, port)` match from direct `dns+synack` / `sni+synack` evidence; public IPv4 rows can also inherit across ports/protocols/issuers from a unique direct DNS identity for the same destination IP
 - truncated DNS responses are salvaged only up to the last complete answer; incomplete tail answers are ignored
 
 ### Known limitations
@@ -716,7 +726,8 @@ This policy is designed to reduce CSV contamination from:
 | `--radius-imsi` | bool | `false` | map issuer IPs to IMSI via RADIUS Accounting data |
 | `--only-tcp` | bool | `false` | only correlate TCP connections |
 | `--infer-dns-from-connections` | bool | `false` | opt in to issuer-only query/connection timing inference when DNS answers are missing |
-| `--ignore-ntp` | bool | `true` | drop NTP-like DNS names using heuristic filtering |
+| `--allow-private-dns-donation` | bool | `false` | opt in to exact private-destination topology donation from direct DNS/SNI evidence |
+| `--ignore-ntp` | bool | `true` | suppress NTP transport edges by excluding port `123`; DNS evidence is preserved |
 | `--dns-ip-file` | string | empty | path to fallback DNS/IP map used for last-resort attribution |
 | `--dns-normalization-rules` | string | empty | optional YAML file with `dns_normalize` rules applied to direct DNS topology rows before donation |
 | `--exclude-ports` | string | `53` | comma-separated destination/server ports to exclude from topology correlation |
@@ -769,13 +780,13 @@ pcaptool dnsextract \
   --net-id <stream-id> \
   --read-dir <pcap-dir> \
   --dns-ip-file ~/.local/share/pcaptool/dns-ip.csv \
-  --exclude-ports 53,123 \
+  --exclude-ports 53 \
   --enforce-private-as-source
 ```
 
 Reasoning:
 
-- exclude DNS and NTP from service topology by default
+- exclude DNS from service topology and let default `--ignore-ntp` suppress NTP port `123`
 - normalize ambiguous UDP directionality
 - allow stable CSV fallback and learning where evidence is strong
 

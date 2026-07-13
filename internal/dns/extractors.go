@@ -888,13 +888,14 @@ func (e *sniExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 		RequestTime:     ts.UTC(),
 		IssuerIP:        append(net.IP(nil), srcIP...),
 		DNSName:         sni,
-		ResolvedIPs:     []net.IP{append(net.IP(nil), dstIP...)},
+		NameEvidence:    EvSNI,
 		ResolverIP:      nil,
 		DestinationPort: &dp, // already resolved for synthetic tx
 		PCAPFile:        filepath.Base(fileBase),
 		Candidates:      nil,
 		ProtocolL4:      L4ProtoTCP,
 	}
+	tx.AddResolvedIP(dstIP, EvSNI|EvObservedConn)
 
 	e.out = append(e.out, tx)
 }

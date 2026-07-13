@@ -39,9 +39,10 @@ func BuildTransactionsFromEvents(events []pce.Event) ([]*DNSTransaction, error) 
 			}
 			if _, exists := txMap[key]; !exists {
 				txMap[key] = &DNSTransaction{
-					RequestTime: ev.Timestamp.UTC(),
-					IssuerIP:    append([]byte{}, ev.SrcIP...),
-					DNSName:     ev.DNSQName,
+					RequestTime:  ev.Timestamp.UTC(),
+					IssuerIP:     append([]byte{}, ev.SrcIP...),
+					DNSName:      ev.DNSQName,
+					NameEvidence: EvDNSAnswer,
 				}
 			}
 		case pce.EventDNSResponse:
@@ -70,9 +71,9 @@ func BuildTransactionsFromEvents(events []pce.Event) ([]*DNSTransaction, error) 
 				continue
 			}
 
-			// Append answers
+			found.NameEvidence |= EvDNSAnswer
 			for _, ip := range ev.DNSAAnswers {
-				found.ResolvedIPs = append(found.ResolvedIPs, append([]byte{}, ip...))
+				found.AddResolvedIP(ip, EvDNSAnswer)
 			}
 			if len(found.ResolvedIPs) > 0 {
 				found.ResolverIP = append(net.IP{}, ev.SrcIP...)

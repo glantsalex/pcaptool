@@ -292,7 +292,8 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 		tx           *DNSTransaction
 		cand         ConnCandidate
 		usedDst4     net.IP // dst IPv4 actually used by the observed connection
-		fromFallback bool   // true if issuer-only fallback matched (no direct issuer+dstIP match)
+		observedAt   time.Time
+		fromFallback bool // true if issuer-only fallback matched (no direct issuer+dstIP match)
 	}
 
 	updates := make(chan update, 4096)
@@ -348,6 +349,14 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 						if !had && now {
 							debugDNSFallbackf("backfilled-ip issuer=%s name=%q ip=%s ev=%s", u.tx.IssuerIP, u.tx.DNSName, key, EvidenceString(u.tx.ResolvedIPEvidence[key]))
 						}
+					}
+					if !u.fromFallback && u.tx.ResolvedIPEvidence != nil && u.tx.ResolvedIPEvidence[key]&EvDNSAnswer != 0 {
+						u.tx.AddObservedEndpointBinding(ObservedEndpointBinding{
+							DstIP:      key,
+							Protocol:   u.cand.Proto,
+							Port:       u.cand.Port,
+							ObservedAt: u.observedAt,
+						})
 					}
 				}
 			}
@@ -621,6 +630,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 						Proto: proto,
 					},
 					usedDst4:     usedDst4,
+					observedAt:   ts,
 					fromFallback: fromFallback,
 				}:
 				}

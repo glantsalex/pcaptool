@@ -550,7 +550,8 @@ func restoreDNSExtractFlags(t *testing.T) {
 	oldReadDir, oldFleet := flagReadDir, flagFleet
 	oldFormat, oldExportCSV := flagFormat, flagExportCSV
 	oldConnectivityShort, oldRadiusIMSI := flagConnectivityShort, flagRadiusIMSI
-	oldOnlyTCP, oldInferDNSFromConnections, oldIgnoreNTP := flagOnlyTCP, flagInferDNSFromConnections, flagIgnoreNTP
+	oldOnlyTCP, oldInferDNSFromConnections := flagOnlyTCP, flagInferDNSFromConnections
+	oldAllowPrivateDNSDonation, oldIgnoreNTP := flagAllowPrivateDNSDonation, flagIgnoreNTP
 	oldExcludePorts, oldFTPControlPorts := flagExcludePorts, flagFTPControlPorts
 	oldFTPPassiveMinPort := flagFTPPassiveMinPort
 	oldServerSummaryExcludeUDPPorts := flagServerSummaryExcludeUDPPorts
@@ -572,7 +573,8 @@ func restoreDNSExtractFlags(t *testing.T) {
 		flagReadDir, flagFleet = oldReadDir, oldFleet
 		flagFormat, flagExportCSV = oldFormat, oldExportCSV
 		flagConnectivityShort, flagRadiusIMSI = oldConnectivityShort, oldRadiusIMSI
-		flagOnlyTCP, flagInferDNSFromConnections, flagIgnoreNTP = oldOnlyTCP, oldInferDNSFromConnections, oldIgnoreNTP
+		flagOnlyTCP, flagInferDNSFromConnections = oldOnlyTCP, oldInferDNSFromConnections
+		flagAllowPrivateDNSDonation, flagIgnoreNTP = oldAllowPrivateDNSDonation, oldIgnoreNTP
 		flagExcludePorts, flagFTPControlPorts = oldExcludePorts, oldFTPControlPorts
 		flagFTPPassiveMinPort = oldFTPPassiveMinPort
 		flagServerSummaryExcludeUDPPorts = oldServerSummaryExcludeUDPPorts
@@ -630,6 +632,17 @@ func TestInferDNSFromConnectionsFlagDefault(t *testing.T) {
 	flag := dnsextractCommandForTest(t).Flags().Lookup("infer-dns-from-connections")
 	if flag == nil {
 		t.Fatal("--infer-dns-from-connections flag not found")
+	}
+	if flag.DefValue != "false" || flag.Value.Type() != "bool" {
+		t.Fatalf("flag default/type = %q/%q, want false/bool", flag.DefValue, flag.Value.Type())
+	}
+}
+
+func TestAllowPrivateDNSDonationFlagDefault(t *testing.T) {
+	restoreDNSExtractFlags(t)
+	flag := dnsextractCommandForTest(t).Flags().Lookup("allow-private-dns-donation")
+	if flag == nil {
+		t.Fatal("--allow-private-dns-donation flag not found")
 	}
 	if flag.DefValue != "false" || flag.Value.Type() != "bool" {
 		t.Fatalf("flag default/type = %q/%q, want false/bool", flag.DefValue, flag.Value.Type())
@@ -858,20 +871,25 @@ func writeDNSArtifactTestPCAP(t *testing.T, path string) {
 
 func buildDNSArtifactTestTCPPacket(t *testing.T, response bool) []byte {
 	t.Helper()
-	srcIP := net.ParseIP("10.0.0.10").To4()
-	dstIP := net.ParseIP("8.8.8.8").To4()
 	srcPort, dstPort := layers.TCPPort(40000), layers.TCPPort(443)
 	if response {
-		srcIP, dstIP = dstIP, srcIP
 		srcPort, dstPort = dstPort, srcPort
+		return buildTCPPacket(t, "8.8.8.8", "10.0.0.10", uint16(srcPort), uint16(dstPort), true, true)
 	}
+	return buildTCPPacket(t, "10.0.0.10", "8.8.8.8", uint16(srcPort), uint16(dstPort), true, false)
+}
+
+func buildTCPPacket(t *testing.T, src, dst string, srcPort, dstPort uint16, syn, ack bool) []byte {
+	t.Helper()
+	srcIP := net.ParseIP(src).To4()
+	dstIP := net.ParseIP(dst).To4()
 	eth := &layers.Ethernet{
 		SrcMAC:       net.HardwareAddr{0, 1, 2, 3, 4, 5},
 		DstMAC:       net.HardwareAddr{6, 7, 8, 9, 10, 11},
 		EthernetType: layers.EthernetTypeIPv4,
 	}
 	ip4 := &layers.IPv4{Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP, SrcIP: srcIP, DstIP: dstIP}
-	tcp := &layers.TCP{SrcPort: srcPort, DstPort: dstPort, SYN: true, ACK: response, Seq: 1}
+	tcp := &layers.TCP{SrcPort: layers.TCPPort(srcPort), DstPort: layers.TCPPort(dstPort), SYN: syn, ACK: ack, Seq: 1}
 	if err := tcp.SetNetworkLayerForChecksum(ip4); err != nil {
 		t.Fatalf("set TCP checksum network layer: %v", err)
 	}
@@ -888,21 +906,15 @@ func buildDNSArtifactTestTCPPacket(t *testing.T, response bool) []byte {
 	return buf.Bytes()
 }
 
-func buildDNSArtifactTestQuery(name string) []byte {
-	msg := make([]byte, 12)
-	binary.BigEndian.PutUint16(msg[0:2], 0x090a)
-	binary.BigEndian.PutUint16(msg[2:4], 0x0100)
-	binary.BigEndian.PutUint16(msg[4:6], 1)
-	for _, label := range strings.Split(name, ".") {
-		msg = append(msg, byte(len(label)))
-		msg = append(msg, label...)
-	}
-	msg = append(msg, 0, 0, byte(layers.DNSTypeA), 0, 1)
-	return msg
+func buildUDPPacket(t *testing.T, src, dst string, srcPort, dstPort uint16) []byte {
+	t.Helper()
+	return buildUDPPacketWithPayload(t, src, dst, srcPort, dstPort, nil)
 }
 
-func buildDNSArtifactTestPacket(t *testing.T, payload []byte) []byte {
+func buildUDPPacketWithPayload(t *testing.T, src, dst string, srcPort, dstPort uint16, payload []byte) []byte {
 	t.Helper()
+	srcIP := net.ParseIP(src).To4()
+	dstIP := net.ParseIP(dst).To4()
 	eth := &layers.Ethernet{
 		SrcMAC:       net.HardwareAddr{0, 1, 2, 3, 4, 5},
 		DstMAC:       net.HardwareAddr{6, 7, 8, 9, 10, 11},
@@ -913,25 +925,238 @@ func buildDNSArtifactTestPacket(t *testing.T, payload []byte) []byte {
 		IHL:      5,
 		TTL:      64,
 		Protocol: layers.IPProtocolUDP,
-		SrcIP:    net.ParseIP("10.0.0.10").To4(),
-		DstIP:    net.ParseIP("192.0.2.53").To4(),
+		SrcIP:    srcIP,
+		DstIP:    dstIP,
 	}
-	udp := &layers.UDP{SrcPort: 53000, DstPort: 53}
+	udp := &layers.UDP{SrcPort: layers.UDPPort(srcPort), DstPort: layers.UDPPort(dstPort)}
 	if err := udp.SetNetworkLayerForChecksum(ip4); err != nil {
 		t.Fatalf("set UDP checksum network layer: %v", err)
+	}
+	layersToSerialize := []gopacket.SerializableLayer{eth, ip4, udp}
+	if len(payload) > 0 {
+		layersToSerialize = append(layersToSerialize, gopacket.Payload(payload))
 	}
 	buf := gopacket.NewSerializeBuffer()
 	if err := gopacket.SerializeLayers(
 		buf,
 		gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true},
-		eth,
-		ip4,
-		udp,
-		gopacket.Payload(payload),
+		layersToSerialize...,
 	); err != nil {
-		t.Fatalf("serialize test DNS packet: %v", err)
+		t.Fatalf("serialize test UDP packet: %v", err)
 	}
 	return buf.Bytes()
+}
+
+func buildDNSArtifactTestQuery(name string) []byte {
+	return buildDNSQueryPayload(0x090a, name)
+}
+
+func buildDNSQueryPayload(id uint16, name string) []byte {
+	msg := make([]byte, 12)
+	binary.BigEndian.PutUint16(msg[0:2], id)
+	binary.BigEndian.PutUint16(msg[2:4], 0x0100)
+	binary.BigEndian.PutUint16(msg[4:6], 1)
+	for _, label := range strings.Split(name, ".") {
+		msg = append(msg, byte(len(label)))
+		msg = append(msg, label...)
+	}
+	msg = append(msg, 0, 0, byte(layers.DNSTypeA), 0, 1)
+	return msg
+}
+
+func buildDNSAResponsePayload(id uint16, name, ip string) []byte {
+	msg := make([]byte, 12)
+	binary.BigEndian.PutUint16(msg[0:2], id)
+	binary.BigEndian.PutUint16(msg[2:4], 0x8180)
+	binary.BigEndian.PutUint16(msg[4:6], 1)
+	binary.BigEndian.PutUint16(msg[6:8], 1)
+	for _, label := range strings.Split(name, ".") {
+		msg = append(msg, byte(len(label)))
+		msg = append(msg, label...)
+	}
+	msg = append(msg, 0, 0, byte(layers.DNSTypeA), 0, 1)
+	msg = append(msg, 0xc0, 0x0c)
+	msg = append(msg, 0, byte(layers.DNSTypeA), 0, 1)
+	msg = append(msg, 0, 0, 0, 60)
+	msg = append(msg, 0, 4)
+	msg = append(msg, net.ParseIP(ip).To4()...)
+	return msg
+}
+
+func buildDNSArtifactTestPacket(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	return buildDNSPacket(t, payload, "10.0.0.10", "192.0.2.53", 53000, 53)
+}
+
+func buildDNSPacket(t *testing.T, payload []byte, src, dst string, srcPort, dstPort uint16) []byte {
+	t.Helper()
+	return buildUDPPacketWithPayload(t, src, dst, srcPort, dstPort, payload)
+}
+
+type timestampedPacket struct {
+	ts   time.Time
+	data []byte
+}
+
+func writePacketsToPCAP(t *testing.T, path string, packets []timestampedPacket) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create test pcap: %v", err)
+	}
+	w := pcapgo.NewWriter(f)
+	if err := w.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {
+		f.Close()
+		t.Fatalf("write test pcap header: %v", err)
+	}
+	for i, packet := range packets {
+		if err := w.WritePacket(gopacket.CaptureInfo{
+			Timestamp:     packet.ts,
+			CaptureLength: len(packet.data),
+			Length:        len(packet.data),
+		}, packet.data); err != nil {
+			f.Close()
+			t.Fatalf("write test pcap packet %d: %v", i, err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close test pcap: %v", err)
+	}
+}
+
+func runDNSExtractForNTPRegression(t *testing.T, writePCAP func(*testing.T, string)) []dns.TopologyEntry {
+	t.Helper()
+	restoreDNSExtractFlags(t)
+	resolveDNSNamesIPv4WithAudit = func(
+		context.Context,
+		[]string,
+		dns.ResolveUnresolvedOptions,
+		dns.IPv4LookupFunc,
+	) ([]dns.DNSNameIPv4Resolution, []dns.ActiveResolveAuditRecord, error) {
+		t.Fatal("active resolver called while --active-resolve=false")
+		return nil, nil, nil
+	}
+
+	readDir := t.TempDir()
+	writePCAP(t, filepath.Join(readDir, "capture.pcap"))
+	outputRoot := t.TempDir()
+
+	flagReadDir = readDir
+	flagNetID = "net"
+	flagOutputRoot = outputRoot
+	flagFormat = "table"
+	flagFleet = ""
+	flagExportCSV = ""
+	flagConnectivityShort = false
+	flagRadiusIMSI = false
+	flagOnlyTCP = false
+	flagInferDNSFromConnections = false
+	flagAllowPrivateDNSDonation = false
+	flagIgnoreNTP = true
+	flagExcludePorts = "53"
+	flagFTPControlPorts = "21,990"
+	flagFTPPassiveMinPort = "30000"
+	flagServerSummaryExcludeUDPPorts = "33434-33534"
+	flagDNSIPFile = ""
+	flagDNSNormalizationRules = ""
+	flagTopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+	flagActiveResolve = false
+	flagActiveResolvers = ""
+	flagReverseDNSLookup = false
+	flagTLSCertLookup = false
+	flagTLSCertLookupTimeoutSeconds = 15
+	flagDisableSNI = true
+	flagUnsorted = false
+	flagDebug = false
+	flagManifestOut = ""
+	flagPostHooks = nil
+	flagFleetScanWorkers = 0
+	flagEnforcePrivateAsSource = false
+
+	if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
+		t.Fatalf("runDNSExtract: %v", err)
+	}
+
+	runDir := findSingleRunDir(t, outputRoot, "net")
+	matrixBytes, err := os.ReadFile(filepath.Join(runDir, "network-topology-matrix.json"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read topology matrix JSON: %v", err)
+	}
+
+	var payload struct {
+		Entries []struct {
+			IssuerIP      string `json:"issuer_ip"`
+			DestinationIP string `json:"destination_ip"`
+			DNSName       string `json:"dns_name"`
+			DNSSource     string `json:"dns_source"`
+			Protocol      string `json:"protocol"`
+			Port          uint16 `json:"port"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(matrixBytes, &payload); err != nil {
+		t.Fatalf("unmarshal topology matrix JSON: %v", err)
+	}
+	entries := make([]dns.TopologyEntry, 0, len(payload.Entries))
+	for _, entry := range payload.Entries {
+		entries = append(entries, dns.TopologyEntry{
+			IssuerIP:      entry.IssuerIP,
+			DestinationIP: entry.DestinationIP,
+			DNSName:       entry.DNSName,
+			DNSSource:     entry.DNSSource,
+			Protocol:      entry.Protocol,
+			Port:          entry.Port,
+		})
+	}
+	return entries
+}
+
+func assertTopologyEntry(t *testing.T, entries []dns.TopologyEntry, want dns.TopologyEntry) {
+	t.Helper()
+	for _, got := range entries {
+		if got.IssuerIP == want.IssuerIP &&
+			got.DestinationIP == want.DestinationIP &&
+			got.Protocol == want.Protocol &&
+			got.Port == want.Port {
+			if got.DNSName != want.DNSName || got.DNSSource != want.DNSSource {
+				t.Fatalf("topology row for %s -> %s %s/%d = dns %q source %q, want dns %q source %q; all entries %#v",
+					want.IssuerIP,
+					want.DestinationIP,
+					want.Protocol,
+					want.Port,
+					got.DNSName,
+					got.DNSSource,
+					want.DNSName,
+					want.DNSSource,
+					entries,
+				)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing topology row for %s -> %s %s/%d; entries %#v", want.IssuerIP, want.DestinationIP, want.Protocol, want.Port, entries)
+}
+
+func writeTimeNameDNSAndTCPPCAP(t *testing.T, path, name, dst string, port uint16) {
+	t.Helper()
+	writePacketsToPCAP(t, path, []timestampedPacket{
+		{ts: time.Date(2026, 7, 11, 23, 35, 4, 300_000_000, time.UTC), data: buildDNSPacket(t, buildDNSQueryPayload(0x9001, name), "10.245.214.104", "192.0.2.53", 53000, 53)},
+		{ts: time.Date(2026, 7, 11, 23, 35, 4, 400_000_000, time.UTC), data: buildDNSPacket(t, buildDNSAResponsePayload(0x9001, name, dst), "192.0.2.53", "10.245.214.104", 53, 53000)},
+		{ts: time.Date(2026, 7, 11, 23, 35, 4, 550_000_000, time.UTC), data: buildTCPPacket(t, "10.245.214.104", dst, 40000, port, true, false)},
+		{ts: time.Date(2026, 7, 11, 23, 35, 4, 560_000_000, time.UTC), data: buildTCPPacket(t, dst, "10.245.214.104", port, 40000, true, true)},
+	})
+}
+
+func writeTimeNameDNSAndUDPPCAP(t *testing.T, path, name, dst string, port uint16) {
+	t.Helper()
+	writePacketsToPCAP(t, path, []timestampedPacket{
+		{ts: time.Date(2026, 7, 11, 23, 35, 4, 300_000_000, time.UTC), data: buildDNSPacket(t, buildDNSQueryPayload(0x9001, name), "10.245.214.104", "192.0.2.53", 53000, 53)},
+		{ts: time.Date(2026, 7, 11, 23, 35, 4, 400_000_000, time.UTC), data: buildDNSPacket(t, buildDNSAResponsePayload(0x9001, name, dst), "192.0.2.53", "10.245.214.104", 53, 53000)},
+		{ts: time.Date(2026, 7, 11, 23, 35, 4, 550_000_000, time.UTC), data: buildUDPPacket(t, "10.245.214.104", dst, 40000, port)},
+		{ts: time.Date(2026, 7, 11, 23, 35, 4, 560_000_000, time.UTC), data: buildUDPPacket(t, dst, "10.245.214.104", port, 40000)},
+	})
 }
 
 func unresolvedDNSNamesFromTable(table string) []string {
@@ -1102,6 +1327,48 @@ func TestDnsextractFleetScanWorkersPassedToSYNTrailScanner(t *testing.T) {
 	}
 	if len(artifacts) == 0 {
 		t.Fatal("runSYNTrailSidecar() returned no artifacts")
+	}
+}
+
+func TestIgnoreNTPDoesNotDropNonNTPTimeNamedDirectDNSAttribution(t *testing.T) {
+	entries := runDNSExtractForNTPRegression(t, func(t *testing.T, path string) {
+		writeTimeNameDNSAndTCPPCAP(t, path, "time.samsungcloudsolution.com", "23.97.174.104", 443)
+	})
+
+	assertTopologyEntry(t, entries, dns.TopologyEntry{
+		IssuerIP:      "10.245.214.104",
+		DestinationIP: "23.97.174.104",
+		DNSName:       "time.samsungcloudsolution.com",
+		DNSSource:     "dns+synack",
+		Protocol:      "tcp",
+		Port:          443,
+	})
+}
+
+func TestTimePrefixedDNSCanStillAttributeHTTPS(t *testing.T) {
+	entries := runDNSExtractForNTPRegression(t, func(t *testing.T, path string) {
+		writeTimeNameDNSAndTCPPCAP(t, path, "time.example.com", "1.2.3.4", 443)
+	})
+
+	assertTopologyEntry(t, entries, dns.TopologyEntry{
+		IssuerIP:      "10.245.214.104",
+		DestinationIP: "1.2.3.4",
+		DNSName:       "time.example.com",
+		DNSSource:     "dns+synack",
+		Protocol:      "tcp",
+		Port:          443,
+	})
+}
+
+func TestIgnoreNTPStillSuppressesActualNTPTransport(t *testing.T) {
+	entries := runDNSExtractForNTPRegression(t, func(t *testing.T, path string) {
+		writeTimeNameDNSAndUDPPCAP(t, path, "time.example.com", "1.2.3.4", 123)
+	})
+
+	for _, entry := range entries {
+		if entry.DestinationIP == "1.2.3.4" && entry.Protocol == "udp" && entry.Port == 123 {
+			t.Fatalf("NTP transport edge was not suppressed: %#v", entry)
+		}
 	}
 }
 

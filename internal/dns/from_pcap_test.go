@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"encoding/binary"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,108 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
 )
+
+func TestDNSAnswerCanAttributeMultipleObservedPorts(t *testing.T) {
+	const (
+		issuer = "10.245.214.104"
+		dst    = "23.97.174.104"
+		name   = "time.samsungcloudsolution.com"
+	)
+	dnsTime := time.Date(2026, 7, 11, 23, 35, 4, 400_000_000, time.UTC)
+	t443 := dnsTime.Add(178 * time.Millisecond)
+	t80 := dnsTime.Add(183 * time.Millisecond)
+
+	tx := &DNSTransaction{
+		RequestTime:  dnsTime,
+		IssuerIP:     net.ParseIP(issuer),
+		DNSName:      name,
+		NameEvidence: EvDNSAnswer,
+	}
+	tx.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer)
+
+	pcapPath := writeMultiPortBindingPCAP(t, issuer, dst, t443, t80)
+	edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(
+		context.Background(),
+		[]string{pcapPath},
+		[]*DNSTransaction{tx},
+		false,
+		false,
+		nil,
+		false,
+		nil,
+		nil,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("AttachConnectionsAndCollectEdgesFromPCAPs: %v", err)
+	}
+
+	if tx.DestinationPort == nil || *tx.DestinationPort != 443 {
+		t.Fatalf("legacy DestinationPort = %#v, want 443", tx.DestinationPort)
+	}
+	if tx.ProtocolL4 != L4ProtoTCP {
+		t.Fatalf("legacy ProtocolL4 = %q, want tcp", tx.ProtocolL4)
+	}
+	if got := len(tx.ObservedEndpointBindings); got != 2 {
+		t.Fatalf("observed endpoint bindings len = %d, want 2: %#v", got, tx.ObservedEndpointBindings)
+	}
+	for _, want := range []ObservedEndpointBinding{
+		{DstIP: dst, Protocol: L4ProtoTCP, Port: 443, ObservedAt: t443},
+		{DstIP: dst, Protocol: L4ProtoTCP, Port: 80, ObservedAt: t80},
+	} {
+		if !tx.HasObservedEndpointBinding(want.DstIP, want.Protocol, want.Port, want.ObservedAt) {
+			t.Fatalf("missing observed binding %+v in %#v", want, tx.ObservedEndpointBindings)
+		}
+	}
+
+	opt := DefaultTopologyBuildOptions()
+	opt.MaxDNSAge = time.Second
+	matrix := BuildNetworkTopologyMatrixEntriesWithOptions([]*DNSTransaction{tx}, edges, nil, nil, opt)
+	for _, port := range []uint16{443, 80} {
+		row, ok := findTopologyRow(matrix, issuer, dst, "tcp", port)
+		if !ok {
+			t.Fatalf("missing tcp/%d row; matrix %#v", port, matrix)
+		}
+		if row.DNSName != name || row.DNSSource != "dns+synack" {
+			t.Fatalf("tcp/%d row = %#v, want %s dns+synack; matrix %#v", port, row, name, matrix)
+		}
+	}
+}
+
+func writeMultiPortBindingPCAP(t *testing.T, issuer, dst string, t443, t80 time.Time) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "multi-port-binding.pcap")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create multi-port binding pcap: %v", err)
+	}
+	defer f.Close()
+
+	w := pcapgo.NewWriter(f)
+	if err := w.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {
+		t.Fatalf("write multi-port binding pcap header: %v", err)
+	}
+
+	packets := []struct {
+		ts   time.Time
+		data []byte
+	}{
+		{ts: t443, data: buildConnectionInferenceTestTCPPacket(t, issuer, dst, 41000, 443, true, false)},
+		{ts: t443.Add(10 * time.Millisecond), data: buildConnectionInferenceTestTCPPacket(t, dst, issuer, 443, 41000, true, true)},
+		{ts: t80, data: buildConnectionInferenceTestTCPPacket(t, issuer, dst, 41001, 80, true, false)},
+		{ts: t80.Add(10 * time.Millisecond), data: buildConnectionInferenceTestTCPPacket(t, dst, issuer, 80, 41001, true, true)},
+	}
+	for i, packet := range packets {
+		if err := w.WritePacket(gopacket.CaptureInfo{
+			Timestamp:     packet.ts,
+			CaptureLength: len(packet.data),
+			Length:        len(packet.data),
+		}, packet.data); err != nil {
+			t.Fatalf("write multi-port binding packet %d: %v", i, err)
+		}
+	}
+	return path
+}
 
 func TestAllowConnectionInferredDNSBackfillWithCSVGuard(t *testing.T) {
 	tests := []struct {

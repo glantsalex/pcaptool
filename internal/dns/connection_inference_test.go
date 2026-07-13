@@ -46,6 +46,7 @@ func TestAttachConnectionsInferenceFlagControlsIssuerOnlyFallback(t *testing.T) 
 		wantSource     string
 		wantName       string
 		wantResolvedIP bool
+		wantBindings   int
 	}{
 		{
 			name:       "disabled skips query-only fallback",
@@ -71,6 +72,7 @@ func TestAttachConnectionsInferenceFlagControlsIssuerOnlyFallback(t *testing.T) 
 			wantName:       "query-only.example.com",
 			wantSource:     "dns+synack",
 			wantResolvedIP: true,
+			wantBindings:   1,
 		},
 	}
 
@@ -105,6 +107,9 @@ func TestAttachConnectionsInferenceFlagControlsIssuerOnlyFallback(t *testing.T) 
 			}
 			if got := containsConnectionInferenceTestIP(tt.txs[0].ResolvedIPs, dst); got != tt.wantResolvedIP {
 				t.Fatalf("resolved IP present=%v, want %v; tx=%#v", got, tt.wantResolvedIP, tt.txs[0])
+			}
+			if got := len(tt.txs[0].ObservedEndpointBindings); got != tt.wantBindings {
+				t.Fatalf("observed endpoint bindings=%d, want %d; bindings=%#v", got, tt.wantBindings, tt.txs[0].ObservedEndpointBindings)
 			}
 		})
 	}

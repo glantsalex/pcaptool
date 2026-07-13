@@ -41,6 +41,16 @@ func parsePortSet(s string) (map[uint16]struct{}, error) {
 	return out, nil
 }
 
+func ensurePortExcluded(ports map[uint16]struct{}, port uint16) map[uint16]struct{} {
+	if ports == nil {
+		ports = make(map[uint16]struct{}, 1)
+	}
+	if port != 0 {
+		ports[port] = struct{}{}
+	}
+	return ports
+}
+
 func parseStrictPortSet(s string) (map[uint16]struct{}, error) {
 	out := make(map[uint16]struct{})
 	if strings.TrimSpace(s) == "" {

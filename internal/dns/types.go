@@ -39,6 +39,12 @@ type DNSTransaction struct {
 	PCAPFile   string          // for table output
 	Candidates []ConnCandidate // filled in AttachConnectionsFromPCAPs
 
+	// ObservedEndpointBindings records exact directly observed endpoint
+	// connections for this DNS answer. Unlike DestinationPort/ProtocolL4, this
+	// can hold multiple protocol/port observations for one DNS name -> IP
+	// transaction. Only direct issuer+resolved-IP matches should populate it.
+	ObservedEndpointBindings []ObservedEndpointBinding
+
 	// By default this will be IssuerIP.String(), but when --radius-imsi is
 	// enabled, and there is a matching IMSI, this will be that IMSI.
 	IssuerLabel string
@@ -96,6 +102,17 @@ type ConnCandidate struct {
 	Proto L4Proto
 }
 
+// ObservedEndpointBinding is a durable exact endpoint observation associated
+// with a DNS answer. ObservedAt is the packet observation timestamp used by the
+// topology edge, so NTM matching can require the same observed event rather
+// than broad tuple-only membership.
+type ObservedEndpointBinding struct {
+	DstIP      string
+	Protocol   L4Proto
+	Port       uint16
+	ObservedAt time.Time
+}
+
 // Stats key: (DNS name, port)
 type NamePortKey struct {
 	Name string
@@ -151,6 +168,51 @@ func (tx *DNSTransaction) AddResolvedIP(ip net.IP, ev Evidence) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	tx.addResolvedIPLocked(ip, ev)
+}
+
+// AddObservedEndpointBinding records a direct endpoint observation for this
+// transaction and deduplicates exact duplicate dst/proto/port/timestamp values.
+func (tx *DNSTransaction) AddObservedEndpointBinding(binding ObservedEndpointBinding) {
+	ip, ok := canonicalIPv4String(binding.DstIP)
+	if !ok || binding.Protocol == L4ProtoUnknown || binding.Port == 0 || binding.ObservedAt.IsZero() {
+		return
+	}
+	binding.DstIP = ip
+	binding.ObservedAt = binding.ObservedAt.UTC()
+
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	for _, existing := range tx.ObservedEndpointBindings {
+		if existing.DstIP == binding.DstIP &&
+			existing.Protocol == binding.Protocol &&
+			existing.Port == binding.Port &&
+			existing.ObservedAt.Equal(binding.ObservedAt) {
+			return
+		}
+	}
+	tx.ObservedEndpointBindings = append(tx.ObservedEndpointBindings, binding)
+}
+
+// HasObservedEndpointBinding reports whether this transaction has a direct
+// endpoint observation matching the exact topology edge observation.
+func (tx *DNSTransaction) HasObservedEndpointBinding(dstIP string, proto L4Proto, port uint16, observedAt time.Time) bool {
+	ip, ok := canonicalIPv4String(dstIP)
+	if !ok || proto == L4ProtoUnknown || port == 0 || observedAt.IsZero() {
+		return false
+	}
+	observedAt = observedAt.UTC()
+
+	tx.mu.RLock()
+	defer tx.mu.RUnlock()
+	for _, binding := range tx.ObservedEndpointBindings {
+		if binding.DstIP == ip &&
+			binding.Protocol == proto &&
+			binding.Port == port &&
+			binding.ObservedAt.Equal(observedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 // MarkObservedConn ORs EvObservedConn for ip if present; if ip missing and allowAdd is true, it will add it.

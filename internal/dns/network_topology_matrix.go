@@ -192,15 +192,31 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		return out
 	}
 
-	compatScore := func(tx *DNSTransaction, e connectivity.Edge) (int, bool) {
+	compatScore := func(tx *DNSTransaction, e connectivity.Edge, edgeTS time.Time, dstIP string) (int, bool) {
 		if tx == nil {
 			return 0, false
 		}
 		score := 0
+		p := edgeProto(e)
+
+		// Durable endpoint bindings are exact direct connection observations.
+		// When present, require the binding to match this edge tuple and this
+		// specific observed timestamp. This lets one DNS answer attribute
+		// multiple directly observed ports without falling back to tuple-only
+		// "DNS name -> IP labels every port" behavior.
+		if len(tx.ObservedEndpointBindings) > 0 {
+			if p == L4ProtoUnknown || !tx.HasObservedEndpointBinding(dstIP, p, e.Port, edgeTS) {
+				return 0, false
+			}
+			score += 4
+			if tx.NameEvidence&EvSNI != 0 {
+				score++
+			}
+			return score, true
+		}
 
 		// If tx already has protocol selected, require it to match.
 		if tx.ProtocolL4 != L4ProtoUnknown {
-			p := edgeProto(e)
 			if p == L4ProtoUnknown || tx.ProtocolL4 != p {
 				return 0, false
 			}
@@ -223,7 +239,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		return score, true
 	}
 
-	pickBestTxForEdge := func(bucket []*DNSTransaction, e connectivity.Edge) (*DNSTransaction, time.Time) {
+	pickBestTxForEdge := func(bucket []*DNSTransaction, e connectivity.Edge, dstIP string) (*DNSTransaction, time.Time) {
 		if len(bucket) == 0 {
 			return nil, time.Time{}
 		}
@@ -258,7 +274,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 
 			for i := lo; i < hi; i++ {
 				tx := bucket[i]
-				score, ok := compatScore(tx, e)
+				score, ok := compatScore(tx, e, edgeTS, dstIP)
 				if !ok {
 					continue
 				}
@@ -359,72 +375,82 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			})
 		}
 
+		// Canonical dstIP is used for map keys.
+		bestTx, matchedObservedAt := pickBestTxForEdge(txByIssuerDst[joinKey{issuer: issuerRaw, dstIP: dstIP}], e, dstIP)
+		if !matchedObservedAt.IsZero() {
+			observedAt = matchedObservedAt
+		}
+		if bestTx != nil {
+			dnsName := normalize(bestTx.DNSName)
+			cnameChain := append([]string(nil), bestTx.CNAMETargets...)
+			src := ""
+			if dnsName != "" {
+				ev := bestTx.NameEvidence
+				if bestTx.ResolvedIPEvidence != nil {
+					ev |= bestTx.ResolvedIPEvidence[dstIP]
+				}
+				if ev != EvNone {
+					ev |= EvObservedConn
+					src = EvidenceString(ev)
+				}
+			}
+			if dnsName != "" && src != "" {
+				beforeLen := len(out)
+				emit(dnsName, src)
+				if len(cnameChain) > 0 && len(out) > 0 {
+					idx := len(out) - 1
+					if len(out) == beforeLen {
+						key := issuer + "|" + dstIP + "|" + dnsName + "|" + proto + "|" + itoa16(e.Port)
+						if seenIdx, ok := seen[key]; ok {
+							idx = seenIdx
+						}
+					}
+					out[idx].CNAMEChain = mergeTopologyCNAMEChain(out[idx].CNAMEChain, cnameChain)
+				}
+				continue
+			}
+		}
+
 		// --------------------------------------------------------
 		// Never infer/attach DNS for private destination IPs.
+		//
+		// Exact evidence-backed DNS answer matches are handled above via
+		// txByIssuerDst for both public and private destinations. If no
+		// exact transaction matched, or a matched transaction had no
+		// usable source evidence, keep the previous safe behavior: no
+		// CSV/PTR/TLS/active/heuristic fallback for private destinations.
 		// --------------------------------------------------------
 		if dstParsed.IsPrivate() {
 			emit("", "")
 			continue
 		}
 
-		// Canonical dstIP is used for map keys.
-		bestTx, matchedObservedAt := pickBestTxForEdge(txByIssuerDst[joinKey{issuer: issuerRaw, dstIP: dstIP}], e)
-		if !matchedObservedAt.IsZero() {
-			observedAt = matchedObservedAt
-		}
-		if bestTx == nil {
-			issuerIP := net.ParseIP(issuerRaw)
+		issuerIP := net.ParseIP(issuerRaw)
 
-			// --------------------------------------------------------
-			// MID-SESSION PRIVATE → PUBLIC FALLBACK
-			// --------------------------------------------------------
-			if issuerIP != nil && issuerIP.IsPrivate() && !dstParsed.IsPrivate() {
-				// Try CSV attribution first.
-				// For mid-session rows, keep full FQDN when CSV has exactly one name.
-				if suf, ok := csvNameForIP(ipToDNS, dstIP, true); ok {
-					emit(suf, "csv+mid")
-				} else {
-					emit("", "mid-session")
-				}
-				continue
+		// --------------------------------------------------------
+		// MID-SESSION PRIVATE → PUBLIC FALLBACK
+		// --------------------------------------------------------
+		if issuerIP != nil && issuerIP.IsPrivate() && !dstParsed.IsPrivate() {
+			// Try CSV attribution first.
+			// For mid-session rows, keep full FQDN when CSV has exactly one name.
+			if suf, ok := csvNameForIP(ipToDNS, dstIP, true); ok {
+				emit(suf, "csv+mid")
+			} else {
+				emit("", "mid-session")
 			}
-
-			// --------------------------------------------------------
-			// Normal CSV fallback (non mid-session cases)
-			// --------------------------------------------------------
-			if suf, ok := csvNameForIP(ipToDNS, dstIP, false); ok {
-				emit(suf, "csv+conn")
-				continue
-			}
-
-			emit("", "")
 			continue
 		}
-		dnsName := normalize(bestTx.DNSName)
-		cnameChain := append([]string(nil), bestTx.CNAMETargets...)
-		src := ""
-		if dnsName != "" {
-			ev := bestTx.NameEvidence
-			if bestTx.ResolvedIPEvidence != nil {
-				ev |= bestTx.ResolvedIPEvidence[dstIP]
-			}
-			if ev != EvNone {
-				ev |= EvObservedConn
-				src = EvidenceString(ev)
-			}
+
+		// --------------------------------------------------------
+		// Normal CSV fallback (non mid-session cases)
+		// --------------------------------------------------------
+		if suf, ok := csvNameForIP(ipToDNS, dstIP, false); ok {
+			emit(suf, "csv+conn")
+			continue
 		}
-		beforeLen := len(out)
-		emit(dnsName, src)
-		if len(cnameChain) > 0 && len(out) > 0 {
-			idx := len(out) - 1
-			if len(out) == beforeLen {
-				key := issuer + "|" + dstIP + "|" + dnsName + "|" + proto + "|" + itoa16(e.Port)
-				if seenIdx, ok := seen[key]; ok {
-					idx = seenIdx
-				}
-			}
-			out[idx].CNAMEChain = mergeTopologyCNAMEChain(out[idx].CNAMEChain, cnameChain)
-		}
+
+		emit("", "")
+		continue
 	}
 
 	// ------------------------------------------------------------
@@ -746,23 +772,37 @@ func classifyDNSDonationDonor(source string) dnsDonationDonorTier {
 	}
 }
 
+func isDNSDonationRecipient(source, name string) bool {
+	if strings.TrimSpace(name) != "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "", "mid-session":
+		return true
+	default:
+		return false
+	}
+}
+
 func topologySourceRank(src string) int {
 	s := strings.ToLower(strings.TrimSpace(src))
 	switch s {
 	case "dns+synack", "sni+synack", "dns+synack+norm":
-		return 50
+		return 60
 	case "dns+conn+synack", "sni+conn+synack":
-		return 40
+		return 50
 	case "active+synack", "active+conn+synack":
+		return 45
+	case "donated+ipport", "donated+ipport+norm", "donated+ipport-private", "donated+ipport-private+norm":
+		return 40
+	case "donated+ip", "donated+ip+norm":
 		return 35
 	case "csv+conn", "csv+mid":
 		return 30
-	case "donated+ipport", "donated+ipport+norm":
-		return 25
 	case "active+matrix", "ptr+fcrdns+matrix", "ptr+matrix", "ptr-normalized+matrix", "tls-cert-san+matrix":
-		return 20
+		return 25
 	case "tls-cert-san+matrix-fallback":
-		return 15
+		return 20
 	case "mid-session":
 		return 10
 	case "":
@@ -813,11 +853,27 @@ func dnsDonationName(names map[string]struct{}) string {
 	return strings.Join(base[len(base)-common:], ".")
 }
 
+// DNSDonationOptions controls conservative topology DNS donation behavior.
+type DNSDonationOptions struct {
+	// AllowPrivateDestinations allows exact private IPv4 destination tuples to
+	// receive donated names from direct DNS/SNI evidence. Weak private fallback
+	// sources remain ineligible.
+	AllowPrivateDestinations bool
+}
+
 // CompleteTopologyWithDNSDonation fills otherwise-unattributed public IPv4
 // rows from direct DNS/SNI names observed for the exact destination IP,
 // normalized protocol, and port elsewhere in the same run. It never overwrites
 // existing attribution and does not mutate entries.
 func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
+	return CompleteTopologyWithDNSDonationWithOptions(entries, DNSDonationOptions{})
+}
+
+// CompleteTopologyWithDNSDonationWithOptions fills otherwise-unattributed rows
+// from direct DNS/SNI names observed for the exact destination IP, normalized
+// protocol, and port elsewhere in the same run. Private destination rows are
+// eligible only when opt.AllowPrivateDestinations is true.
+func CompleteTopologyWithDNSDonationWithOptions(entries []TopologyEntry, opt DNSDonationOptions) []TopologyEntry {
 	if len(entries) == 0 {
 		return entries
 	}
@@ -828,23 +884,27 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		port          uint16
 	}
 
-	keyFor := func(row TopologyEntry) (donationKey, bool) {
+	keyFor := func(row TopologyEntry) (donationKey, bool, bool) {
 		if row.Port == 0 {
-			return donationKey{}, false
+			return donationKey{}, false, false
 		}
 		ip, ok := canonicalIPv4String(row.DestinationIP)
 		if !ok {
-			return donationKey{}, false
+			return donationKey{}, false, false
 		}
 		addr, err := netip.ParseAddr(ip)
-		if err != nil || !isPublicIPv4(addr) {
-			return donationKey{}, false
+		if err != nil {
+			return donationKey{}, false, false
+		}
+		private := addr.IsPrivate()
+		if !isPublicIPv4(addr) && !(opt.AllowPrivateDestinations && private) {
+			return donationKey{}, false, false
 		}
 		protocol := strings.ToLower(strings.TrimSpace(row.Protocol))
 		if protocol == "" {
-			return donationKey{}, false
+			return donationKey{}, false, false
 		}
-		return donationKey{destinationIP: ip, protocol: protocol, port: row.Port}, true
+		return donationKey{destinationIP: ip, protocol: protocol, port: row.Port}, private, true
 	}
 
 	type donationCandidates struct {
@@ -862,7 +922,7 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 		if !IsResolvableDNSName(name) {
 			continue
 		}
-		key, ok := keyFor(row)
+		key, _, ok := keyFor(row)
 		if !ok {
 			continue
 		}
@@ -887,14 +947,10 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 	out := append([]TopologyEntry(nil), entries...)
 	for i := range out {
 		row := &out[i]
-		if strings.TrimSpace(row.DNSName) != "" {
+		if !isDNSDonationRecipient(row.DNSSource, row.DNSName) {
 			continue
 		}
-		recipientSource := strings.ToLower(strings.TrimSpace(row.DNSSource))
-		if recipientSource != "" && recipientSource != "mid-session" {
-			continue
-		}
-		key, ok := keyFor(*row)
+		key, private, ok := keyFor(*row)
 		if !ok {
 			continue
 		}
@@ -907,9 +963,17 @@ func CompleteTopologyWithDNSDonation(entries []TopologyEntry) []TopologyEntry {
 			continue
 		}
 		row.DNSName = name
-		row.DNSSource = "donated+ipport"
+		if private {
+			row.DNSSource = "donated+ipport-private"
+		} else {
+			row.DNSSource = "donated+ipport"
+		}
 		if candidates.nameNormalized[name] || candidates.hasNormalized {
-			row.DNSSource = "donated+ipport+norm"
+			if private {
+				row.DNSSource = "donated+ipport-private+norm"
+			} else {
+				row.DNSSource = "donated+ipport+norm"
+			}
 		}
 	}
 	return out

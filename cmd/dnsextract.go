@@ -38,6 +38,7 @@ var (
 	flagRadiusIMSI                   bool
 	flagOnlyTCP                      bool
 	flagInferDNSFromConnections      bool
+	flagAllowPrivateDNSDonation      bool
 	flagIgnoreNTP                    bool
 	flagExcludePorts                 string
 	flagFTPControlPorts              string
@@ -97,10 +98,16 @@ func init() {
 		"Infer DNS-to-IP mappings from issuer-only query/connection timing when DNS answers are missing. Disabled by default.",
 	)
 	cmd.Flags().BoolVar(
+		&flagAllowPrivateDNSDonation,
+		"allow-private-dns-donation",
+		false,
+		"Allow direct DNS/SNI topology donation for exact private destination IP/protocol/port tuples.",
+	)
+	cmd.Flags().BoolVar(
 		&flagIgnoreNTP,
 		"ignore-ntp",
 		true,
-		"Ignore NTP-related DNS names (heuristic: ntp/time/timesync patterns). Set --ignore-ntp=false to keep them.",
+		"Suppress NTP transport edges by excluding port 123 from topology correlation. DNS evidence is preserved.",
 	)
 	cmd.Flags().StringVar(
 		&flagDNSIPFile,
@@ -283,10 +290,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if flagIgnoreNTP {
-		progress.SetStage("Pass 2.1: filtering NTP-related DNS transactions...")
-		var dropped int
-		txs, dropped = dns.FilterOutNTPDNSTransactions(txs)
-		progress.SetStage(fmt.Sprintf("Pass 2.1: filtered %d NTP-related DNS transactions.", dropped))
+		progress.SetStage("Pass 2.1: preserving DNS evidence; NTP transport suppression is applied during connection correlation...")
 	}
 
 	// --------------------------------------------------------------------
@@ -314,6 +318,9 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	excludeSet, err := parsePortSet(flagExcludePorts)
 	if err != nil {
 		return fmt.Errorf("--exclude-ports: %w", err)
+	}
+	if flagIgnoreNTP {
+		excludeSet = ensurePortExcluded(excludeSet, 123)
 	}
 	var ipToDNS map[string][]string
 	if strings.TrimSpace(flagDNSIPFile) != "" {
@@ -531,7 +538,10 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	topo = dns.CompleteTopologyWithDNSDonation(topo)
+	topo = dns.CompleteTopologyWithDNSDonationWithOptions(topo, dns.DNSDonationOptions{
+		AllowPrivateDestinations: flagAllowPrivateDNSDonation,
+	})
+	topo = dns.CompleteTopologyWithFreshIPDNSDonation(topo)
 	// The artifact reflects final topology attribution, including active matrix
 	// completion and conservative DNS donation.
 	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
