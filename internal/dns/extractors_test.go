@@ -10,6 +10,12 @@ import (
 	"github.com/google/gopacket/layers"
 )
 
+func TestCanonicalDNSNamePreservesLegacyOperationOrder(t *testing.T) {
+	if got := canonicalDNSName("name. "); got != "name." {
+		t.Fatalf("canonicalDNSName(%q) = %q, want %q", "name. ", got, "name.")
+	}
+}
+
 func TestExtractTruncatedDNSQueryDiagnostic(t *testing.T) {
 	header := func() []byte {
 		msg := make([]byte, 12)

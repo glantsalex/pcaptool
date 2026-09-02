@@ -1,0 +1,34 @@
+# Non-production example only. Do not use as production logical-service rules.
+# This file is never selected implicitly and is never embedded into pcaptool.
+schema_version: 1
+
+rules:
+  - id: example_namespace_tcp
+    priority: 500
+    service_id: example_terminal_service
+    match:
+      dns_suffix:
+        - example.invalid
+      protocol: tcp
+      any_port: true
+
+  - id: example_api_tcp
+    priority: 100
+    service_id: example_terminal_service
+    match:
+      dns_exact:
+        - terminal-api.example.com
+      protocol: tcp
+      ports:
+        - 443
+        - 8443
+
+  - id: example_documentation_network_tcp
+    priority: 200
+    service_id: example_terminal_service
+    match:
+      dst_ip_cidrs:
+        - 192.0.2.0/24
+      protocol: tcp
+      ports:
+        - 443

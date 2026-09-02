@@ -83,6 +83,8 @@ func (e *dnsExtractor) TruncatedDNSPackets() []TruncatedDNSPacket {
 }
 
 func canonicalDNSName(name string) string {
+	// Preserve the extraction pipeline's legacy operation order. Logical-service
+	// selectors use dnsname.Normalize's trim-before-dot-removal contract instead.
 	return strings.ToLower(strings.TrimSpace(strings.TrimSuffix(name, ".")))
 }
 

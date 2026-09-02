@@ -1,0 +1,7 @@
+# Non-production example only. Do not use as a production logical-service catalog.
+# This file is never selected implicitly and is never embedded into pcaptool.
+schema_version: 1
+
+services:
+  - id: example_terminal_service
+    name: Example Terminal Service

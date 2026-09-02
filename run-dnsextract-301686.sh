@@ -7,10 +7,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PCAPTOOL_BIN="${SCRIPT_DIR}/pcaptool"
 DATA_DIR="${SCRIPT_DIR}/data"
 
-NET_ID="404163-1"
+NET_ID="301686-1"
 DNS_RULES_FILE="${DATA_DIR}/pcaptool.rules.yaml"
 DNS_IP_FILE="${DATA_DIR}/dns-ip.csv"
-FLEET_FILE="${DATA_DIR}/fleet-404163-1.txt"
+FLEET_FILE="${DATA_DIR}/fleet-301686-1.txt"
 
 usage() {
   cat >&2 <<EOF
@@ -54,9 +54,8 @@ main() {
     --net-id "$NET_ID"
     --exclude-ports "53,123"
     --enforce-private-as-source
-    --ftp-control-ports "21,990,21000"
+    --ftp-control-ports "21"
     --ftp-passive-min-port "10000"
-    --server-summary-exclude-udp-ports "33434-33534"
     --dns-normalization-rules "$DNS_RULES_FILE"
     --dns-ip-file "$DNS_IP_FILE"
     --fleet "$FLEET_FILE"
