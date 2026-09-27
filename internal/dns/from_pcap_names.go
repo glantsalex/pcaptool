@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/aglants/pcaptool/progress"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
@@ -43,6 +44,24 @@ func BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
 	includeSNI bool,
 	collectTruncatedDNS bool,
 ) ([]*DNSTransaction, time.Time, []TruncatedDNSPacket, error) {
+	return BuildTransactionsWithSNIFromPCAPsWithOptions(
+		ctx,
+		files,
+		includeSNI,
+		collectTruncatedDNS,
+		PacketScanOptions{},
+	)
+}
+
+// BuildTransactionsWithSNIFromPCAPsWithOptions performs the DNS/SNI scan with
+// optional packet admission applied before any extractor sees a packet.
+func BuildTransactionsWithSNIFromPCAPsWithOptions(
+	ctx context.Context,
+	files []string,
+	includeSNI bool,
+	collectTruncatedDNS bool,
+	opt PacketScanOptions,
+) ([]*DNSTransaction, time.Time, []TruncatedDNSPacket, error) {
 	type fileResult struct {
 		txMap               map[TxKey][]*DNSTransaction
 		sniTxs              []*DNSTransaction
@@ -69,6 +88,7 @@ func BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
 					path,
 					includeSNI,
 					collectTruncatedDNS,
+					opt.PacketAdmission,
 				)
 				resCh <- fileResult{
 					txMap:               txMap,
@@ -224,6 +244,7 @@ func scanDNSAndSNIInFile(
 	path string,
 	includeSNI bool,
 	collectTruncatedDNS bool,
+	admit pcaputil.PacketAdmission,
 ) (map[TxKey][]*DNSTransaction, []*DNSTransaction, []TruncatedDNSPacket, time.Time, error) {
 	handle, err := pcap.OpenOffline(path)
 	if err != nil {
@@ -270,6 +291,9 @@ func scanDNSAndSNIInFile(
 					sniTxs = sniEx.Slice()
 				}
 				return dnsEx.Map(), sniTxs, dnsEx.TruncatedDNSPackets(), earliest, nil
+			}
+			if admit != nil && !admit(pkt) {
+				continue
 			}
 
 			base := filepath.Base(path)

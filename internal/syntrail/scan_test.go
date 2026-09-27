@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
@@ -141,7 +142,7 @@ func TestScanFileDedupesUDPWithinOneFile(t *testing.T) {
 		udp4Packet(base, "10.1.2.3", "203.0.113.10", 53),
 	})
 
-	records, err := scanFile(context.Background(), path)
+	records, err := scanFile(context.Background(), path, nil)
 	if err != nil {
 		t.Fatalf("scanFile() error = %v", err)
 	}
@@ -302,6 +303,49 @@ func TestScanFilesWithOptionsConcurrentMatchesSequentialOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(concurrent, want) {
 		t.Fatalf("ScanFilesWithOptions() = %+v, want %+v", concurrent, want)
+	}
+}
+
+func TestScanFilesWithOptionsPacketAdmissionMatchesSequentialAndConcurrent(t *testing.T) {
+	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	first := writePCAP(t, []testPacket{
+		tcp4Packet(base, "10.0.0.1", "203.0.113.10", 443, true, false),
+		tcp4Packet(base.Add(time.Second), "192.168.1.10", "10.0.0.2", 22, true, false),
+		tcp4Packet(base.Add(2*time.Second), "192.168.1.10", "192.168.1.11", 8080, true, false),
+	})
+	second := writePCAP(t, []testPacket{
+		udp4Packet(base.Add(3*time.Second), "10.0.0.1", "10.0.0.2", 53),
+		udp4Packet(base.Add(4*time.Second), "192.168.1.10", "192.168.1.11", 53),
+	})
+	fleet := testFleetSet("10.0.0.1", "10.0.0.2")
+	admit := pcaputil.IPv4EndpointAdmission(fleet.Contains)
+	files := []string{first, second}
+
+	sequential, err := ScanFilesWithOptions(context.Background(), files, ScanOptions{
+		Workers:         1,
+		PacketAdmission: admit,
+	})
+	if err != nil {
+		t.Fatalf("sequential ScanFilesWithOptions() error = %v", err)
+	}
+	concurrent, err := ScanFilesWithOptions(context.Background(), files, ScanOptions{
+		Workers:         2,
+		PacketAdmission: admit,
+	})
+	if err != nil {
+		t.Fatalf("concurrent ScanFilesWithOptions() error = %v", err)
+	}
+	if !reflect.DeepEqual(concurrent, sequential) {
+		t.Fatalf("concurrent records = %+v, want sequential %+v", concurrent, sequential)
+	}
+
+	want := []Record{
+		{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.10"), DstPort: 443, Protocol: ProtocolTCP, Timestamp: base},
+		{SrcIP: netip.MustParseAddr("192.168.1.10"), DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 22, Protocol: ProtocolTCP, Timestamp: base.Add(time.Second)},
+		{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 53, Protocol: ProtocolUDP, Timestamp: base.Add(3 * time.Second)},
+	}
+	if !reflect.DeepEqual(sequential, want) {
+		t.Fatalf("filtered records = %+v, want %+v", sequential, want)
 	}
 }
 
@@ -469,7 +513,7 @@ func TestScanFileReadsPCAPNG(t *testing.T) {
 		tcp4Packet(ts, "100.64.1.10", "203.0.113.99", 443, true, false),
 	})
 
-	records, err := scanFile(context.Background(), path)
+	records, err := scanFile(context.Background(), path, nil)
 	if err != nil {
 		t.Fatalf("scanFile() error = %v", err)
 	}

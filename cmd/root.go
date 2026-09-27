@@ -8,6 +8,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -15,23 +16,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// flagNetID is a global network identifier used to scope all output artifacts.
-// It is a persistent flag on the root command so that all subcommands share
-// the same output directory convention.
-var flagNetID string
-var flagOutputRoot string
-
-var flagEnforcePrivateAsSource bool
-var flagNoBanner bool
-
-var rootCmd = &cobra.Command{
-	Use:   "pcaptool",
-	Short: "High-performance PCAP analysis toolkit",
-	Long:  "pcaptool is a modular, high-performance CLI for extracting insights from PCAP files.",
-}
+var rootCmd = newRootCommand()
 
 // Execute runs the root command.
 func Execute() {
+	if hasConfigSelector(os.Args[1:]) {
+		if err := executeConfigMode(context.Background(), os.Args[1:], os.Stdout, os.Stderr, executeDNSExtract); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -53,35 +48,57 @@ func SuppressBannerFromArgs(args []string) bool {
 	return false
 }
 
-func init() {
-	rootCmd.PersistentFlags().StringVar(
-		&flagNetID,
+func newRootCommand() *cobra.Command {
+	return newRootCommandWithExecutor(executeDNSExtract)
+}
+
+func newRootCommandWithExecutor(executor dnsExtractExecutor) *cobra.Command {
+	opts := DefaultDNSExtractOptions()
+	cmd := &cobra.Command{
+		Use:   "pcaptool",
+		Short: "High-performance PCAP analysis toolkit",
+		Long:  "pcaptool is a modular, high-performance CLI for extracting insights from PCAP files.",
+	}
+
+	cmd.PersistentFlags().StringVar(
+		&opts.NetID,
 		"net-id",
-		"",
+		opts.NetID,
 		"Network identifier (required). Used as <output-root>/<net-id>/pcap-date-<date>/run-<UTC>",
 	)
-	rootCmd.PersistentFlags().StringVarP(
-		&flagOutputRoot,
+	cmd.PersistentFlags().StringVarP(
+		&opts.OutputRoot,
 		"output-root",
 		"o",
-		"pcaptool_output",
+		opts.OutputRoot,
 		"Root directory for all outputs. Layout: <output-root>/<net-id>/pcap-date-<date>/run-<UTC>",
 	)
-	rootCmd.PersistentFlags().BoolVar(
-		&flagEnforcePrivateAsSource,
+	cmd.PersistentFlags().BoolVar(
+		&opts.EnforcePrivateAsSource,
 		"enforce-private-as-source",
-		false,
+		opts.EnforcePrivateAsSource,
 		"For UDP only: if one side is private/local, always treat it as the source (swap direction when needed)",
 	)
-	rootCmd.PersistentFlags().BoolVar(
-		&flagNoBanner,
+	var noBanner bool
+	cmd.PersistentFlags().BoolVar(
+		&noBanner,
 		"no-banner",
 		false,
 		"Suppress the startup banner",
 	)
+	var configPath string
+	cmd.PersistentFlags().StringVar(
+		&configPath,
+		"config",
+		"",
+		"Run the command selected by a YAML application configuration file",
+	)
 
-	if err := rootCmd.MarkPersistentFlagRequired("net-id"); err != nil {
+	if err := cmd.MarkPersistentFlagRequired("net-id"); err != nil {
 		// Only fails if the flag is missing — programmer error.
 		panic(fmt.Errorf("mark --net-id as required: %w", err))
 	}
+
+	cmd.AddCommand(newDNSExtractCommandWithExecutor(&opts, executor))
+	return cmd
 }

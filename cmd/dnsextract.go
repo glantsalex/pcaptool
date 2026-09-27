@@ -30,185 +30,166 @@ import (
 )
 
 var (
-	flagReadDir                      string
-	flagFleet                        string
-	flagFormat                       string
-	flagExportCSV                    string
-	flagConnectivityShort            bool
-	flagRadiusIMSI                   bool
-	flagOnlyTCP                      bool
-	flagInferDNSFromConnections      bool
-	flagAllowPrivateDNSDonation      bool
-	flagIgnoreNTP                    bool
-	flagExcludePorts                 string
-	flagFTPControlPorts              string
-	flagFTPPassiveMinPort            string
-	flagServerSummaryExcludeUDPPorts string
-	flagDNSIPFile                    string
-	flagDNSNormalizationRules        string
-	flagTopologyDNSWindow            time.Duration
-	flagActiveResolve                bool
-	flagActiveResolvers              string
-	flagReverseDNSLookup             bool
-	flagTLSCertLookup                bool
-	flagTLSCertLookupTimeoutSeconds  int
-	flagDisableSNI                   bool
-	flagUnsorted                     bool
-	flagDebug                        bool
-	flagManifestOut                  string
-	flagPostHooks                    []string
-	flagFleetScanWorkers             int
-	resolveDNSNamesIPv4WithAudit     = dns.ResolveDNSNamesIPv4WithAudit
-	completeTopologyWithReverseDNS   = dns.CompleteTopologyWithReverseDNS
-	probeTLSCertificates             = dns.ProbeTLSCertificates
+	resolveDNSNamesIPv4WithAudit   = dns.ResolveDNSNamesIPv4WithAudit
+	completeTopologyWithReverseDNS = dns.CompleteTopologyWithReverseDNS
+	probeTLSCertificates           = dns.ProbeTLSCertificates
 )
 
-func init() {
+type dnsExtractExecutor func(context.Context, DNSExtractOptions) error
+
+func newDNSExtractCommand(opts *DNSExtractOptions) *cobra.Command {
+	return newDNSExtractCommandWithExecutor(opts, executeDNSExtract)
+}
+
+func newDNSExtractCommandWithExecutor(opts *DNSExtractOptions, executor dnsExtractExecutor) *cobra.Command {
+	defaults := DefaultDNSExtractOptions()
 	cmd := &cobra.Command{
 		Use:   "dnsextract",
 		Short: "Extract DNS A-type queries and correlate responses + connections",
-		RunE:  runDNSExtract,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDNSExtractWithExecutor(cmd, args, *opts, executor)
+		},
 	}
 
-	cmd.Flags().StringVarP(&flagReadDir, "read-dir", "r", "", "Directory containing .pcap files")
+	cmd.Flags().StringVarP(&opts.ReadDir, "read-dir", "r", defaults.ReadDir, "Directory containing .pcap files")
 	cmd.Flags().StringVar(
-		&flagFleet,
+		&opts.Fleet,
 		"fleet",
-		"",
-		"Optional fleet IPv4 list path; when set, writes server/probe summaries and flow-direction SQL. Use --debug for detailed trail artifacts.",
+		defaults.Fleet,
+		"Optional fleet IPv4 list path; when set, admits only IPv4 packets with a fleet source or destination and writes fleet artifacts. Use --debug for detailed trails.",
 	)
 	cmd.Flags().IntVar(
-		&flagFleetScanWorkers,
+		&opts.FleetScanWorkers,
 		"fleet-scan-workers",
-		0,
+		defaults.FleetScanWorkers,
 		"Number of workers for --fleet artifact scanning; 0 auto-selects min(GOMAXPROCS, file count), 1 is sequential.",
 	)
-	cmd.Flags().StringVar(&flagFormat, "format", "table", "Output format: table|json")
-	cmd.Flags().StringVar(&flagExportCSV, "export-csv", "", "Optional CSV export path (relative paths are placed under the run output directory)")
-	cmd.Flags().BoolVarP(&flagConnectivityShort, "short", "s", false,
+	cmd.Flags().StringVar(&opts.Format, "format", defaults.Format, "Output format: table|json")
+	cmd.Flags().StringVar(&opts.ExportCSV, "export-csv", defaults.ExportCSV, "Optional CSV export path (relative paths are placed under the run output directory)")
+	cmd.Flags().BoolVarP(&opts.ConnectivityShort, "short", "s", defaults.ConnectivityShort,
 		"write a short connectivity matrix (one row per issuer/DNS/port, ignoring multiple IPs)")
-	cmd.Flags().BoolVar(&flagRadiusIMSI, "radius-imsi", false,
+	cmd.Flags().BoolVar(&opts.RadiusIMSI, "radius-imsi", defaults.RadiusIMSI,
 		"map issuer IPs to IMSI using RADIUS Accounting records")
-	cmd.Flags().BoolVar(&flagOnlyTCP, "only-tcp", false,
+	cmd.Flags().BoolVar(&opts.OnlyTCP, "only-tcp", defaults.OnlyTCP,
 		"only consider TCP connections when correlating DNS")
 	cmd.Flags().BoolVar(
-		&flagInferDNSFromConnections,
+		&opts.InferDNSFromConnections,
 		"infer-dns-from-connections",
-		false,
+		defaults.InferDNSFromConnections,
 		"Infer DNS-to-IP mappings from issuer-only query/connection timing when DNS answers are missing. Disabled by default.",
 	)
 	cmd.Flags().BoolVar(
-		&flagAllowPrivateDNSDonation,
+		&opts.AllowPrivateDNSDonation,
 		"allow-private-dns-donation",
-		false,
+		defaults.AllowPrivateDNSDonation,
 		"Allow direct DNS/SNI topology donation for exact private destination IP/protocol/port tuples.",
 	)
 	cmd.Flags().BoolVar(
-		&flagIgnoreNTP,
+		&opts.IgnoreNTP,
 		"ignore-ntp",
-		true,
+		defaults.IgnoreNTP,
 		"Suppress NTP transport edges by excluding port 123 from topology correlation. DNS evidence is preserved.",
 	)
 	cmd.Flags().StringVar(
-		&flagDNSIPFile,
+		&opts.DNSIPFile,
 		"dns-ip-file",
-		"",
+		defaults.DNSIPFile,
 		"CSV file containing DNS,IP pairs used as last-resort IP->DNS attribution (e.g. dns,ip). An adjacent topology-<net-id>.csv is overlaid when present. IPv4 only.",
 	)
 	cmd.Flags().StringVar(
-		&flagDNSNormalizationRules,
+		&opts.DNSNormalizationRules,
 		"dns-normalization-rules",
-		"",
+		defaults.DNSNormalizationRules,
 		"Optional YAML rules file for normalizing selected direct DNS topology names before donation.",
 	)
 	cmd.Flags().StringVar(
-		&flagExcludePorts,
+		&opts.ExcludePorts,
 		"exclude-ports",
-		"53",
+		defaults.ExcludePorts,
 		"Comma-separated server/destination ports to exclude from network topology matrix (e.g. 53,123). Default: 53",
 	)
 	cmd.Flags().StringVar(
-		&flagFTPControlPorts,
+		&opts.FTPControlPorts,
 		"ftp-control-ports",
-		"21,990",
+		defaults.FTPControlPorts,
 		"Comma-separated passive FTP/FTPS control ports; replaces the default set (21,990).",
 	)
 	cmd.Flags().StringVar(
-		&flagFTPPassiveMinPort,
+		&opts.FTPPassiveMinPort,
 		"ftp-passive-min-port",
-		"30000",
+		defaults.FTPPassiveMinPort,
 		"Minimum destination port treated as passive FTP/FTPS data after a control channel is observed (1..65535).",
 	)
 	cmd.Flags().StringVar(
-		&flagServerSummaryExcludeUDPPorts,
+		&opts.ServerSummaryExcludeUDPPorts,
 		"server-summary-exclude-udp-ports",
-		"33434-33534",
+		defaults.ServerSummaryExcludeUDPPorts,
 		"Comma-separated UDP destination ports or inclusive ranges excluded only from server summary artifacts; empty disables.",
 	)
 	cmd.Flags().BoolVar(
-		&flagActiveResolve,
+		&opts.ActiveResolve,
 		"active-resolve",
-		false,
+		defaults.ActiveResolve,
 		"Actively resolve unresolved DNS names via external resolvers (disabled by default for forensic stability)",
 	)
 	cmd.Flags().StringVar(
-		&flagActiveResolvers,
+		&opts.ActiveResolvers,
 		"active-resolvers",
-		"",
+		defaults.ActiveResolvers,
 		"Comma-separated resolver IPs for --active-resolve (e.g. 8.8.8.8,1.1.1.1). Defaults are used when empty.",
 	)
 	cmd.Flags().BoolVar(
-		&flagReverseDNSLookup,
+		&opts.ReverseDNSLookup,
 		"reverse-dns-lookup",
-		false,
+		defaults.ReverseDNSLookup,
 		"Use PTR lookups as last-resort completion for unattributed public topology IPs and write a lookup audit CSV.",
 	)
 	cmd.Flags().BoolVar(
-		&flagTLSCertLookup,
+		&opts.TLSCertLookup,
 		"tls-cert-lookup",
-		false,
+		defaults.TLSCertLookup,
 		"Probe unresolved public TLS endpoints, decorate exact matching matrix rows, and write a certificate audit CSV.",
 	)
 	cmd.Flags().IntVar(
-		&flagTLSCertLookupTimeoutSeconds,
+		&opts.TLSCertLookupTimeoutSeconds,
 		"tls-cert-lookup-timeout",
-		15,
+		defaults.TLSCertLookupTimeoutSeconds,
 		"Timeout in seconds for each TLS certificate lookup, including TCP connect and TLS handshake (5..30).",
 	)
 	cmd.Flags().BoolVar(
-		&flagDisableSNI,
+		&opts.DisableSNI,
 		"disable-sni",
-		false,
+		defaults.DisableSNI,
 		"Disable TLS SNI extraction in pass 2 (speeds up truncated/offline workloads by skipping TCP ClientHello scan).",
 	)
 	cmd.Flags().BoolVar(
-		&flagUnsorted,
+		&opts.Unsorted,
 		"unsorted",
-		false,
+		defaults.Unsorted,
 		"Keep network topology matrix in natural first-seen issuer order instead of sorting by endpoint count and DNS name.",
 	)
 	cmd.Flags().BoolVar(
-		&flagDebug,
+		&opts.Debug,
 		"debug",
-		false,
+		defaults.Debug,
 		"Write additional per-run debug artifacts, including detailed fleet trails and learned IP->DNS append provenance.",
 	)
 	cmd.Flags().StringVar(
-		&flagManifestOut,
+		&opts.ManifestOut,
 		"manifest-out",
-		"",
+		defaults.ManifestOut,
 		"Optional extra path to write a copy of _run-artifacts.json. Relative paths are placed under the run output directory.",
 	)
 	cmd.Flags().StringArrayVar(
-		&flagPostHooks,
+		&opts.PostHooks,
 		"post-hook",
-		nil,
+		defaults.PostHooks,
 		"Repeatable shell command to run after dnsextract completes. Hooks receive PCAPTOOL_MANIFEST in the environment and execute with the run directory as cwd.",
 	)
 	cmd.Flags().DurationVar(
-		&flagTopologyDNSWindow,
+		&opts.TopologyDNSWindow,
 		"topology-dns-window",
-		dns.DefaultTopologyBuildOptions().MaxDNSAge,
+		defaults.TopologyDNSWindow,
 		"Max age between DNS query and first observed edge for topology DNS attribution (e.g. 30s, 2m). Use 0 to disable time limit.",
 	)
 	_ = cmd.MarkFlagRequired("read-dir")
@@ -216,56 +197,64 @@ func init() {
 	// NOTE: --net-id is now a *persistent* required flag on rootCmd (see root.go).
 	// Do NOT mark it required here.
 
-	rootCmd.AddCommand(cmd)
+	return cmd
 }
 
-func runDNSExtract(cmd *cobra.Command, args []string) error {
-	cmd.SilenceUsage = true
+func runDNSExtract(cmd *cobra.Command, args []string, opts DNSExtractOptions) error {
+	return runDNSExtractWithExecutor(cmd, args, opts, executeDNSExtract)
+}
 
-	ctx := context.Background()
+func runDNSExtractWithExecutor(cmd *cobra.Command, _ []string, opts DNSExtractOptions, executor dnsExtractExecutor) error {
+	cmd.SilenceUsage = true
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return executor(ctx, opts)
+}
+
+func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	runStartedAt := time.Now().UTC()
 
-	if flagFormat != "table" && flagFormat != "json" {
-		return fmt.Errorf("unsupported --format %q (use table|json)", flagFormat)
-	}
-	if flagTopologyDNSWindow < 0 {
-		return fmt.Errorf("--topology-dns-window must be >= 0")
-	}
-	if err := validateTLSCertLookupTimeout(flagTLSCertLookupTimeoutSeconds); err != nil {
+	validated, err := validateDNSExtractOptions(opts)
+	if err != nil {
 		return err
 	}
-	if err := validateFleetScanWorkers(flagFleet, flagFleetScanWorkers); err != nil {
-		return err
-	}
-	ftpControlPorts, err := parseStrictPortSet(flagFTPControlPorts)
-	if err != nil {
-		return fmt.Errorf("--ftp-control-ports: %w", err)
-	}
-	ftpPassiveMinPort, err := parseStrictPort(flagFTPPassiveMinPort)
-	if err != nil {
-		return fmt.Errorf("--ftp-passive-min-port: %w", err)
-	}
-	serverSummaryExcludeUDPPorts, err := parseOptionalPortRangeSet(flagServerSummaryExcludeUDPPorts)
-	if err != nil {
-		return fmt.Errorf("--server-summary-exclude-udp-ports: %w", err)
-	}
+	ftpControlPorts := validated.ftpControlPorts
+	ftpPassiveMinPort := validated.ftpPassiveMinPort
+	serverSummaryExcludeUDPPorts := validated.serverSummaryExcludeUDPPorts
 
 	progress.SetStage("Discovering PCAP files...")
-	files, err := pcap.DiscoverPCAPFiles(flagReadDir)
+	files, err := pcap.DiscoverPCAPFiles(opts.ReadDir)
 	if err != nil {
 		return err
 	}
 	if len(files) == 0 {
-		return fmt.Errorf("no .pcap files found in %q", flagReadDir)
+		return fmt.Errorf("no .pcap files found in %q", opts.ReadDir)
+	}
+
+	var (
+		fleet           *syntrail.FleetSet
+		packetAdmission pcap.PacketAdmission
+	)
+	if opts.Fleet != "" {
+		loadedFleet, err := syntrail.LoadFleetIPv4File(opts.Fleet)
+		if err != nil {
+			return fmt.Errorf("load --fleet IPv4 file: %w", err)
+		}
+		fleet = &loadedFleet
+		packetAdmission = pcap.IPv4EndpointAdmission(loadedFleet.Contains)
 	}
 
 	// --------------------------------------------------------------------
 	// Pass 1: RADIUS index (if required )
 	// --------------------------------------------------------------------
 	var imsiIndex *radius.IMSIIndex // adjust type name to your actual exported type
-	if flagRadiusIMSI {
+	if opts.RadiusIMSI {
 		progress.SetStage("Pass 1: building RADIUS IP→IMSI index...")
-		idx, err := radius.BuildIMSIIndexFromPCAPs(ctx, files)
+		idx, err := radius.BuildIMSIIndexFromPCAPsWithOptions(ctx, files, radius.ScanOptions{
+			PacketAdmission: packetAdmission,
+		})
 		if err != nil {
 			return err
 		}
@@ -275,21 +264,22 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// --------------------------------------------------------------------
 	// Pass 2: DNS + TLS SNI in one corpus scan (extractors)
 	// --------------------------------------------------------------------
-	if flagDisableSNI {
+	if opts.DisableSNI {
 		progress.SetStage("Pass 2: scanning DNS (SNI disabled)...")
 	} else {
 		progress.SetStage("Pass 2: scanning DNS + TLS SNI...")
 	}
-	txs, pass2Earliest, truncatedDNSPackets, err := dns.BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
+	txs, pass2Earliest, truncatedDNSPackets, err := dns.BuildTransactionsWithSNIFromPCAPsWithOptions(
 		ctx,
 		files,
-		!flagDisableSNI,
+		!opts.DisableSNI,
 		true,
+		dns.PacketScanOptions{PacketAdmission: packetAdmission},
 	)
 	if err != nil {
 		return err
 	}
-	if flagIgnoreNTP {
+	if opts.IgnoreNTP {
 		progress.SetStage("Pass 2.1: preserving DNS evidence; NTP transport suppression is applied during connection correlation...")
 	}
 
@@ -298,10 +288,10 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// intentionally deferred until after the packet-derived matrix is built.
 	// --------------------------------------------------------------------
 	activeResolveOpt := dns.DefaultResolveUnresolvedOptions()
-	if flagActiveResolve {
+	if opts.ActiveResolve {
 		progress.SetStage("Pass 2.5: active resolve enabled; deferring to matrix completion...")
-		if strings.TrimSpace(flagActiveResolvers) != "" {
-			servers, err := parseResolverServers(flagActiveResolvers)
+		if strings.TrimSpace(opts.ActiveResolvers) != "" {
+			servers, err := parseResolverServers(opts.ActiveResolvers)
 			if err != nil {
 				return fmt.Errorf("--active-resolvers: %w", err)
 			}
@@ -315,31 +305,32 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// Pass 3: correlate connections (DNS-derived txs only)
 	// --------------------------------------------------------------------
 	progress.SetStage("Pass 3: correlating connections...")
-	excludeSet, err := parsePortSet(flagExcludePorts)
+	excludeSet, err := parsePortSet(opts.ExcludePorts)
 	if err != nil {
 		return fmt.Errorf("--exclude-ports: %w", err)
 	}
-	if flagIgnoreNTP {
+	if opts.IgnoreNTP {
 		excludeSet = ensurePortExcluded(excludeSet, 123)
 	}
 	var ipToDNS map[string][]string
-	if strings.TrimSpace(flagDNSIPFile) != "" {
-		ipToDNS, err = dns.LoadIPToDNSWithTopologyOverlay(flagDNSIPFile, flagNetID)
+	if strings.TrimSpace(opts.DNSIPFile) != "" {
+		ipToDNS, err = dns.LoadIPToDNSWithTopologyOverlay(opts.DNSIPFile, opts.NetID)
 		if err != nil {
 			return fmt.Errorf("load --dns-ip-file: %w", err)
 		}
 	}
-	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPs(
+	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		ctx,
 		files,
 		txs,
-		flagOnlyTCP,
-		flagInferDNSFromConnections,
+		opts.OnlyTCP,
+		opts.InferDNSFromConnections,
 		excludeSet,
-		flagEnforcePrivateAsSource,
+		opts.EnforcePrivateAsSource,
 		ipToDNS,
 		ftpControlPorts,
 		ftpPassiveMinPort,
+		dns.PacketScanOptions{PacketAdmission: packetAdmission},
 	)
 	if err != nil {
 		return err
@@ -349,24 +340,25 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	if layoutTimestamp.IsZero() {
 		layoutTimestamp = pass2Earliest
 	}
-	om, err := NewOutputManagerForRun(flagNetID, flagOutputRoot, layoutTimestamp, runStartedAt)
+	om, err := NewOutputManagerForRun(opts.NetID, opts.OutputRoot, layoutTimestamp, runStartedAt)
 	if err != nil {
 		return err
 	}
 
 	var synTrailArtifacts map[string]string
-	if flagFleet != "" {
+	if fleet != nil {
 		progress.SetStage("Running fleet trail sidecar...")
 		synTrailStartedAt := time.Now()
-		scanWorkers := effectiveFleetScanWorkers(flagFleetScanWorkers, len(files))
-		synTrailArtifacts, err = runSYNTrailSidecar(ctx, om, files, flagFleet, synTrailArtifactOptions{
+		scanWorkers := effectiveFleetScanWorkers(opts.FleetScanWorkers, len(files))
+		synTrailArtifacts, err = runSYNTrailSidecar(ctx, om, files, fleet, synTrailArtifactOptions{
 			FTPControlPorts:              ftpControlPorts,
 			FTPPassiveMinPort:            ftpPassiveMinPort,
 			ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
-			Debug:                        flagDebug,
+			Debug:                        opts.Debug,
 			ScanOptions: syntrail.ScanOptions{
-				Workers:  scanWorkers,
-				Progress: fleetTrailScanProgress(progress.UpdateBar),
+				Workers:         scanWorkers,
+				Progress:        fleetTrailScanProgress(progress.UpdateBar),
+				PacketAdmission: packetAdmission,
 			},
 		})
 		synTrailElapsed := time.Since(synTrailStartedAt).Round(time.Millisecond)
@@ -387,7 +379,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if flagRadiusIMSI && imsiIndex != nil {
+	if opts.RadiusIMSI && imsiIndex != nil {
 		progress.SetStage("Mapping issuer IPs to IMSI...")
 		for _, tx := range txs {
 			if tx.IssuerIP == nil {
@@ -416,7 +408,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// ---------------------------
 	var mainName string
 	mainOutputPath := ""
-	if flagFormat == "json" {
+	if opts.Format == "json" {
 		mainName = "dns-table.json"
 	} else {
 		mainName = "dns-table.txt"
@@ -429,7 +421,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	defer mainOut.Close()
 	mainOutputPath = mainOut.Name()
 
-	switch flagFormat {
+	switch opts.Format {
 	case "table":
 		stats := dns.ComputeTableStatsFromTx(txs, records)
 		if err := output.WriteTableWithStats(mainOut, records, stats); err != nil {
@@ -468,7 +460,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// ---------------------------
 	issuerFn := func(ip string, ts time.Time) string {
 		// Default: use IP
-		if !flagRadiusIMSI || imsiIndex == nil {
+		if !opts.RadiusIMSI || imsiIndex == nil {
 			return ip
 		}
 		// Conservative mapping: use time-aware lookup
@@ -481,33 +473,33 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	var learnedNewPairs []dns.IPDNSPair
 
 	topoOpt := dns.DefaultTopologyBuildOptions()
-	topoOpt.MaxDNSAge = flagTopologyDNSWindow
-	topoOpt.SortOutput = !flagUnsorted
+	topoOpt.MaxDNSAge = opts.TopologyDNSWindow
+	topoOpt.SortOutput = !opts.Unsorted
 	topo := dns.BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, issuerFn, ipToDNS, topoOpt)
 	var dnsNormalizationAudit []dns.DNSNormalizationAudit
-	if strings.TrimSpace(flagDNSNormalizationRules) != "" {
-		rules, err := dns.LoadDNSNormalizationRules(flagDNSNormalizationRules)
+	if strings.TrimSpace(opts.DNSNormalizationRules) != "" {
+		rules, err := dns.LoadDNSNormalizationRules(opts.DNSNormalizationRules)
 		if err != nil {
 			return fmt.Errorf("load --dns-normalization-rules: %w", err)
 		}
-		topo, dnsNormalizationAudit = dns.ApplyDNSNormalization(flagNetID, topo, rules)
+		topo, dnsNormalizationAudit = dns.ApplyDNSNormalization(opts.NetID, topo, rules)
 	}
-	if strings.TrimSpace(flagDNSIPFile) != "" {
+	if strings.TrimSpace(opts.DNSIPFile) != "" {
 		learned := dns.StrongObservedIPDNSPairsFromTopology(topo)
 		merged, newPairs := dns.MergeIPToDNSMaps(ipToDNS, learned)
 		learnedNewPairs = newPairs
-		if flagDebug {
+		if opts.Debug {
 			learnedAudit = dns.BuildIPDNSAppendAuditRecordsFromTopology(topo, newPairs)
 		}
 		if len(newPairs) > 0 {
-			if err := dns.AppendIPDNSPairsToFile(flagDNSIPFile, newPairs); err != nil {
-				return fmt.Errorf("append learned IP->DNS pairs to %q: %w", flagDNSIPFile, err)
+			if err := dns.AppendIPDNSPairsToFile(opts.DNSIPFile, newPairs); err != nil {
+				return fmt.Errorf("append learned IP->DNS pairs to %q: %w", opts.DNSIPFile, err)
 			}
 		}
 		ipToDNS = merged
 	}
-	if flagConnectivityShort {
-		topo = dns.SquashNetworkTopologyShortWithOptions(topo, !flagUnsorted)
+	if opts.ConnectivityShort {
+		topo = dns.SquashNetworkTopologyShortWithOptions(topo, !opts.Unsorted)
 	}
 
 	// Compute packet/topology unresolved names before optional active matrix
@@ -517,7 +509,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	unresolvedFinal = dns.FilterUnresolvedByTruncatedDNSPackets(unresolvedFinal, truncatedDNSPackets)
 
 	activeResolveLogPath := ""
-	if flagActiveResolve {
+	if opts.ActiveResolve {
 		var activeResolveRecords []dns.ActiveResolveAuditRecord
 		if len(unresolvedFinal) > 0 {
 			progress.SetStage("Pass 4: resolving unresolved DNS names for matrix completion...")
@@ -539,7 +531,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		}
 	}
 	topo = dns.CompleteTopologyWithDNSDonationWithOptions(topo, dns.DNSDonationOptions{
-		AllowPrivateDestinations: flagAllowPrivateDNSDonation,
+		AllowPrivateDestinations: opts.AllowPrivateDNSDonation,
 	})
 	topo = dns.CompleteTopologyWithFreshIPDNSDonation(topo)
 	// The artifact reflects final topology attribution, including active matrix
@@ -547,7 +539,7 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
 
 	reverseDNSLookupLogPath := ""
-	if flagReverseDNSLookup {
+	if opts.ReverseDNSLookup {
 		// PTR is weak endpoint labeling, not packet-observed DNS evidence, so it
 		// intentionally does not re-filter unresolvedFinal.
 		progress.SetStage("Pass 4.5: reverse DNS lookup for remaining topology IPs...")
@@ -582,10 +574,10 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	}
 
 	tlsCertLookupLogPath := ""
-	if flagTLSCertLookup {
+	if opts.TLSCertLookup {
 		progress.SetStage("Pass 4.6: probing TLS certificates for unresolved endpoints...")
 		tlsCertRecords, err := probeTLSCertificates(ctx, topo, nil, dns.TLSCertLookupOptions{
-			Timeout: time.Duration(flagTLSCertLookupTimeoutSeconds) * time.Second,
+			Timeout: time.Duration(opts.TLSCertLookupTimeoutSeconds) * time.Second,
 			Progress: func(processed, total int) {
 				progress.UpdateBar(processed, total, fmt.Sprintf("processed %d / %d endpoints", processed, total))
 			},
@@ -731,8 +723,8 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	// Optional CSV export (same rows as records)
 	// ---------------------------
 	exportCSVPath := ""
-	if flagExportCSV != "" {
-		csvPath := om.ResolvePath(flagExportCSV)
+	if opts.ExportCSV != "" {
+		csvPath := om.ResolvePath(opts.ExportCSV)
 		exportCSVPath = csvPath
 
 		// If ResolvePath returned a relative-under-run-dir path, ensure parent dirs exist.
@@ -764,8 +756,8 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 		}
 	}
 	ipDNSAppendAuditPath := ""
-	if flagDebug && strings.TrimSpace(flagDNSIPFile) != "" {
-		if err := writeIPDNSAppendAudit(om, runStartedAt, filepath.Clean(flagDNSIPFile), firstPktInfo, learnedNewPairs, learnedAudit); err != nil {
+	if opts.Debug && strings.TrimSpace(opts.DNSIPFile) != "" {
+		if err := writeIPDNSAppendAudit(om, runStartedAt, filepath.Clean(opts.DNSIPFile), firstPktInfo, learnedNewPairs, learnedAudit); err != nil {
 			return fmt.Errorf("write ip-dns append audit: %w", err)
 		}
 		ipDNSAppendAuditPath = om.Path("ip-dns-append-audit.txt")
@@ -839,37 +831,23 @@ func runDNSExtract(cmd *cobra.Command, args []string) error {
 	for key, path := range synTrailArtifacts {
 		filesMap[key] = path
 	}
-	manifestPath, err := writeRunArtifactsManifest(om, runStartedAt, flagReadDir, len(files), firstPktInfo, flagFormat, filesMap)
+	manifestPath, err := writeRunArtifactsManifest(om, runStartedAt, opts.ReadDir, len(files), firstPktInfo, opts.Format, filesMap)
 	if err != nil {
 		return fmt.Errorf("write run artifacts manifest: %w", err)
 	}
-	if strings.TrimSpace(flagManifestOut) != "" {
-		manifestOutPath := om.ResolvePath(flagManifestOut)
+	if strings.TrimSpace(opts.ManifestOut) != "" {
+		manifestOutPath := om.ResolvePath(opts.ManifestOut)
 		if err := copyFile(manifestPath, manifestOutPath); err != nil {
 			return fmt.Errorf("write manifest copy %q: %w", manifestOutPath, err)
 		}
 	}
-	if len(flagPostHooks) > 0 {
-		if err := runPostHooks(ctx, om, manifestPath, flagPostHooks); err != nil {
+	if len(opts.PostHooks) > 0 {
+		if err := runPostHooks(ctx, om, manifestPath, opts.PostHooks, opts.Debug); err != nil {
 			return err
 		}
 	}
 
 	progress.Done("Completed dnsextract successfully.")
-	return nil
-}
-
-func validateFleetScanWorkers(_ string, workers int) error {
-	if workers < 0 {
-		return fmt.Errorf("--fleet-scan-workers must be >= 0")
-	}
-	return nil
-}
-
-func validateTLSCertLookupTimeout(seconds int) error {
-	if seconds < 5 || seconds > 30 {
-		return fmt.Errorf("--tls-cert-lookup-timeout must be an integer from 5 to 30 seconds (got %d)", seconds)
-	}
 	return nil
 }
 

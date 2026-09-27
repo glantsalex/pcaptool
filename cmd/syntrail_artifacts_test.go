@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -13,16 +14,16 @@ import (
 	"github.com/aglants/pcaptool/internal/syntrail"
 )
 
-var _ func(context.Context, *OutputManager, []string, string, synTrailArtifactOptions) (map[string]string, error) = runSYNTrailSidecar
+var _ func(context.Context, *OutputManager, []string, *syntrail.FleetSet, synTrailArtifactOptions) (map[string]string, error) = runSYNTrailSidecar
 
-func TestRunSYNTrailSidecarEmptyFleetPathReturnsNoArtifactsAndWritesNoFiles(t *testing.T) {
+func TestRunSYNTrailSidecarNilFleetReturnsNoArtifactsAndWritesNoFiles(t *testing.T) {
 	om := newSYNTrailTestOutputManager(t)
 
 	artifacts, err := runSYNTrailSidecar(
 		context.Background(),
 		om,
 		[]string{filepath.Join(t.TempDir(), "missing.pcap")},
-		"",
+		nil,
 		synTrailArtifactOptions{},
 	)
 	if err != nil {
@@ -37,7 +38,7 @@ func TestRunSYNTrailSidecarEmptyFleetPathReturnsNoArtifactsAndWritesNoFiles(t *t
 		t.Fatalf("read output dir: %v", err)
 	}
 	if len(entries) != 0 {
-		t.Fatalf("runSYNTrailSidecar() wrote %d files with empty fleet path, want 0", len(entries))
+		t.Fatalf("runSYNTrailSidecar() wrote %d files with nil fleet, want 0", len(entries))
 	}
 }
 
@@ -100,10 +101,6 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	assertSYNTrailFile(t, om, "fleet-to-private-nonfleet-syn-unique.csv", ""+
 		"src_ip,dst_ip,dst_port,protocol\n"+
 		"10.0.0.1,192.168.1.20,8443,tcp\n")
-	assertSYNTrailFile(t, om, "private-servers-unique.csv", ""+
-		"dst_ip,dst_port,protocol\n"+
-		"192.168.1.20,8443,tcp\n"+
-		"10.4.0.230,53,udp\n")
 	assertSYNTrailFile(t, om, "fleet-to-fleet-tcp-syn-trail.csv", ""+
 		"src_ip,dst_ip,dst_port,syn_timestamp_utc\n"+
 		"10.0.0.1,10.0.0.2,9443,2024-03-05 12:00:02.123\n")
@@ -117,9 +114,57 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	assertSYNTrailFile(t, om, "private-nonfleet-to-fleet-tcp-syn-unique.csv", ""+
 		"src_ip,dst_ip,dst_port\n"+
 		"192.168.1.10,10.0.0.2,22\n")
-	assertSYNTrailFile(t, om, "private-probes-unique.csv", ""+
-		"src_ip,dst_port,protocol\n"+
-		"192.168.1.10,22,tcp\n")
+	assertSYNTrailFile(t, om, privateNonFleetEndpointsFilename, ""+
+		"{\n"+
+		"  \"schema_version\": 1,\n"+
+		"  \"endpoints\": [\n"+
+		"    {\n"+
+		"      \"ip\": \"10.4.0.230\",\n"+
+		"      \"server\": {\n"+
+		"        \"listeners\": [\n"+
+		"          {\n"+
+		"            \"protocol\": \"udp\",\n"+
+		"            \"port\": 53,\n"+
+		"            \"fleet_devices_count\": 1\n"+
+		"          }\n"+
+		"        ]\n"+
+		"      },\n"+
+		"      \"probe\": {\n"+
+		"        \"targets\": []\n"+
+		"      }\n"+
+		"    },\n"+
+		"    {\n"+
+		"      \"ip\": \"192.168.1.10\",\n"+
+		"      \"server\": {\n"+
+		"        \"listeners\": []\n"+
+		"      },\n"+
+		"      \"probe\": {\n"+
+		"        \"targets\": [\n"+
+		"          {\n"+
+		"            \"protocol\": \"tcp\",\n"+
+		"            \"port\": 22,\n"+
+		"            \"fleet_devices_count\": 1\n"+
+		"          }\n"+
+		"        ]\n"+
+		"      }\n"+
+		"    },\n"+
+		"    {\n"+
+		"      \"ip\": \"192.168.1.20\",\n"+
+		"      \"server\": {\n"+
+		"        \"listeners\": [\n"+
+		"          {\n"+
+		"            \"protocol\": \"tcp\",\n"+
+		"            \"port\": 8443,\n"+
+		"            \"fleet_devices_count\": 1\n"+
+		"          }\n"+
+		"        ]\n"+
+		"      },\n"+
+		"      \"probe\": {\n"+
+		"        \"targets\": []\n"+
+		"      }\n"+
+		"    }\n"+
+		"  ]\n"+
+		"}\n")
 
 	assertFlowDirectionCorrectionSQL(t, om, []string{
 		"`{{gcp_project_id}}.{{bq_dataset}}.mv-flow-data-404163-1`",
@@ -193,6 +238,20 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	if _, err := os.Stat(om.Path("private-probes-syn-unique.csv")); !os.IsNotExist(err) {
 		t.Fatalf("private-probes-syn-unique.csv stat error = %v, want not exist", err)
 	}
+	for _, old := range []struct {
+		filename string
+		key      string
+	}{
+		{filename: "private-servers-unique.csv", key: "private_servers_unique"},
+		{filename: "private-probes-unique.csv", key: "private_probes_unique"},
+	} {
+		if _, ok := artifacts[old.key]; ok {
+			t.Fatalf("artifacts contains superseded key %q", old.key)
+		}
+		if _, err := os.Stat(om.Path(old.filename)); !os.IsNotExist(err) {
+			t.Fatalf("%s stat error = %v, want not exist", old.filename, err)
+		}
+	}
 }
 
 func TestWriteSYNTrailArtifactsNonDebugWritesOnlyAlwaysOnFiles(t *testing.T) {
@@ -222,17 +281,23 @@ func TestWriteSYNTrailArtifactsNonDebugWritesOnlyAlwaysOnFiles(t *testing.T) {
 			t.Fatalf("stat always-on %s: %v", artifact.filename, statErr)
 		}
 	}
-	if len(artifacts) != 4 {
-		t.Fatalf("non-debug artifact count = %d, want 4", len(artifacts))
+	if len(artifacts) != 3 {
+		t.Fatalf("non-debug artifact count = %d, want 3", len(artifacts))
 	}
-	if got := artifacts["private_probes_unique"]; got != om.Path("private-probes-unique.csv") {
-		t.Fatalf("private probes artifact path = %q", got)
+	if got := artifacts[privateNonFleetEndpointsKey]; got != om.Path(privateNonFleetEndpointsFilename) {
+		t.Fatalf("private non-fleet endpoints artifact path = %q", got)
 	}
 	if _, ok := artifacts["private_probes_syn_unique"]; ok {
 		t.Fatal("non-debug artifacts contains old key private_probes_syn_unique")
 	}
 	if _, err := os.Stat(om.Path("private-probes-syn-unique.csv")); !os.IsNotExist(err) {
 		t.Fatalf("private-probes-syn-unique.csv stat error = %v, want not exist", err)
+	}
+	assertSYNTrailFile(t, om, privateNonFleetEndpointsFilename, "{\n  \"schema_version\": 1,\n  \"endpoints\": []\n}\n")
+	for _, filename := range []string{"private-servers-unique.csv", "private-probes-unique.csv"} {
+		if _, err := os.Stat(om.Path(filename)); !os.IsNotExist(err) {
+			t.Fatalf("%s stat error = %v, want not exist", filename, err)
+		}
 	}
 }
 
@@ -254,6 +319,43 @@ func TestWriteSYNTrailArtifactsFlowDirectionSQLDedupesDuplicatePrivateServerTupl
 	if got := strings.Count(sql, "private_server_10_4_0_230_53_udp_seen_as_src_artifact"); got != 1 {
 		t.Fatalf("duplicate private server SQL rule count = %d, want 1", got)
 	}
+}
+
+func TestWriteSYNTrailArtifactsMergesServerAndTCPProbeCardinalityByEndpoint(t *testing.T) {
+	om := newSYNTrailTestOutputManager(t)
+	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
+	buckets := syntrail.BucketedRecords{
+		syntrail.BucketFleetToNonFleet: {
+			testSYNTrailRecord("10.0.0.1", "192.168.1.20", 1883, ts),
+			testSYNTrailRecord("10.0.0.1", "192.168.1.20", 1883, ts.Add(time.Second)),
+			testSYNTrailRecord("10.0.0.2", "192.168.1.20", 1883, ts.Add(2*time.Second)),
+		},
+		syntrail.BucketPrivateNonFleetToFleet: {
+			testSYNTrailRecord("192.168.1.20", "10.0.0.3", 22, ts),
+			testSYNTrailRecord("192.168.1.20", "10.0.0.3", 22, ts.Add(time.Second)),
+			testSYNTrailRecord("192.168.1.20", "10.0.0.4", 22, ts.Add(2*time.Second)),
+			testSYNTrailRecordWithProtocol("192.168.1.20", "10.0.0.5", 53, ts, syntrail.ProtocolUDP),
+		},
+	}
+
+	if _, err := writeSYNTrailArtifacts(om, buckets, synTrailArtifactOptions{}); err != nil {
+		t.Fatalf("writeSYNTrailArtifacts() error = %v", err)
+	}
+
+	assertPrivateNonFleetEndpointsDocument(t, om, syntrail.PrivateNonFleetEndpointsDocument{
+		SchemaVersion: 1,
+		Endpoints: []syntrail.PrivateNonFleetEndpoint{
+			{
+				IP: "192.168.1.20",
+				Server: syntrail.ServerBehavior{Listeners: []syntrail.TransportBehavior{
+					{Protocol: "tcp", Port: 1883, FleetDevicesCount: 2},
+				}},
+				Probe: syntrail.ProbeBehavior{Targets: []syntrail.TransportBehavior{
+					{Protocol: "tcp", Port: 22, FleetDevicesCount: 2},
+				}},
+			},
+		},
+	})
 }
 
 func TestWriteSYNTrailArtifactsEmptyBucketsWriteHeaderOnlyFiles(t *testing.T) {
@@ -466,10 +568,19 @@ func TestWriteSYNTrailArtifactsFiltersPassiveFTPOnlyFromServerSummaries(t *testi
 		"dst_ip,dst_port,protocol\n"+
 		"203.0.113.10,21000,tcp\n"+
 		"203.0.113.10,41000,udp\n")
-	assertSYNTrailFile(t, om, "private-servers-unique.csv", ""+
-		"dst_ip,dst_port,protocol\n"+
-		"192.168.1.20,21000,tcp\n"+
-		"192.168.1.20,17900,udp\n")
+	assertPrivateNonFleetEndpointsDocument(t, om, syntrail.PrivateNonFleetEndpointsDocument{
+		SchemaVersion: 1,
+		Endpoints: []syntrail.PrivateNonFleetEndpoint{
+			{
+				IP: "192.168.1.20",
+				Server: syntrail.ServerBehavior{Listeners: []syntrail.TransportBehavior{
+					{Protocol: "udp", Port: 17900, FleetDevicesCount: 1},
+					{Protocol: "tcp", Port: 21000, FleetDevicesCount: 1},
+				}},
+				Probe: syntrail.ProbeBehavior{Targets: []syntrail.TransportBehavior{}},
+			},
+		},
+	})
 	assertFlowDirectionCorrectionSQL(t, om, []string{
 		"AND protocol_lc = 'tcp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 21000",
 		"AND protocol_lc = 'udp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 17900",
@@ -529,10 +640,19 @@ func TestWriteSYNTrailArtifactsExcludesUDPPortsOnlyFromServerSummaries(t *testin
 		"203.0.113.10,33534,tcp\n"+
 		"203.0.113.10,33433,udp\n"+
 		"203.0.113.10,33535,udp\n")
-	assertSYNTrailFile(t, om, "private-servers-unique.csv", ""+
-		"dst_ip,dst_port,protocol\n"+
-		"192.168.1.20,33433,udp\n"+
-		"192.168.1.20,33535,udp\n")
+	assertPrivateNonFleetEndpointsDocument(t, om, syntrail.PrivateNonFleetEndpointsDocument{
+		SchemaVersion: 1,
+		Endpoints: []syntrail.PrivateNonFleetEndpoint{
+			{
+				IP: "192.168.1.20",
+				Server: syntrail.ServerBehavior{Listeners: []syntrail.TransportBehavior{
+					{Protocol: "udp", Port: 33433, FleetDevicesCount: 1},
+					{Protocol: "udp", Port: 33535, FleetDevicesCount: 1},
+				}},
+				Probe: syntrail.ProbeBehavior{Targets: []syntrail.TransportBehavior{}},
+			},
+		},
+	})
 	assertFlowDirectionCorrectionSQL(t, om, []string{
 		"AND protocol_lc = 'udp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 33433",
 		"AND protocol_lc = 'udp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 33535",
@@ -612,11 +732,6 @@ var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
 		debugOnly: true,
 	},
 	{
-		filename: "private-servers-unique.csv",
-		key:      "private_servers_unique",
-		header:   "dst_ip,dst_port,protocol\n",
-	},
-	{
 		filename:  "fleet-to-fleet-tcp-syn-trail.csv",
 		key:       "fleet_to_fleet_tcp_syn_trail",
 		header:    "src_ip,dst_ip,dst_port,syn_timestamp_utc\n",
@@ -641,9 +756,9 @@ var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
 		debugOnly: true,
 	},
 	{
-		filename: "private-probes-unique.csv",
-		key:      "private_probes_unique",
-		header:   "src_ip,dst_port,protocol\n",
+		filename: privateNonFleetEndpointsFilename,
+		key:      privateNonFleetEndpointsKey,
+		header:   "{\n  \"schema_version\": 1,\n  \"endpoints\": []\n}\n",
 	},
 	{
 		filename: flowDirectionCorrectionSQLFilename,
@@ -685,6 +800,26 @@ func assertSYNTrailFileContains(t *testing.T, om *OutputManager, filename, want 
 	got := readSYNTrailFile(t, om, filename)
 	if !strings.Contains(string(got), want) {
 		t.Fatalf("%s = %q, want substring %q", filename, string(got), want)
+	}
+}
+
+func assertPrivateNonFleetEndpointsDocument(
+	t *testing.T,
+	om *OutputManager,
+	want syntrail.PrivateNonFleetEndpointsDocument,
+) {
+	t.Helper()
+
+	data, err := os.ReadFile(om.Path(privateNonFleetEndpointsFilename))
+	if err != nil {
+		t.Fatalf("read %s: %v", privateNonFleetEndpointsFilename, err)
+	}
+	var got syntrail.PrivateNonFleetEndpointsDocument
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode %s: %v", privateNonFleetEndpointsFilename, err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s = %#v, want %#v", privateNonFleetEndpointsFilename, got, want)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/aglants/pcaptool/internal/connectivity"
+	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/aglants/pcaptool/progress"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -48,6 +49,12 @@ const (
 type FirstPacketInfo struct {
 	Timestamp time.Time
 	PCAPFile  string
+}
+
+// PacketScanOptions controls packet admission for PCAP processing. A nil
+// PacketAdmission preserves the historical behavior and admits every packet.
+type PacketScanOptions struct {
+	PacketAdmission pcaputil.PacketAdmission
 }
 
 // BuildTransactionsFromPCAPs:
@@ -258,6 +265,36 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 	ipToDNS map[string][]string,
 	ftpControlPorts map[uint16]struct{},
 	ftpPassiveMinPort uint16,
+) ([]connectivity.Edge, FirstPacketInfo, error) {
+	return AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
+		ctx,
+		files,
+		txs,
+		onlyTCP,
+		inferDNSFromConnections,
+		excludePorts,
+		enforcePrivateAsSource,
+		ipToDNS,
+		ftpControlPorts,
+		ftpPassiveMinPort,
+		PacketScanOptions{},
+	)
+}
+
+// AttachConnectionsAndCollectEdgesFromPCAPsWithOptions applies optional packet
+// admission before earliest-packet tracking, edge collection, or correlation.
+func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
+	ctx context.Context,
+	files []string,
+	txs []*DNSTransaction,
+	onlyTCP bool,
+	inferDNSFromConnections bool,
+	excludePorts map[uint16]struct{},
+	enforcePrivateAsSource bool,
+	ipToDNS map[string][]string,
+	ftpControlPorts map[uint16]struct{},
+	ftpPassiveMinPort uint16,
+	scanOpt PacketScanOptions,
 ) ([]connectivity.Edge, FirstPacketInfo, error) {
 	if ftpPassiveMinPort == 0 {
 		ftpPassiveMinPort = connectivity.DefaultOptions().FTPPassiveMinPort
@@ -475,6 +512,9 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 					setErr(ctx.Err())
 					return
 				default:
+				}
+				if scanOpt.PacketAdmission != nil && !scanOpt.PacketAdmission(packet) {
+					continue
 				}
 
 				md := packet.Metadata()

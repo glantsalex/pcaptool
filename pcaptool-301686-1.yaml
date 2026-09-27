@@ -1,0 +1,19 @@
+schema_version: 1
+command: dnsextract
+
+dnsextract:
+  net_id: 301686-1
+
+  # Replace with the PCAP directory previously passed as the script argument.
+  read_dir: /home/alex/pcap-data/301686/301686-1/input/2026/08/31/
+
+  fleet: ./data/fleet-301686-1.txt
+  dns_ip_file: ./data/dns-ip.csv
+  dns_normalization_rules: ./data/pcaptool.rules.yaml
+
+  exclude_ports: "53,123"
+  enforce_private_as_source: true
+  ftp_control_ports: "21"
+  ftp_passive_min_port: "10000"
+  allow_private_dns_donation: true
+  disable_sni: true

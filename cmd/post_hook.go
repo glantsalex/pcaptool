@@ -92,7 +92,7 @@ func writeRunArtifactsManifest(
 	return path, nil
 }
 
-func runPostHooks(ctx context.Context, om *OutputManager, manifestPath string, hooks []string) error {
+func runPostHooks(ctx context.Context, om *OutputManager, manifestPath string, hooks []string, debug bool) error {
 	for i, hook := range hooks {
 		progress.SetStage(fmt.Sprintf("Post-hook %d/%d...", i+1, len(hooks)))
 
@@ -103,7 +103,7 @@ func runPostHooks(ctx context.Context, om *OutputManager, manifestPath string, h
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
-		if flagDebug {
+		if debug {
 			debugPrintPostHook(os.Stderr, i+1, len(hooks), hook, cmd.Dir, hookEnv)
 		}
 

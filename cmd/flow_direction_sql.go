@@ -52,14 +52,12 @@ func flowDirectionCorrectionSQL(netID string, tuples []syntrail.ServerTuple) str
 	b.WriteString("    bytes_to_srv, bytes_to_client,\n")
 	b.WriteString("    pckt_to_srv, pckt_to_client,\n")
 	b.WriteString("    LOWER(protocol) AS protocol_lc,\n")
-	b.WriteString("    (\n")
-	b.WriteString("      REGEXP_CONTAINS(src_ip, r'^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.)')\n")
-	b.WriteString("      OR STARTS_WITH(src_ip, '100.104.')\n")
-	b.WriteString("    ) AS src_is_private,\n")
-	b.WriteString("    (\n")
-	b.WriteString("      REGEXP_CONTAINS(dst_ip, r'^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.)')\n")
-	b.WriteString("      OR STARTS_WITH(dst_ip, '100.104.')\n")
-	b.WriteString("    ) AS dst_is_private\n")
+	b.WriteString("    ")
+	b.WriteString(flowDirectionPrivateIPv4SQL("src_ip"))
+	b.WriteString(" AS src_is_private,\n")
+	b.WriteString("    ")
+	b.WriteString(flowDirectionPrivateIPv4SQL("dst_ip"))
+	b.WriteString(" AS dst_is_private\n")
 	fmt.Fprintf(&b, "  FROM %s\n", sourceTable)
 	b.WriteString("),\n")
 	b.WriteString("decide AS (\n")
@@ -95,6 +93,21 @@ func flowDirectionCorrectionSQL(netID string, tuples []syntrail.ServerTuple) str
 	b.WriteString("FROM decide;\n")
 
 	return b.String()
+}
+
+// flowDirectionPrivateIPv4SQL builds an IPv4-only locality predicate. Safe
+// parsing turns malformed input into NULL, which COALESCE maps to false, while
+// IP_TRUNC preserves IPv6's 16-byte length so it cannot equal an IPv4 network.
+func flowDirectionPrivateIPv4SQL(column string) string {
+	return fmt.Sprintf(`COALESCE(
+      (
+        NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(%[1]s), 8) = NET.IP_FROM_STRING('10.0.0.0')
+        OR NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(%[1]s), 12) = NET.IP_FROM_STRING('172.16.0.0')
+        OR NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(%[1]s), 16) = NET.IP_FROM_STRING('192.168.0.0')
+        OR NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(%[1]s), 10) = NET.IP_FROM_STRING('100.64.0.0')
+      ),
+      FALSE
+    )`, column)
 }
 
 func privateServerSwapReason(tuple syntrail.ServerTuple) string {

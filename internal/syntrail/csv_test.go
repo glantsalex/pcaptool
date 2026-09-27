@@ -198,18 +198,6 @@ func TestWriteProtocolUniqueCSVReturnsWriterError(t *testing.T) {
 	}
 }
 
-func TestWritePrivateServersCSVEmptyWritesHeaderOnly(t *testing.T) {
-	var buf bytes.Buffer
-	if err := WritePrivateServersCSV(&buf, nil); err != nil {
-		t.Fatalf("WritePrivateServersCSV() error = %v", err)
-	}
-
-	want := "dst_ip,dst_port,protocol\n"
-	if got := buf.String(); got != want {
-		t.Fatalf("WritePrivateServersCSV() = %q, want %q", got, want)
-	}
-}
-
 func TestWritePublicServersCSVEmptyWritesHeaderOnly(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WritePublicServersCSV(&buf, nil); err != nil {
@@ -228,18 +216,6 @@ func TestWritePublicServersCSVReturnsWriterError(t *testing.T) {
 	err := WritePublicServersCSV(testCSVErrorWriter{err: writeErr}, nil)
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("WritePublicServersCSV() error = %v, want wrapped %v", err, writeErr)
-	}
-}
-
-func TestWritePrivateProbesCSVEmptyWritesHeaderOnly(t *testing.T) {
-	var buf bytes.Buffer
-	if err := WritePrivateProbesCSV(&buf, nil); err != nil {
-		t.Fatalf("WritePrivateProbesCSV() error = %v", err)
-	}
-
-	want := "src_ip,dst_port,protocol\n"
-	if got := buf.String(); got != want {
-		t.Fatalf("WritePrivateProbesCSV() = %q, want %q", got, want)
 	}
 }
 
@@ -374,31 +350,6 @@ func TestWriteUniqueCSVIncludesDedupedRecordsOnly(t *testing.T) {
 	}
 }
 
-func TestWritePrivateServersCSVIncludesProtocolDedupesAndSortsByTuple(t *testing.T) {
-	early := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
-	late := early.Add(time.Second)
-	records := []Record{
-		testCSVRecord("10.0.0.1", "10.0.0.10", 443, late),
-		testCSVRecord("10.0.0.2", "10.0.0.2", 8443, late),
-		testCSVRecord("10.0.0.3", "10.0.0.2", 443, early),
-		testCSVRecord("10.0.0.4", "10.0.0.2", 443, late),
-	}
-
-	var buf bytes.Buffer
-	if err := WritePrivateServersCSV(&buf, records); err != nil {
-		t.Fatalf("WritePrivateServersCSV() error = %v", err)
-	}
-
-	want := "" +
-		"dst_ip,dst_port,protocol\n" +
-		"10.0.0.2,443,tcp\n" +
-		"10.0.0.2,8443,tcp\n" +
-		"10.0.0.10,443,tcp\n"
-	if got := buf.String(); got != want {
-		t.Fatalf("WritePrivateServersCSV() = %q, want %q", got, want)
-	}
-}
-
 func TestWritePublicServersCSVNormalizesDedupesSortsAndPreservesInput(t *testing.T) {
 	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
 	records := []Record{
@@ -465,31 +416,6 @@ func TestPrivateServerTuplesNormalizesDedupesSortsAndPreservesInput(t *testing.T
 	}
 	if !reflect.DeepEqual(records, original) {
 		t.Fatalf("PrivateServerTuples() mutated records: got %+v, want %+v", records, original)
-	}
-}
-
-func TestWritePrivateProbesCSVIncludesProtocolDedupesAndSortsByTuple(t *testing.T) {
-	early := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
-	late := early.Add(time.Second)
-	records := []Record{
-		testCSVRecord("10.0.0.10", "10.0.0.1", 443, late),
-		testCSVRecord("10.0.0.2", "10.0.0.10", 443, early),
-		testCSVRecord("10.0.0.2", "10.0.0.2", 8443, late),
-		testCSVRecord("10.0.0.2", "10.0.0.3", 443, late),
-	}
-
-	var buf bytes.Buffer
-	if err := WritePrivateProbesCSV(&buf, records); err != nil {
-		t.Fatalf("WritePrivateProbesCSV() error = %v", err)
-	}
-
-	want := "" +
-		"src_ip,dst_port,protocol\n" +
-		"10.0.0.2,443,tcp\n" +
-		"10.0.0.2,8443,tcp\n" +
-		"10.0.0.10,443,tcp\n"
-	if got := buf.String(); got != want {
-		t.Fatalf("WritePrivateProbesCSV() = %q, want %q", got, want)
 	}
 }
 

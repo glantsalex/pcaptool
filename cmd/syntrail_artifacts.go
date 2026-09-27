@@ -24,16 +24,11 @@ func runSYNTrailSidecar(
 	ctx context.Context,
 	om *OutputManager,
 	files []string,
-	fleetPath string,
+	fleet *syntrail.FleetSet,
 	opt synTrailArtifactOptions,
 ) (map[string]string, error) {
-	if fleetPath == "" {
+	if fleet == nil {
 		return nil, nil
-	}
-
-	fleet, err := syntrail.LoadFleetIPv4File(fleetPath)
-	if err != nil {
-		return nil, fmt.Errorf("load SYN trail fleet file: %w", err)
 	}
 
 	records, err := scanSYNTrailFilesWithOptions(ctx, files, opt.ScanOptions)
@@ -44,7 +39,7 @@ func runSYNTrailSidecar(
 		opt.ScanOptions.Progress(len(files), len(files), "")
 	}
 
-	artifacts, err := writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, fleet), opt)
+	artifacts, err := writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, *fleet), opt)
 	if err != nil {
 		return nil, fmt.Errorf("write SYN trail artifacts: %w", err)
 	}
@@ -56,8 +51,13 @@ func writeSYNTrailArtifacts(
 	buckets syntrail.BucketedRecords,
 	opt synTrailArtifactOptions,
 ) (map[string]string, error) {
-	artifacts := make(map[string]string, len(synTrailArtifactSpecs)+1)
-	var privateServerRecords []syntrail.Record
+	artifacts := make(map[string]string, len(synTrailArtifactSpecs)+2)
+	_, privateServerRecords := syntrail.SplitFleetToNonFleetByDestinationLocality(
+		bucketRecords(buckets, syntrail.BucketFleetToNonFleet),
+	)
+	privateServerRecords = filterPassiveFTPServerSummaryRecords(privateServerRecords, opt)
+	privateServerRecords = filterUDPServerSummaryRecords(privateServerRecords, opt.ServerSummaryExcludeUDPPorts)
+	privateProbeRecords := tcpSYNTrailRecords(bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet))
 
 	for _, spec := range synTrailArtifactSpecs {
 		if spec.debugOnly && !opt.Debug {
@@ -65,12 +65,9 @@ func writeSYNTrailArtifacts(
 		}
 		records := spec.records(buckets)
 		switch spec.key {
-		case "private_servers_unique", "public_servers_unique":
+		case "public_servers_unique":
 			records = filterPassiveFTPServerSummaryRecords(records, opt)
 			records = filterUDPServerSummaryRecords(records, opt.ServerSummaryExcludeUDPPorts)
-		}
-		if spec.key == "private_servers_unique" {
-			privateServerRecords = append([]syntrail.Record(nil), records...)
 		}
 		path, err := writeSYNTrailArtifact(om, spec.filename, records, spec.writer)
 		if err != nil {
@@ -79,7 +76,13 @@ func writeSYNTrailArtifacts(
 		artifacts[spec.key] = path
 	}
 
-	path, err := writeFlowDirectionCorrectionSQL(om, syntrail.PrivateServerTuples(privateServerRecords))
+	path, err := writePrivateNonFleetEndpointsArtifact(om, privateServerRecords, privateProbeRecords)
+	if err != nil {
+		return nil, err
+	}
+	artifacts[privateNonFleetEndpointsKey] = path
+
+	path, err = writeFlowDirectionCorrectionSQL(om, syntrail.PrivateServerTuples(privateServerRecords))
 	if err != nil {
 		return nil, err
 	}
@@ -147,15 +150,6 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		writer: syntrail.WriteTCPUniqueCSV,
 	},
 	{
-		filename: "private-servers-unique.csv",
-		key:      "private_servers_unique",
-		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			_, privateNonFleet := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
-			return privateNonFleet
-		},
-		writer: syntrail.WritePublicServersCSV,
-	},
-	{
 		filename:  "fleet-to-fleet-tcp-syn-trail.csv",
 		key:       "fleet_to_fleet_tcp_syn_trail",
 		debugOnly: true,
@@ -191,15 +185,12 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		},
 		writer: syntrail.WriteUniqueCSV,
 	},
-	{
-		filename: "private-probes-unique.csv",
-		key:      "private_probes_unique",
-		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			return tcpSYNTrailRecords(bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet))
-		},
-		writer: syntrail.WritePrivateProbesCSV,
-	},
 }
+
+const (
+	privateNonFleetEndpointsFilename = "private-nonfleet-endpoints.json"
+	privateNonFleetEndpointsKey      = "private_nonfleet_endpoints"
+)
 
 func bucketRecords(buckets syntrail.BucketedRecords, bucket syntrail.Bucket) []syntrail.Record {
 	return append([]syntrail.Record(nil), buckets[bucket]...)
@@ -314,5 +305,27 @@ func writeSYNTrailArtifact(om *OutputManager, filename string, records []syntrai
 		return "", fmt.Errorf("close %s: %w", filename, closeErr)
 	}
 
+	return path, nil
+}
+
+func writePrivateNonFleetEndpointsArtifact(
+	om *OutputManager,
+	serverRecords []syntrail.Record,
+	probeRecords []syntrail.Record,
+) (string, error) {
+	f, err := om.Create(privateNonFleetEndpointsFilename)
+	if err != nil {
+		return "", fmt.Errorf("create %s: %w", privateNonFleetEndpointsFilename, err)
+	}
+
+	path := f.Name()
+	writeErr := syntrail.WritePrivateNonFleetEndpointsJSON(f, serverRecords, probeRecords)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return "", fmt.Errorf("write %s: %w", privateNonFleetEndpointsFilename, writeErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close %s: %w", privateNonFleetEndpointsFilename, closeErr)
+	}
 	return path, nil
 }

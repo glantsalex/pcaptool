@@ -1,0 +1,45 @@
+schema_version: 1
+command: dnsextract
+
+dnsextract:
+  net_id: andel-1
+  read_dir: ./pcaps
+
+  fleet: ./fleet.txt
+  fleet_scan_workers: 0
+
+  output_root: ./pcaptool_output
+  format: table
+  export_csv: ""
+  manifest_out: ""
+
+  short: false
+  unsorted: false
+  debug: false
+
+  radius_imsi: false
+  only_tcp: false
+  enforce_private_as_source: false
+  infer_dns_from_connections: false
+  allow_private_dns_donation: false
+  ignore_ntp: true
+  disable_sni: false
+
+  dns_ip_file: ""
+  dns_normalization_rules: ""
+
+  exclude_ports: "53"
+  ftp_control_ports: "21,990"
+  ftp_passive_min_port: "30000"
+  server_summary_exclude_udp_ports: "33434-33534"
+
+  topology_dns_window: 2m
+
+  active_resolve: false
+  active_resolvers: ""
+  reverse_dns_lookup: false
+
+  tls_cert_lookup: false
+  tls_cert_lookup_timeout: 15
+
+  post_hooks: []

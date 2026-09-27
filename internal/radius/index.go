@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/aglants/pcaptool/progress"
 )
 
@@ -25,6 +26,11 @@ import (
 type IMSIIndex struct {
 	mu   sync.RWMutex
 	byIP map[string][]SessionWindow
+}
+
+// ScanOptions controls packet admission while building a RADIUS index.
+type ScanOptions struct {
+	PacketAdmission pcaputil.PacketAdmission
 }
 
 // NewIMSIIndex creates an empty index.
@@ -80,8 +86,14 @@ func (idx *IMSIIndex) Lookup(ip net.IP, t time.Time) (string, bool) {
 // Differences from the Suricata project:
 //   - no streamId / taskId
 //   - no Redis (we do a single self-contained pass over the PCAPs)
-//   - files[] comes directly from dnsextract (already filtered .pcap list).
+//   - files[] comes directly from dnsextract's discovered PCAP list.
 func BuildIMSIIndexFromPCAPs(ctx context.Context, files []string) (*IMSIIndex, error) {
+	return BuildIMSIIndexFromPCAPsWithOptions(ctx, files, ScanOptions{})
+}
+
+// BuildIMSIIndexFromPCAPsWithOptions builds an index after applying optional
+// packet admission before any RADIUS parsing or deduplication.
+func BuildIMSIIndexFromPCAPsWithOptions(ctx context.Context, files []string, opt ScanOptions) (*IMSIIndex, error) {
 	idx := NewIMSIIndex()
 
 	if len(files) == 0 {
@@ -112,7 +124,7 @@ func BuildIMSIIndexFromPCAPs(ctx context.Context, files []string) (*IMSIIndex, e
 		go func() {
 			defer wg.Done()
 			for path := range fileCh {
-				err := processRadiusFile(ctx, path, collector, dedup)
+				err := processRadiusFile(ctx, path, collector, dedup, opt.PacketAdmission)
 				resCh <- fileResult{path: path, err: err}
 			}
 		}()

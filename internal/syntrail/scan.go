@@ -11,6 +11,7 @@ import (
 	"os"
 	"sync"
 
+	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
@@ -28,6 +29,10 @@ type ScanOptions struct {
 	// Progress is called after each file scan completes. It is optional and is
 	// invoked from the coordinating goroutine, not from worker goroutines.
 	Progress ScanProgressFunc
+
+	// PacketAdmission, when non-nil, is applied immediately after packet
+	// decoding. Rejected packets cannot contribute trail evidence.
+	PacketAdmission pcaputil.PacketAdmission
 }
 
 // ScanFiles scans packet captures for raw observed IPv4 TCP SYN and eligible
@@ -46,18 +51,23 @@ func ScanFilesWithOptions(ctx context.Context, files []string, opts ScanOptions)
 		return nil, nil
 	}
 	if opts.Workers <= 1 {
-		return scanFilesSequential(ctx, files, opts.Progress)
+		return scanFilesSequential(ctx, files, opts.Progress, opts.PacketAdmission)
 	}
-	return scanFilesConcurrent(ctx, files, opts.Workers, opts.Progress)
+	return scanFilesConcurrent(ctx, files, opts.Workers, opts.Progress, opts.PacketAdmission)
 }
 
-func scanFilesSequential(ctx context.Context, files []string, progress ScanProgressFunc) ([]Record, error) {
+func scanFilesSequential(
+	ctx context.Context,
+	files []string,
+	progress ScanProgressFunc,
+	admit pcaputil.PacketAdmission,
+) ([]Record, error) {
 	results := make([]scanFileResult, len(files))
 	for i, file := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		fileRecords, err := scanFile(ctx, file)
+		fileRecords, err := scanFile(ctx, file, admit)
 		if progress != nil {
 			progress(i+1, len(files), file)
 		}
@@ -73,7 +83,13 @@ func scanFilesSequential(ctx context.Context, files []string, progress ScanProgr
 	return mergeScanFileResults(results), nil
 }
 
-func scanFilesConcurrent(ctx context.Context, files []string, workers int, progress ScanProgressFunc) ([]Record, error) {
+func scanFilesConcurrent(
+	ctx context.Context,
+	files []string,
+	workers int,
+	progress ScanProgressFunc,
+	admit pcaputil.PacketAdmission,
+) ([]Record, error) {
 	if workers > len(files) {
 		workers = len(files)
 	}
@@ -95,7 +111,7 @@ func scanFilesConcurrent(ctx context.Context, files []string, workers int, progr
 					continue
 				}
 
-				records, err := scanFile(ctx, job.path)
+				records, err := scanFile(ctx, job.path, admit)
 				if err != nil {
 					cancel()
 				}
@@ -202,7 +218,7 @@ func mergeScanFileResults(results []scanFileResult) []Record {
 	return appendOrderedRecords(tcpRecords, udpRecords, udpOrder)
 }
 
-func scanFile(ctx context.Context, path string) ([]Record, error) {
+func scanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -234,6 +250,9 @@ func scanFile(ctx context.Context, path string) ([]Record, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read packet from %q: %w", path, err)
+		}
+		if admit != nil && !admit(packet) {
+			continue
 		}
 
 		if record, ok := synRecord(packet); ok {

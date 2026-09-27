@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/aglants/pcaptool/internal/connectivity"
+	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
@@ -79,6 +82,134 @@ func TestDNSAnswerCanAttributeMultipleObservedPorts(t *testing.T) {
 		if row.DNSName != name || row.DNSSource != "dns+synack" {
 			t.Fatalf("tcp/%d row = %#v, want %s dns+synack; matrix %#v", port, row, name, matrix)
 		}
+	}
+}
+
+func TestAttachConnectionsPacketAdmissionFiltersEdgesAndEarliest(t *testing.T) {
+	base := time.Date(2026, 9, 8, 8, 0, 0, 0, time.UTC)
+	retainedTS := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "fleet-filtered-connections.pcap")
+	writeConnectionAdmissionPCAP(t, path, []dnsAdmissionPacket{
+		{ts: base, data: buildConnectionInferenceTestTCPPacket(t, "192.168.1.10", "198.51.100.10", 40000, 80, true, false)},
+		{ts: base.Add(time.Millisecond), data: buildConnectionInferenceTestTCPPacket(t, "198.51.100.10", "192.168.1.10", 80, 40000, true, true)},
+		{ts: retainedTS, data: buildConnectionInferenceTestTCPPacket(t, "10.0.0.1", "203.0.113.10", 40001, 443, true, false)},
+		{ts: retainedTS.Add(time.Millisecond), data: buildConnectionInferenceTestTCPPacket(t, "203.0.113.10", "10.0.0.1", 443, 40001, true, true)},
+		{ts: retainedTS.Add(time.Second), data: buildConnectionInferenceTestTCPPacket(t, "192.168.1.20", "10.0.0.2", 40002, 22, true, false)},
+		{ts: retainedTS.Add(time.Second + time.Millisecond), data: buildConnectionInferenceTestTCPPacket(t, "10.0.0.2", "192.168.1.20", 22, 40002, true, true)},
+		{ts: retainedTS.Add(2 * time.Second), data: buildConnectionInferenceTestTCPPacket(t, "10.0.0.1", "10.0.0.2", 40003, 1883, true, false)},
+		{ts: retainedTS.Add(2*time.Second + time.Millisecond), data: buildConnectionInferenceTestTCPPacket(t, "10.0.0.2", "10.0.0.1", 1883, 40003, true, true)},
+	})
+
+	unfilteredTx := &DNSTransaction{
+		RequestTime:  base.Add(-time.Second),
+		IssuerIP:     net.ParseIP("192.168.1.10"),
+		DNSName:      "correlation.example",
+		NameEvidence: EvDNSAnswer,
+	}
+	unfilteredTx.AddResolvedIP(net.ParseIP("198.51.100.10"), EvDNSAnswer)
+	unfiltered, unfilteredFirst, err := AttachConnectionsAndCollectEdgesFromPCAPs(
+		context.Background(), []string{path}, []*DNSTransaction{unfilteredTx}, false, false, nil, false, nil, nil, 0,
+	)
+	if err != nil {
+		t.Fatalf("unfiltered connection scan: %v", err)
+	}
+	if len(unfiltered) != 4 || !unfilteredFirst.Timestamp.Equal(base) {
+		t.Fatalf("unfiltered scan = edges %d first %v, want 4/%v", len(unfiltered), unfilteredFirst.Timestamp, base)
+	}
+	if unfilteredTx.DestinationPort == nil || *unfilteredTx.DestinationPort != 80 || len(unfilteredTx.ObservedEndpointBindings) == 0 {
+		t.Fatalf("unfiltered correlation did not use non-fleet connection: %+v", unfilteredTx)
+	}
+
+	fleet := map[netip.Addr]struct{}{
+		netip.MustParseAddr("10.0.0.1"): {},
+		netip.MustParseAddr("10.0.0.2"): {},
+	}
+	admit := pcaputil.IPv4EndpointAdmission(func(ip netip.Addr) bool {
+		_, ok := fleet[ip]
+		return ok
+	})
+	filteredTx := &DNSTransaction{
+		RequestTime:  base.Add(-time.Second),
+		IssuerIP:     net.ParseIP("192.168.1.10"),
+		DNSName:      "correlation.example",
+		NameEvidence: EvDNSAnswer,
+	}
+	filteredTx.AddResolvedIP(net.ParseIP("198.51.100.10"), EvDNSAnswer)
+	filtered, filteredFirst, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
+		context.Background(),
+		[]string{path},
+		[]*DNSTransaction{filteredTx},
+		false,
+		false,
+		nil,
+		false,
+		nil,
+		nil,
+		0,
+		PacketScanOptions{PacketAdmission: admit},
+	)
+	if err != nil {
+		t.Fatalf("filtered connection scan: %v", err)
+	}
+	if !filteredFirst.Timestamp.Equal(retainedTS) || filteredFirst.PCAPFile != filepath.Base(path) {
+		t.Fatalf("filtered first packet = %+v, want %v/%s", filteredFirst, retainedTS, filepath.Base(path))
+	}
+	if len(filtered) != 3 {
+		t.Fatalf("filtered edges = %+v, want three fleet-related edges", filtered)
+	}
+	if filteredTx.DestinationPort != nil || len(filteredTx.Candidates) != 0 || len(filteredTx.ObservedEndpointBindings) != 0 {
+		t.Fatalf("non-fleet connection leaked into filtered correlation: %+v", filteredTx)
+	}
+	want := map[string]struct{}{
+		"10.0.0.1|203.0.113.10|tcp|443": {},
+		"192.168.1.20|10.0.0.2|tcp|22":  {},
+		"10.0.0.1|10.0.0.2|tcp|1883":    {},
+	}
+	for _, edge := range filtered {
+		key := edge.IssuerIP + "|" + edge.DstIP + "|" + string(edge.Protocol) + "|" + strconv.Itoa(int(edge.Port))
+		if _, ok := want[key]; !ok {
+			t.Fatalf("unexpected filtered edge %+v", edge)
+		}
+		delete(want, key)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing filtered edges: %v", want)
+	}
+
+	noMatch := pcaputil.IPv4EndpointAdmission(func(netip.Addr) bool { return false })
+	noEdges, noFirst, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
+		context.Background(), []string{path}, nil, false, false, nil, false, nil, nil, 0,
+		PacketScanOptions{PacketAdmission: noMatch},
+	)
+	if err != nil {
+		t.Fatalf("no-match connection scan: %v", err)
+	}
+	if len(noEdges) != 0 || !noFirst.Timestamp.IsZero() || noFirst.PCAPFile != "" {
+		t.Fatalf("no-match scan = edges %+v first %+v, want empty", noEdges, noFirst)
+	}
+}
+
+func writeConnectionAdmissionPCAP(t *testing.T, path string, packets []dnsAdmissionPacket) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create connection admission pcap: %v", err)
+	}
+	w := pcapgo.NewWriter(f)
+	if err := w.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {
+		f.Close()
+		t.Fatalf("write connection admission pcap header: %v", err)
+	}
+	for i, packet := range packets {
+		if err := w.WritePacket(gopacket.CaptureInfo{
+			Timestamp: packet.ts, CaptureLength: len(packet.data), Length: len(packet.data),
+		}, packet.data); err != nil {
+			f.Close()
+			t.Fatalf("write connection admission packet %d: %v", i, err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close connection admission pcap: %v", err)
 	}
 }
 
@@ -364,4 +495,182 @@ func TestDNSScanCollectsTruncatedQueryAndContinues(t *testing.T) {
 	if len(disabledTxs) != 1 || disabledTxs[0].DNSName != "complete.example" {
 		t.Fatalf("diagnostics-disabled scan created a truncated transaction: %+v", disabledTxs)
 	}
+}
+
+func TestBuildTransactionsWithSNIFromPCAPsPacketAdmissionFiltersEvidenceAndEarliest(t *testing.T) {
+	header := make([]byte, 12)
+	binary.BigEndian.PutUint16(header[0:2], 0x090a)
+	binary.BigEndian.PutUint16(header[2:4], 0x0100)
+	binary.BigEndian.PutUint16(header[4:6], 1)
+	truncated := append(header, 0x03, 'a', 'p', 'i', 0x07, 'e', 'x')
+
+	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	retainedTS := time.Date(2026, 9, 10, 9, 30, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "fleet-filtered-dns.pcap")
+	writeDNSAdmissionPCAP(t, path, []dnsAdmissionPacket{
+		{ts: base, data: buildDNSAdmissionPacket(t, truncated, "192.168.1.10", "192.0.2.53")},
+		{ts: base.Add(time.Second), data: buildDNSAdmissionPacket(t, buildRawDNSQuery("excluded.example", uint16(layers.DNSTypeA)), "192.168.1.10", "192.0.2.53")},
+		{ts: base.Add(2 * time.Second), data: buildSNIAdmissionPacket(t, "excluded-sni.example", "192.168.1.10", "198.51.100.20")},
+		{ts: retainedTS, data: buildDNSAdmissionPacket(t, buildRawDNSQuery("retained.example", uint16(layers.DNSTypeA)), "10.0.0.1", "192.0.2.53")},
+		{ts: retainedTS.Add(time.Second), data: buildSNIAdmissionPacket(t, "retained-sni.example", "10.0.0.1", "203.0.113.20")},
+	})
+
+	unfiltered, unfilteredEarliest, unfilteredDiagnostics, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
+		context.Background(), []string{path}, true, true,
+	)
+	if err != nil {
+		t.Fatalf("unfiltered DNS scan: %v", err)
+	}
+	if len(unfiltered) != 4 || len(unfilteredDiagnostics) != 1 || !unfilteredEarliest.Equal(base) {
+		t.Fatalf("unfiltered scan = txs %d diagnostics %d earliest %v, want 4/1/%v", len(unfiltered), len(unfilteredDiagnostics), unfilteredEarliest, base)
+	}
+
+	fleet := map[netip.Addr]struct{}{netip.MustParseAddr("10.0.0.1"): {}}
+	admit := pcaputil.IPv4EndpointAdmission(func(ip netip.Addr) bool {
+		_, ok := fleet[ip]
+		return ok
+	})
+	filtered, filteredEarliest, filteredDiagnostics, err := BuildTransactionsWithSNIFromPCAPsWithOptions(
+		context.Background(),
+		[]string{path},
+		true,
+		true,
+		PacketScanOptions{PacketAdmission: admit},
+	)
+	if err != nil {
+		t.Fatalf("filtered DNS scan: %v", err)
+	}
+	if len(filtered) != 2 {
+		t.Fatalf("filtered transactions = %+v, want retained DNS and SNI only", filtered)
+	}
+	filteredNames := map[string]Evidence{}
+	for _, tx := range filtered {
+		filteredNames[tx.DNSName] = tx.NameEvidence
+	}
+	if _, ok := filteredNames["retained.example"]; !ok || filteredNames["retained-sni.example"]&EvSNI == 0 {
+		t.Fatalf("filtered transactions = %+v, want retained DNS and SNI evidence", filtered)
+	}
+	if _, ok := filteredNames["excluded.example"]; ok {
+		t.Fatalf("excluded DNS transaction leaked through packet admission: %+v", filtered)
+	}
+	if _, ok := filteredNames["excluded-sni.example"]; ok {
+		t.Fatalf("excluded SNI transaction leaked through packet admission: %+v", filtered)
+	}
+	if len(filteredDiagnostics) != 0 {
+		t.Fatalf("filtered diagnostics = %+v, want none", filteredDiagnostics)
+	}
+	if !filteredEarliest.Equal(retainedTS) {
+		t.Fatalf("filtered earliest = %v, want %v", filteredEarliest, retainedTS)
+	}
+}
+
+type dnsAdmissionPacket struct {
+	ts   time.Time
+	data []byte
+}
+
+func writeDNSAdmissionPCAP(t *testing.T, path string, packets []dnsAdmissionPacket) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create DNS admission pcap: %v", err)
+	}
+	w := pcapgo.NewWriter(f)
+	if err := w.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {
+		f.Close()
+		t.Fatalf("write DNS admission pcap header: %v", err)
+	}
+	for i, packet := range packets {
+		length := len(packet.data)
+		if i == 0 {
+			length += 8
+		}
+		if err := w.WritePacket(gopacket.CaptureInfo{
+			Timestamp: packet.ts, CaptureLength: len(packet.data), Length: length,
+		}, packet.data); err != nil {
+			f.Close()
+			t.Fatalf("write DNS admission packet %d: %v", i, err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close DNS admission pcap: %v", err)
+	}
+}
+
+func buildDNSAdmissionPacket(t *testing.T, payload []byte, src, dst string) []byte {
+	t.Helper()
+	eth := &layers.Ethernet{
+		SrcMAC: net.HardwareAddr{0, 1, 2, 3, 4, 5}, DstMAC: net.HardwareAddr{6, 7, 8, 9, 10, 11}, EthernetType: layers.EthernetTypeIPv4,
+	}
+	ip := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolUDP, SrcIP: net.ParseIP(src).To4(), DstIP: net.ParseIP(dst).To4(),
+	}
+	udp := &layers.UDP{SrcPort: 53000, DstPort: 53}
+	if err := udp.SetNetworkLayerForChecksum(ip); err != nil {
+		t.Fatalf("set DNS admission UDP checksum layer: %v", err)
+	}
+	buffer := gopacket.NewSerializeBuffer()
+	if err := gopacket.SerializeLayers(
+		buffer,
+		gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true},
+		eth,
+		ip,
+		udp,
+		gopacket.Payload(payload),
+	); err != nil {
+		t.Fatalf("serialize DNS admission packet: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func buildSNIAdmissionPacket(t *testing.T, serverName, src, dst string) []byte {
+	t.Helper()
+	name := []byte(serverName)
+	serverNameList := make([]byte, 2+1+2+len(name))
+	binary.BigEndian.PutUint16(serverNameList[0:2], uint16(1+2+len(name)))
+	serverNameList[2] = 0
+	binary.BigEndian.PutUint16(serverNameList[3:5], uint16(len(name)))
+	copy(serverNameList[5:], name)
+
+	extensions := make([]byte, 4+len(serverNameList))
+	binary.BigEndian.PutUint16(extensions[0:2], 0)
+	binary.BigEndian.PutUint16(extensions[2:4], uint16(len(serverNameList)))
+	copy(extensions[4:], serverNameList)
+
+	body := make([]byte, 0, 2+32+1+2+2+1+1+2+len(extensions))
+	body = append(body, 0x03, 0x03)
+	body = append(body, make([]byte, 32)...)
+	body = append(body, 0)
+	body = append(body, 0, 2, 0x13, 0x01)
+	body = append(body, 1, 0)
+	body = append(body, byte(len(extensions)>>8), byte(len(extensions)))
+	body = append(body, extensions...)
+
+	handshake := []byte{1, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
+	handshake = append(handshake, body...)
+	record := []byte{0x16, 0x03, 0x01, byte(len(handshake) >> 8), byte(len(handshake))}
+	record = append(record, handshake...)
+
+	eth := &layers.Ethernet{
+		SrcMAC: net.HardwareAddr{0, 1, 2, 3, 4, 5}, DstMAC: net.HardwareAddr{6, 7, 8, 9, 10, 11}, EthernetType: layers.EthernetTypeIPv4,
+	}
+	ip := &layers.IPv4{
+		Version: 4, IHL: 5, TTL: 64, Protocol: layers.IPProtocolTCP, SrcIP: net.ParseIP(src).To4(), DstIP: net.ParseIP(dst).To4(),
+	}
+	tcp := &layers.TCP{SrcPort: 40000, DstPort: 443, Seq: 1, ACK: true}
+	if err := tcp.SetNetworkLayerForChecksum(ip); err != nil {
+		t.Fatalf("set SNI admission TCP checksum layer: %v", err)
+	}
+	buffer := gopacket.NewSerializeBuffer()
+	if err := gopacket.SerializeLayers(
+		buffer,
+		gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true},
+		eth,
+		ip,
+		tcp,
+		gopacket.Payload(record),
+	); err != nil {
+		t.Fatalf("serialize SNI admission packet: %v", err)
+	}
+	return buffer.Bytes()
 }

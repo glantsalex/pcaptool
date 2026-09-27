@@ -16,12 +16,18 @@ import (
 	"time"
 
 	"github.com/aglants/pcaptool/internal/dns"
+	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/aglants/pcaptool/internal/syntrail"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
 	"github.com/spf13/cobra"
 )
+
+// testDNSExtractOptions is test-local mutable state used by the existing
+// end-to-end command tests. Production command instances capture their own
+// options value and do not use package-global execution configuration.
+var testDNSExtractOptions = DefaultDNSExtractOptions()
 
 func TestTruncatedDNSPacketsArtifactWrittenAndManifestedWithAndWithoutDebug(t *testing.T) {
 	restoreDNSExtractFlags(t)
@@ -41,33 +47,33 @@ func TestTruncatedDNSPacketsArtifactWrittenAndManifestedWithAndWithoutDebug(t *t
 	for _, debug := range []bool{false, true} {
 		t.Run(map[bool]string{false: "debug_false", true: "debug_true"}[debug], func(t *testing.T) {
 			outputRoot := t.TempDir()
-			flagReadDir = readDir
-			flagNetID = "net"
-			flagOutputRoot = outputRoot
-			flagFormat = "table"
-			flagFleet = ""
-			flagExportCSV = ""
-			flagConnectivityShort = false
-			flagRadiusIMSI = false
-			flagOnlyTCP = false
-			flagIgnoreNTP = false
-			flagExcludePorts = "53"
-			flagFTPControlPorts = "21,990"
-			flagFTPPassiveMinPort = "30000"
-			flagServerSummaryExcludeUDPPorts = "33434-33534"
-			flagDNSIPFile = ""
-			flagTopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
-			flagActiveResolve = false
-			flagActiveResolvers = ""
-			flagDisableSNI = true
-			flagUnsorted = false
-			flagDebug = debug
-			flagManifestOut = ""
-			flagPostHooks = nil
-			flagFleetScanWorkers = 0
-			flagEnforcePrivateAsSource = false
+			testDNSExtractOptions.ReadDir = readDir
+			testDNSExtractOptions.NetID = "net"
+			testDNSExtractOptions.OutputRoot = outputRoot
+			testDNSExtractOptions.Format = "table"
+			testDNSExtractOptions.Fleet = ""
+			testDNSExtractOptions.ExportCSV = ""
+			testDNSExtractOptions.ConnectivityShort = false
+			testDNSExtractOptions.RadiusIMSI = false
+			testDNSExtractOptions.OnlyTCP = false
+			testDNSExtractOptions.IgnoreNTP = false
+			testDNSExtractOptions.ExcludePorts = "53"
+			testDNSExtractOptions.FTPControlPorts = "21,990"
+			testDNSExtractOptions.FTPPassiveMinPort = "30000"
+			testDNSExtractOptions.ServerSummaryExcludeUDPPorts = "33434-33534"
+			testDNSExtractOptions.DNSIPFile = ""
+			testDNSExtractOptions.TopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+			testDNSExtractOptions.ActiveResolve = false
+			testDNSExtractOptions.ActiveResolvers = ""
+			testDNSExtractOptions.DisableSNI = true
+			testDNSExtractOptions.Unsorted = false
+			testDNSExtractOptions.Debug = debug
+			testDNSExtractOptions.ManifestOut = ""
+			testDNSExtractOptions.PostHooks = nil
+			testDNSExtractOptions.FleetScanWorkers = 0
+			testDNSExtractOptions.EnforcePrivateAsSource = false
 
-			if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
+			if err := runDNSExtract(&cobra.Command{}, nil, testDNSExtractOptions); err != nil {
 				t.Fatalf("runDNSExtract(debug=%v): %v", debug, err)
 			}
 
@@ -156,7 +162,7 @@ func TestTruncatedDNSPacketsArtifactWrittenAndManifestedWithAndWithoutDebug(t *t
 	}
 }
 
-func TestDnsextractFleetArtifactsRespectDebugAndProbeRename(t *testing.T) {
+func TestDnsextractFleetArtifactsRespectDebugAndPrivateEndpointContract(t *testing.T) {
 	restoreDNSExtractFlags(t)
 	resolveDNSNamesIPv4WithAudit = func(
 		context.Context,
@@ -178,33 +184,33 @@ func TestDnsextractFleetArtifactsRespectDebugAndProbeRename(t *testing.T) {
 	for _, debug := range []bool{false, true} {
 		t.Run(map[bool]string{false: "non_debug", true: "debug"}[debug], func(t *testing.T) {
 			outputRoot := t.TempDir()
-			flagReadDir = readDir
-			flagNetID = "net"
-			flagOutputRoot = outputRoot
-			flagFormat = "table"
-			flagFleet = fleetPath
-			flagExportCSV = ""
-			flagConnectivityShort = false
-			flagRadiusIMSI = false
-			flagOnlyTCP = false
-			flagIgnoreNTP = false
-			flagExcludePorts = "53"
-			flagFTPControlPorts = "21,990"
-			flagFTPPassiveMinPort = "30000"
-			flagServerSummaryExcludeUDPPorts = "33434-33534"
-			flagDNSIPFile = ""
-			flagTopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
-			flagActiveResolve = false
-			flagActiveResolvers = ""
-			flagDisableSNI = true
-			flagUnsorted = false
-			flagDebug = debug
-			flagManifestOut = ""
-			flagPostHooks = nil
-			flagFleetScanWorkers = 1
-			flagEnforcePrivateAsSource = false
+			testDNSExtractOptions.ReadDir = readDir
+			testDNSExtractOptions.NetID = "net"
+			testDNSExtractOptions.OutputRoot = outputRoot
+			testDNSExtractOptions.Format = "table"
+			testDNSExtractOptions.Fleet = fleetPath
+			testDNSExtractOptions.ExportCSV = ""
+			testDNSExtractOptions.ConnectivityShort = false
+			testDNSExtractOptions.RadiusIMSI = false
+			testDNSExtractOptions.OnlyTCP = false
+			testDNSExtractOptions.IgnoreNTP = false
+			testDNSExtractOptions.ExcludePorts = "53"
+			testDNSExtractOptions.FTPControlPorts = "21,990"
+			testDNSExtractOptions.FTPPassiveMinPort = "30000"
+			testDNSExtractOptions.ServerSummaryExcludeUDPPorts = "33434-33534"
+			testDNSExtractOptions.DNSIPFile = ""
+			testDNSExtractOptions.TopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+			testDNSExtractOptions.ActiveResolve = false
+			testDNSExtractOptions.ActiveResolvers = ""
+			testDNSExtractOptions.DisableSNI = true
+			testDNSExtractOptions.Unsorted = false
+			testDNSExtractOptions.Debug = debug
+			testDNSExtractOptions.ManifestOut = ""
+			testDNSExtractOptions.PostHooks = nil
+			testDNSExtractOptions.FleetScanWorkers = 1
+			testDNSExtractOptions.EnforcePrivateAsSource = false
 
-			if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
+			if err := runDNSExtract(&cobra.Command{}, nil, testDNSExtractOptions); err != nil {
 				t.Fatalf("runDNSExtract(debug=%v): %v", debug, err)
 			}
 			runDir := findSingleRunDir(t, outputRoot, "net")
@@ -241,8 +247,358 @@ func TestDnsextractFleetArtifactsRespectDebugAndProbeRename(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(runDir, "private-probes-syn-unique.csv")); !os.IsNotExist(err) {
 				t.Fatalf("old private probe filename stat error = %v, want not exist", err)
 			}
+			for _, superseded := range []struct {
+				key      string
+				filename string
+			}{
+				{key: "private_servers_unique", filename: "private-servers-unique.csv"},
+				{key: "private_probes_unique", filename: "private-probes-unique.csv"},
+			} {
+				if _, ok := manifest.Files[superseded.key]; ok {
+					t.Fatalf("manifest contains superseded key %q", superseded.key)
+				}
+				if _, err := os.Stat(filepath.Join(runDir, superseded.filename)); !os.IsNotExist(err) {
+					t.Fatalf("superseded %s stat error = %v, want not exist", superseded.filename, err)
+				}
+			}
 		})
 	}
+}
+
+func TestDnsextractFleetAdmissionConstrainsOutputsAndFirstPacketMetadata(t *testing.T) {
+	restoreDNSExtractFlags(t)
+	resolveDNSNamesIPv4WithAudit = func(
+		context.Context,
+		[]string,
+		dns.ResolveUnresolvedOptions,
+		dns.IPv4LookupFunc,
+	) ([]dns.DNSNameIPv4Resolution, []dns.ActiveResolveAuditRecord, error) {
+		t.Fatal("active resolver called while --active-resolve=false")
+		return nil, nil, nil
+	}
+
+	readDir := t.TempDir()
+	rejectedTS := time.Date(2026, 9, 8, 8, 0, 0, 0, time.UTC)
+	retainedTS := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
+	pcapPath := filepath.Join(readDir, "mixed.pcap")
+	writeFleetAdmissionTestPCAP(t, pcapPath, rejectedTS, retainedTS)
+	fleetPath := filepath.Join(t.TempDir(), "fleet.txt")
+	if err := os.WriteFile(fleetPath, []byte("10.0.0.10\n"), 0o644); err != nil {
+		t.Fatalf("write fleet file: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name             string
+		fleet            string
+		wantDate         string
+		wantFirst        time.Time
+		wantExcludedData bool
+		wantFleetFiles   bool
+	}{
+		{
+			name:             "fleet_absent_preserves_unfiltered_behavior",
+			wantDate:         "2026-09-08",
+			wantFirst:        rejectedTS,
+			wantExcludedData: true,
+		},
+		{
+			name:           "fleet_filters_all_packet_evidence",
+			fleet:          fleetPath,
+			wantDate:       "2026-09-10",
+			wantFirst:      retainedTS,
+			wantFleetFiles: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outputRoot := t.TempDir()
+			configureFleetAdmissionDNSExtract(t, readDir, outputRoot, tc.fleet, true)
+			if err := runDNSExtract(&cobra.Command{}, nil, testDNSExtractOptions); err != nil {
+				t.Fatalf("runDNSExtract: %v", err)
+			}
+
+			runDir := findSingleRunDir(t, outputRoot, "net")
+			manifest := readRunArtifactsManifest(t, runDir)
+			if manifest.PCAPDate != tc.wantDate {
+				t.Fatalf("pcap_date = %q, want %q", manifest.PCAPDate, tc.wantDate)
+			}
+			if manifest.FirstPacketTSUTC != tc.wantFirst.Format(time.RFC3339Nano) || manifest.FirstPacketPCAPFile != filepath.Base(pcapPath) {
+				t.Fatalf("first packet metadata = %q/%q, want %q/%q", manifest.FirstPacketTSUTC, manifest.FirstPacketPCAPFile, tc.wantFirst.Format(time.RFC3339Nano), filepath.Base(pcapPath))
+			}
+			if !strings.Contains(runDir, "pcap-date-"+tc.wantDate) {
+				t.Fatalf("run directory = %q, want pcap-date-%s layout", runDir, tc.wantDate)
+			}
+
+			for _, artifact := range expectedSYNTrailArtifacts {
+				_, present := manifest.Files[artifact.key]
+				wantPresent := tc.wantFleetFiles
+				if present != wantPresent {
+					t.Fatalf("manifest key %q present=%v, want %v", artifact.key, present, wantPresent)
+				}
+			}
+
+			foundExcluded := false
+			for key, path := range manifest.Files {
+				contents, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("read manifest artifact %q: %v", key, err)
+				}
+				text := string(contents)
+				if strings.Contains(text, "excluded.example") ||
+					strings.Contains(text, "excluded-sni.example") ||
+					strings.Contains(text, "198.51.100.99") ||
+					strings.Contains(text, "192.168.10.1") {
+					foundExcluded = true
+				}
+				if tc.fleet != "" && (strings.Contains(text, "excluded.example") ||
+					strings.Contains(text, "excluded-sni.example") ||
+					strings.Contains(text, "198.51.100.99") ||
+					strings.Contains(text, "192.168.10.1")) {
+					t.Fatalf("non-fleet evidence leaked into %q:\n%s", key, text)
+				}
+			}
+			if foundExcluded != tc.wantExcludedData {
+				t.Fatalf("excluded packet evidence found=%v, want %v", foundExcluded, tc.wantExcludedData)
+			}
+
+			mainOutput := mustReadTestFile(t, manifest.Files["main_output"])
+			serviceEndpoints := mustReadTestFile(t, manifest.Files["service_endpoints"])
+			if !strings.Contains(mainOutput, "retained.example") || !strings.Contains(serviceEndpoints, "retained.example") {
+				t.Fatalf("retained DNS evidence missing from outputs:\nmain=%s\nservices=%s", mainOutput, serviceEndpoints)
+			}
+			if tc.fleet != "" {
+				truncatedRows := readCSVTestFile(t, manifest.Files["truncated_dns_packets"])
+				if len(truncatedRows) != 1 {
+					t.Fatalf("filtered truncated DNS artifact = %#v, want header only", truncatedRows)
+				}
+			}
+		})
+	}
+}
+
+func TestDnsextractFleetAdmissionIsolatesMixedCaptureArtifacts(t *testing.T) {
+	restoreDNSExtractFlags(t)
+
+	readDir := t.TempDir()
+	writeFleetIsolationTestPCAP(t, filepath.Join(readDir, "mixed-fleets.pcap"))
+	fleetPath := filepath.Join(t.TempDir(), "fleet.txt")
+	if err := os.WriteFile(fleetPath, []byte("10.0.0.10\n10.0.0.11\n"), 0o644); err != nil {
+		t.Fatalf("write fleet file: %v", err)
+	}
+	outputRoot := t.TempDir()
+	configureFleetAdmissionDNSExtract(t, readDir, outputRoot, fleetPath, false)
+
+	if err := runDNSExtract(&cobra.Command{}, nil, testDNSExtractOptions); err != nil {
+		t.Fatalf("runDNSExtract: %v", err)
+	}
+	runDir := findSingleRunDir(t, outputRoot, "net")
+	manifest := readRunArtifactsManifest(t, runDir)
+
+	privateEndpointData, err := os.ReadFile(manifest.Files[privateNonFleetEndpointsKey])
+	if err != nil {
+		t.Fatalf("read %s: %v", privateNonFleetEndpointsFilename, err)
+	}
+	var privateEndpoints syntrail.PrivateNonFleetEndpointsDocument
+	if err := json.Unmarshal(privateEndpointData, &privateEndpoints); err != nil {
+		t.Fatalf("decode %s: %v", privateNonFleetEndpointsFilename, err)
+	}
+	wantPrivateEndpoints := syntrail.PrivateNonFleetEndpointsDocument{
+		SchemaVersion: 1,
+		Endpoints: []syntrail.PrivateNonFleetEndpoint{
+			{
+				IP: "192.168.1.20",
+				Server: syntrail.ServerBehavior{Listeners: []syntrail.TransportBehavior{
+					{Protocol: "tcp", Port: 80, FleetDevicesCount: 2},
+				}},
+				Probe: syntrail.ProbeBehavior{Targets: []syntrail.TransportBehavior{}},
+			},
+		},
+	}
+	if !reflect.DeepEqual(privateEndpoints, wantPrivateEndpoints) {
+		t.Fatalf("%s = %#v, want %#v", privateNonFleetEndpointsFilename, privateEndpoints, wantPrivateEndpoints)
+	}
+
+	topologyData, err := os.ReadFile(manifest.Files["network_topology_matrix_json"])
+	if err != nil {
+		t.Fatalf("read network topology matrix JSON: %v", err)
+	}
+	var topology struct {
+		Entries []struct {
+			IssuerIP      string `json:"issuer_ip"`
+			DestinationIP string `json:"destination_ip"`
+			Protocol      string `json:"protocol"`
+			Port          uint16 `json:"port"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(topologyData, &topology); err != nil {
+		t.Fatalf("decode network topology matrix JSON: %v", err)
+	}
+	type topologyTuple struct {
+		issuer      string
+		destination string
+		protocol    string
+		port        uint16
+	}
+	wantTopology := map[topologyTuple]struct{}{
+		{issuer: "10.0.0.10", destination: "192.168.1.20", protocol: "tcp", port: 80}: {},
+		{issuer: "10.0.0.11", destination: "192.168.1.20", protocol: "tcp", port: 80}: {},
+	}
+	gotTopology := make(map[topologyTuple]struct{}, len(topology.Entries))
+	for _, entry := range topology.Entries {
+		gotTopology[topologyTuple{
+			issuer:      entry.IssuerIP,
+			destination: entry.DestinationIP,
+			protocol:    entry.Protocol,
+			port:        entry.Port,
+		}] = struct{}{}
+	}
+	if len(topology.Entries) != len(wantTopology) || !reflect.DeepEqual(gotTopology, wantTopology) {
+		t.Fatalf("network topology tuples = %#v, want %#v", gotTopology, wantTopology)
+	}
+
+	directionSQL := mustReadTestFile(t, manifest.Files[flowDirectionCorrectionSQLKey])
+	wantLearnedClause := "AND protocol_lc = 'tcp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 80"
+	if count := strings.Count(directionSQL, wantLearnedClause); count != 1 {
+		t.Fatalf("learned Fleet-A server clause count = %d, want 1 in:\n%s", count, directionSQL)
+	}
+	if count := strings.Count(directionSQL, "THEN 'private_server_"); count != 1 {
+		t.Fatalf("total learned private-server clause count = %d, want 1 in:\n%s", count, directionSQL)
+	}
+	for _, excludedClause := range []string{
+		"AND src_ip = '192.168.2.20'\n       AND src_port = 1883",
+		"AND src_ip = '172.21.0.20'\n       AND src_port = 9000",
+	} {
+		if strings.Contains(directionSQL, excludedClause) {
+			t.Fatalf("excluded mixed-capture tuple %q leaked into directionality SQL:\n%s", excludedClause, directionSQL)
+		}
+	}
+}
+
+func TestDnsextractFleetAdmissionNoMatchUsesUnknownMetadataAndPreservesGating(t *testing.T) {
+	restoreDNSExtractFlags(t)
+	readDir := t.TempDir()
+	writeFleetAdmissionTestPCAP(
+		t,
+		filepath.Join(readDir, "non-fleet.pcap"),
+		time.Date(2026, 9, 8, 8, 0, 0, 0, time.UTC),
+		time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC),
+	)
+	fleetPath := filepath.Join(t.TempDir(), "fleet.txt")
+	if err := os.WriteFile(fleetPath, []byte("10.255.255.255\n"), 0o644); err != nil {
+		t.Fatalf("write fleet file: %v", err)
+	}
+	outputRoot := t.TempDir()
+	configureFleetAdmissionDNSExtract(t, readDir, outputRoot, fleetPath, false)
+
+	if err := runDNSExtract(&cobra.Command{}, nil, testDNSExtractOptions); err != nil {
+		t.Fatalf("runDNSExtract: %v", err)
+	}
+	runDir := findSingleRunDir(t, outputRoot, "net")
+	manifest := readRunArtifactsManifest(t, runDir)
+	if manifest.PCAPDate != "unknown" || manifest.FirstPacketTSUTC != "" || manifest.FirstPacketPCAPFile != "" {
+		t.Fatalf("no-match metadata = date %q first %q/%q, want unknown and empty", manifest.PCAPDate, manifest.FirstPacketTSUTC, manifest.FirstPacketPCAPFile)
+	}
+	if !strings.Contains(runDir, "pcap-date-unknown") {
+		t.Fatalf("run directory = %q, want pcap-date-unknown layout", runDir)
+	}
+
+	for _, key := range []string{
+		"dns_issuer_profile",
+		"network_topology_matrix",
+		"network_topology_matrix_json",
+		"network_topology_matrix_compact",
+		"dns_unresolved_dns",
+		"external_endpoints",
+		"unresolved_ip",
+	} {
+		if _, ok := manifest.Files[key]; ok {
+			t.Fatalf("data-conditional manifest key %q present for empty filtered dataset", key)
+		}
+	}
+	for _, artifact := range expectedSYNTrailArtifacts {
+		_, present := manifest.Files[artifact.key]
+		wantPresent := !artifact.debugOnly
+		if present != wantPresent {
+			t.Fatalf("manifest key %q present=%v, want %v", artifact.key, present, wantPresent)
+		}
+	}
+	for _, key := range []string{"main_output", "service_endpoints", "unique_dns_port_proto", "truncated_dns_packets"} {
+		if path := manifest.Files[key]; path == "" {
+			t.Fatalf("always-written manifest key %q missing", key)
+		}
+	}
+}
+
+func configureFleetAdmissionDNSExtract(t *testing.T, readDir, outputRoot, fleet string, debug bool) {
+	t.Helper()
+	testDNSExtractOptions.ReadDir = readDir
+	testDNSExtractOptions.NetID = "net"
+	testDNSExtractOptions.OutputRoot = outputRoot
+	testDNSExtractOptions.Format = "table"
+	testDNSExtractOptions.Fleet = fleet
+	testDNSExtractOptions.ExportCSV = ""
+	testDNSExtractOptions.ConnectivityShort = false
+	testDNSExtractOptions.RadiusIMSI = false
+	testDNSExtractOptions.OnlyTCP = false
+	testDNSExtractOptions.InferDNSFromConnections = false
+	testDNSExtractOptions.AllowPrivateDNSDonation = false
+	testDNSExtractOptions.IgnoreNTP = false
+	testDNSExtractOptions.ExcludePorts = "53"
+	testDNSExtractOptions.FTPControlPorts = "21,990"
+	testDNSExtractOptions.FTPPassiveMinPort = "30000"
+	testDNSExtractOptions.ServerSummaryExcludeUDPPorts = "33434-33534"
+	testDNSExtractOptions.DNSIPFile = ""
+	testDNSExtractOptions.DNSNormalizationRules = ""
+	testDNSExtractOptions.TopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+	testDNSExtractOptions.ActiveResolve = false
+	testDNSExtractOptions.ActiveResolvers = ""
+	testDNSExtractOptions.ReverseDNSLookup = false
+	testDNSExtractOptions.TLSCertLookup = false
+	testDNSExtractOptions.DisableSNI = false
+	testDNSExtractOptions.Unsorted = false
+	testDNSExtractOptions.Debug = debug
+	testDNSExtractOptions.ManifestOut = ""
+	testDNSExtractOptions.PostHooks = nil
+	testDNSExtractOptions.FleetScanWorkers = 2
+	testDNSExtractOptions.EnforcePrivateAsSource = false
+}
+
+func readRunArtifactsManifest(t *testing.T, runDir string) RunArtifactsManifest {
+	t.Helper()
+	contents, err := os.ReadFile(filepath.Join(runDir, "_run-artifacts.json"))
+	if err != nil {
+		t.Fatalf("read run manifest: %v", err)
+	}
+	var manifest RunArtifactsManifest
+	if err := json.Unmarshal(contents, &manifest); err != nil {
+		t.Fatalf("unmarshal run manifest: %v", err)
+	}
+	return manifest
+}
+
+func mustReadTestFile(t *testing.T, path string) string {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %q: %v", path, err)
+	}
+	return string(contents)
+}
+
+func readCSVTestFile(t *testing.T, path string) [][]string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open CSV %q: %v", path, err)
+	}
+	rows, readErr := csv.NewReader(f).ReadAll()
+	closeErr := f.Close()
+	if readErr != nil {
+		t.Fatalf("read CSV %q: %v", path, readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close CSV %q: %v", path, closeErr)
+	}
+	return rows
 }
 
 func TestDnsextractReverseDNSLookupArtifactAndManifest(t *testing.T) {
@@ -301,34 +657,34 @@ func TestDnsextractReverseDNSLookupArtifactAndManifest(t *testing.T) {
 			}
 
 			outputRoot := t.TempDir()
-			flagReadDir = readDir
-			flagNetID = "net"
-			flagOutputRoot = outputRoot
-			flagFormat = "table"
-			flagFleet = ""
-			flagExportCSV = ""
-			flagConnectivityShort = false
-			flagRadiusIMSI = false
-			flagOnlyTCP = false
-			flagIgnoreNTP = false
-			flagExcludePorts = "53"
-			flagFTPControlPorts = "21,990"
-			flagFTPPassiveMinPort = "30000"
-			flagServerSummaryExcludeUDPPorts = "33434-33534"
-			flagDNSIPFile = ""
-			flagTopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
-			flagActiveResolve = false
-			flagActiveResolvers = ""
-			flagReverseDNSLookup = enabled
-			flagDisableSNI = true
-			flagUnsorted = false
-			flagDebug = false
-			flagManifestOut = ""
-			flagPostHooks = nil
-			flagFleetScanWorkers = 0
-			flagEnforcePrivateAsSource = false
+			testDNSExtractOptions.ReadDir = readDir
+			testDNSExtractOptions.NetID = "net"
+			testDNSExtractOptions.OutputRoot = outputRoot
+			testDNSExtractOptions.Format = "table"
+			testDNSExtractOptions.Fleet = ""
+			testDNSExtractOptions.ExportCSV = ""
+			testDNSExtractOptions.ConnectivityShort = false
+			testDNSExtractOptions.RadiusIMSI = false
+			testDNSExtractOptions.OnlyTCP = false
+			testDNSExtractOptions.IgnoreNTP = false
+			testDNSExtractOptions.ExcludePorts = "53"
+			testDNSExtractOptions.FTPControlPorts = "21,990"
+			testDNSExtractOptions.FTPPassiveMinPort = "30000"
+			testDNSExtractOptions.ServerSummaryExcludeUDPPorts = "33434-33534"
+			testDNSExtractOptions.DNSIPFile = ""
+			testDNSExtractOptions.TopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+			testDNSExtractOptions.ActiveResolve = false
+			testDNSExtractOptions.ActiveResolvers = ""
+			testDNSExtractOptions.ReverseDNSLookup = enabled
+			testDNSExtractOptions.DisableSNI = true
+			testDNSExtractOptions.Unsorted = false
+			testDNSExtractOptions.Debug = false
+			testDNSExtractOptions.ManifestOut = ""
+			testDNSExtractOptions.PostHooks = nil
+			testDNSExtractOptions.FleetScanWorkers = 0
+			testDNSExtractOptions.EnforcePrivateAsSource = false
 
-			if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
+			if err := runDNSExtract(&cobra.Command{}, nil, testDNSExtractOptions); err != nil {
 				t.Fatalf("runDNSExtract(reverse-dns=%v): %v", enabled, err)
 			}
 			wantCalls := 0
@@ -447,36 +803,36 @@ func TestDnsextractTLSCertLookupDecoratesExactEndpointAndIsManifested(t *testing
 	run := func(t *testing.T, enabled bool) runResult {
 		t.Helper()
 		outputRoot := t.TempDir()
-		flagReadDir = readDir
-		flagNetID = "net"
-		flagOutputRoot = outputRoot
-		flagFormat = "table"
-		flagFleet = ""
-		flagExportCSV = ""
-		flagConnectivityShort = false
-		flagRadiusIMSI = false
-		flagOnlyTCP = false
-		flagIgnoreNTP = false
-		flagExcludePorts = "53"
-		flagFTPControlPorts = "21,990"
-		flagFTPPassiveMinPort = "30000"
-		flagServerSummaryExcludeUDPPorts = "33434-33534"
-		flagDNSIPFile = ""
-		flagTopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
-		flagActiveResolve = false
-		flagActiveResolvers = ""
-		flagReverseDNSLookup = false
-		flagTLSCertLookup = enabled
-		flagTLSCertLookupTimeoutSeconds = 23
-		flagDisableSNI = true
-		flagUnsorted = false
-		flagDebug = false
-		flagManifestOut = ""
-		flagPostHooks = nil
-		flagFleetScanWorkers = 0
-		flagEnforcePrivateAsSource = false
+		testDNSExtractOptions.ReadDir = readDir
+		testDNSExtractOptions.NetID = "net"
+		testDNSExtractOptions.OutputRoot = outputRoot
+		testDNSExtractOptions.Format = "table"
+		testDNSExtractOptions.Fleet = ""
+		testDNSExtractOptions.ExportCSV = ""
+		testDNSExtractOptions.ConnectivityShort = false
+		testDNSExtractOptions.RadiusIMSI = false
+		testDNSExtractOptions.OnlyTCP = false
+		testDNSExtractOptions.IgnoreNTP = false
+		testDNSExtractOptions.ExcludePorts = "53"
+		testDNSExtractOptions.FTPControlPorts = "21,990"
+		testDNSExtractOptions.FTPPassiveMinPort = "30000"
+		testDNSExtractOptions.ServerSummaryExcludeUDPPorts = "33434-33534"
+		testDNSExtractOptions.DNSIPFile = ""
+		testDNSExtractOptions.TopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+		testDNSExtractOptions.ActiveResolve = false
+		testDNSExtractOptions.ActiveResolvers = ""
+		testDNSExtractOptions.ReverseDNSLookup = false
+		testDNSExtractOptions.TLSCertLookup = enabled
+		testDNSExtractOptions.TLSCertLookupTimeoutSeconds = 23
+		testDNSExtractOptions.DisableSNI = true
+		testDNSExtractOptions.Unsorted = false
+		testDNSExtractOptions.Debug = false
+		testDNSExtractOptions.ManifestOut = ""
+		testDNSExtractOptions.PostHooks = nil
+		testDNSExtractOptions.FleetScanWorkers = 0
+		testDNSExtractOptions.EnforcePrivateAsSource = false
 
-		if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
+		if err := runDNSExtract(&cobra.Command{}, nil, testDNSExtractOptions); err != nil {
 			t.Fatalf("runDNSExtract(tls-cert-lookup=%v): %v", enabled, err)
 		}
 		runDir := findSingleRunDir(t, outputRoot, "net")
@@ -547,48 +903,48 @@ func TestDnsextractTLSCertLookupDecoratesExactEndpointAndIsManifested(t *testing
 
 func restoreDNSExtractFlags(t *testing.T) {
 	t.Helper()
-	oldReadDir, oldFleet := flagReadDir, flagFleet
-	oldFormat, oldExportCSV := flagFormat, flagExportCSV
-	oldConnectivityShort, oldRadiusIMSI := flagConnectivityShort, flagRadiusIMSI
-	oldOnlyTCP, oldInferDNSFromConnections := flagOnlyTCP, flagInferDNSFromConnections
-	oldAllowPrivateDNSDonation, oldIgnoreNTP := flagAllowPrivateDNSDonation, flagIgnoreNTP
-	oldExcludePorts, oldFTPControlPorts := flagExcludePorts, flagFTPControlPorts
-	oldFTPPassiveMinPort := flagFTPPassiveMinPort
-	oldServerSummaryExcludeUDPPorts := flagServerSummaryExcludeUDPPorts
-	oldDNSIPFile, oldDNSNormalizationRules, oldTopologyDNSWindow := flagDNSIPFile, flagDNSNormalizationRules, flagTopologyDNSWindow
-	oldActiveResolve, oldActiveResolvers := flagActiveResolve, flagActiveResolvers
-	oldReverseDNSLookup := flagReverseDNSLookup
-	oldTLSCertLookup := flagTLSCertLookup
-	oldTLSCertLookupTimeoutSeconds := flagTLSCertLookupTimeoutSeconds
-	oldDisableSNI, oldUnsorted, oldDebug := flagDisableSNI, flagUnsorted, flagDebug
-	oldManifestOut := flagManifestOut
-	oldPostHooks := append([]string(nil), flagPostHooks...)
-	oldFleetScanWorkers := flagFleetScanWorkers
-	oldNetID, oldOutputRoot := flagNetID, flagOutputRoot
-	oldEnforcePrivateAsSource := flagEnforcePrivateAsSource
+	oldReadDir, oldFleet := testDNSExtractOptions.ReadDir, testDNSExtractOptions.Fleet
+	oldFormat, oldExportCSV := testDNSExtractOptions.Format, testDNSExtractOptions.ExportCSV
+	oldConnectivityShort, oldRadiusIMSI := testDNSExtractOptions.ConnectivityShort, testDNSExtractOptions.RadiusIMSI
+	oldOnlyTCP, oldInferDNSFromConnections := testDNSExtractOptions.OnlyTCP, testDNSExtractOptions.InferDNSFromConnections
+	oldAllowPrivateDNSDonation, oldIgnoreNTP := testDNSExtractOptions.AllowPrivateDNSDonation, testDNSExtractOptions.IgnoreNTP
+	oldExcludePorts, oldFTPControlPorts := testDNSExtractOptions.ExcludePorts, testDNSExtractOptions.FTPControlPorts
+	oldFTPPassiveMinPort := testDNSExtractOptions.FTPPassiveMinPort
+	oldServerSummaryExcludeUDPPorts := testDNSExtractOptions.ServerSummaryExcludeUDPPorts
+	oldDNSIPFile, oldDNSNormalizationRules, oldTopologyDNSWindow := testDNSExtractOptions.DNSIPFile, testDNSExtractOptions.DNSNormalizationRules, testDNSExtractOptions.TopologyDNSWindow
+	oldActiveResolve, oldActiveResolvers := testDNSExtractOptions.ActiveResolve, testDNSExtractOptions.ActiveResolvers
+	oldReverseDNSLookup := testDNSExtractOptions.ReverseDNSLookup
+	oldTLSCertLookup := testDNSExtractOptions.TLSCertLookup
+	oldTLSCertLookupTimeoutSeconds := testDNSExtractOptions.TLSCertLookupTimeoutSeconds
+	oldDisableSNI, oldUnsorted, oldDebug := testDNSExtractOptions.DisableSNI, testDNSExtractOptions.Unsorted, testDNSExtractOptions.Debug
+	oldManifestOut := testDNSExtractOptions.ManifestOut
+	oldPostHooks := append([]string(nil), testDNSExtractOptions.PostHooks...)
+	oldFleetScanWorkers := testDNSExtractOptions.FleetScanWorkers
+	oldNetID, oldOutputRoot := testDNSExtractOptions.NetID, testDNSExtractOptions.OutputRoot
+	oldEnforcePrivateAsSource := testDNSExtractOptions.EnforcePrivateAsSource
 	oldResolveDNSNamesIPv4WithAudit := resolveDNSNamesIPv4WithAudit
 	oldCompleteTopologyWithReverseDNS := completeTopologyWithReverseDNS
 	oldProbeTLSCertificates := probeTLSCertificates
 	t.Cleanup(func() {
-		flagReadDir, flagFleet = oldReadDir, oldFleet
-		flagFormat, flagExportCSV = oldFormat, oldExportCSV
-		flagConnectivityShort, flagRadiusIMSI = oldConnectivityShort, oldRadiusIMSI
-		flagOnlyTCP, flagInferDNSFromConnections = oldOnlyTCP, oldInferDNSFromConnections
-		flagAllowPrivateDNSDonation, flagIgnoreNTP = oldAllowPrivateDNSDonation, oldIgnoreNTP
-		flagExcludePorts, flagFTPControlPorts = oldExcludePorts, oldFTPControlPorts
-		flagFTPPassiveMinPort = oldFTPPassiveMinPort
-		flagServerSummaryExcludeUDPPorts = oldServerSummaryExcludeUDPPorts
-		flagDNSIPFile, flagDNSNormalizationRules, flagTopologyDNSWindow = oldDNSIPFile, oldDNSNormalizationRules, oldTopologyDNSWindow
-		flagActiveResolve, flagActiveResolvers = oldActiveResolve, oldActiveResolvers
-		flagReverseDNSLookup = oldReverseDNSLookup
-		flagTLSCertLookup = oldTLSCertLookup
-		flagTLSCertLookupTimeoutSeconds = oldTLSCertLookupTimeoutSeconds
-		flagDisableSNI, flagUnsorted, flagDebug = oldDisableSNI, oldUnsorted, oldDebug
-		flagManifestOut = oldManifestOut
-		flagPostHooks = oldPostHooks
-		flagFleetScanWorkers = oldFleetScanWorkers
-		flagNetID, flagOutputRoot = oldNetID, oldOutputRoot
-		flagEnforcePrivateAsSource = oldEnforcePrivateAsSource
+		testDNSExtractOptions.ReadDir, testDNSExtractOptions.Fleet = oldReadDir, oldFleet
+		testDNSExtractOptions.Format, testDNSExtractOptions.ExportCSV = oldFormat, oldExportCSV
+		testDNSExtractOptions.ConnectivityShort, testDNSExtractOptions.RadiusIMSI = oldConnectivityShort, oldRadiusIMSI
+		testDNSExtractOptions.OnlyTCP, testDNSExtractOptions.InferDNSFromConnections = oldOnlyTCP, oldInferDNSFromConnections
+		testDNSExtractOptions.AllowPrivateDNSDonation, testDNSExtractOptions.IgnoreNTP = oldAllowPrivateDNSDonation, oldIgnoreNTP
+		testDNSExtractOptions.ExcludePorts, testDNSExtractOptions.FTPControlPorts = oldExcludePorts, oldFTPControlPorts
+		testDNSExtractOptions.FTPPassiveMinPort = oldFTPPassiveMinPort
+		testDNSExtractOptions.ServerSummaryExcludeUDPPorts = oldServerSummaryExcludeUDPPorts
+		testDNSExtractOptions.DNSIPFile, testDNSExtractOptions.DNSNormalizationRules, testDNSExtractOptions.TopologyDNSWindow = oldDNSIPFile, oldDNSNormalizationRules, oldTopologyDNSWindow
+		testDNSExtractOptions.ActiveResolve, testDNSExtractOptions.ActiveResolvers = oldActiveResolve, oldActiveResolvers
+		testDNSExtractOptions.ReverseDNSLookup = oldReverseDNSLookup
+		testDNSExtractOptions.TLSCertLookup = oldTLSCertLookup
+		testDNSExtractOptions.TLSCertLookupTimeoutSeconds = oldTLSCertLookupTimeoutSeconds
+		testDNSExtractOptions.DisableSNI, testDNSExtractOptions.Unsorted, testDNSExtractOptions.Debug = oldDisableSNI, oldUnsorted, oldDebug
+		testDNSExtractOptions.ManifestOut = oldManifestOut
+		testDNSExtractOptions.PostHooks = oldPostHooks
+		testDNSExtractOptions.FleetScanWorkers = oldFleetScanWorkers
+		testDNSExtractOptions.NetID, testDNSExtractOptions.OutputRoot = oldNetID, oldOutputRoot
+		testDNSExtractOptions.EnforcePrivateAsSource = oldEnforcePrivateAsSource
 		resolveDNSNamesIPv4WithAudit = oldResolveDNSNamesIPv4WithAudit
 		completeTopologyWithReverseDNS = oldCompleteTopologyWithReverseDNS
 		probeTLSCertificates = oldProbeTLSCertificates
@@ -695,33 +1051,33 @@ func TestActiveResolveFiltersFinalUnresolvedWritesCompactMatrixWithoutMutatingDN
 		}, nil
 	}
 
-	flagReadDir = readDir
-	flagNetID = "net"
-	flagOutputRoot = outputRoot
-	flagFormat = "table"
-	flagFleet = ""
-	flagExportCSV = ""
-	flagConnectivityShort = false
-	flagRadiusIMSI = false
-	flagOnlyTCP = false
-	flagIgnoreNTP = false
-	flagExcludePorts = "53"
-	flagFTPControlPorts = "21,990"
-	flagFTPPassiveMinPort = "30000"
-	flagServerSummaryExcludeUDPPorts = "33434-33534"
-	flagDNSIPFile = dnsIPPath
-	flagTopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
-	flagActiveResolve = true
-	flagActiveResolvers = ""
-	flagDisableSNI = true
-	flagUnsorted = false
-	flagDebug = false
-	flagManifestOut = ""
-	flagPostHooks = nil
-	flagFleetScanWorkers = 0
-	flagEnforcePrivateAsSource = false
+	testDNSExtractOptions.ReadDir = readDir
+	testDNSExtractOptions.NetID = "net"
+	testDNSExtractOptions.OutputRoot = outputRoot
+	testDNSExtractOptions.Format = "table"
+	testDNSExtractOptions.Fleet = ""
+	testDNSExtractOptions.ExportCSV = ""
+	testDNSExtractOptions.ConnectivityShort = false
+	testDNSExtractOptions.RadiusIMSI = false
+	testDNSExtractOptions.OnlyTCP = false
+	testDNSExtractOptions.IgnoreNTP = false
+	testDNSExtractOptions.ExcludePorts = "53"
+	testDNSExtractOptions.FTPControlPorts = "21,990"
+	testDNSExtractOptions.FTPPassiveMinPort = "30000"
+	testDNSExtractOptions.ServerSummaryExcludeUDPPorts = "33434-33534"
+	testDNSExtractOptions.DNSIPFile = dnsIPPath
+	testDNSExtractOptions.TopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+	testDNSExtractOptions.ActiveResolve = true
+	testDNSExtractOptions.ActiveResolvers = ""
+	testDNSExtractOptions.DisableSNI = true
+	testDNSExtractOptions.Unsorted = false
+	testDNSExtractOptions.Debug = false
+	testDNSExtractOptions.ManifestOut = ""
+	testDNSExtractOptions.PostHooks = nil
+	testDNSExtractOptions.FleetScanWorkers = 0
+	testDNSExtractOptions.EnforcePrivateAsSource = false
 
-	if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
+	if err := runDNSExtract(&cobra.Command{}, nil, testDNSExtractOptions); err != nil {
 		t.Fatalf("runDNSExtract: %v", err)
 	}
 	if resolverCalls != 1 {
@@ -869,6 +1225,97 @@ func writeDNSArtifactTestPCAP(t *testing.T, path string) {
 	}
 }
 
+func writeFleetAdmissionTestPCAP(t *testing.T, path string, rejectedTS, retainedTS time.Time) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create fleet-admission pcap: %v", err)
+	}
+	w := pcapgo.NewWriter(f)
+	if err := w.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {
+		f.Close()
+		t.Fatalf("write fleet-admission pcap header: %v", err)
+	}
+
+	truncated := make([]byte, 12)
+	binary.BigEndian.PutUint16(truncated[0:2], 0x1234)
+	binary.BigEndian.PutUint16(truncated[2:4], 0x0100)
+	binary.BigEndian.PutUint16(truncated[4:6], 1)
+	truncated = append(truncated, 0x08, 'e', 'x', 'c', 'l', 'u', 'd', 'e', 'd', 0x07, 'a', 'u', 'd', 'i', 't')
+
+	packets := []struct {
+		ts                  time.Time
+		data                []byte
+		originalLengthExtra int
+	}{
+		{rejectedTS, buildDNSPacket(t, truncated, "192.168.10.1", "192.0.2.53", 53000, 53), 8},
+		{rejectedTS.Add(time.Second), buildDNSPacket(t, buildDNSQueryPayload(0x2001, "excluded.example"), "192.168.10.1", "192.0.2.53", 53001, 53), 0},
+		{rejectedTS.Add(2 * time.Second), buildDNSPacket(t, buildDNSAResponsePayload(0x2001, "excluded.example", "198.51.100.99"), "192.0.2.53", "192.168.10.1", 53, 53001), 0},
+		{rejectedTS.Add(3 * time.Second), buildTCPPacketWithPayload(t, "192.168.10.1", "198.51.100.99", 41000, 443, false, true, buildTLSClientHelloPayload("excluded-sni.example")), 0},
+		{rejectedTS.Add(4 * time.Second), buildTCPPacket(t, "192.168.10.1", "198.51.100.99", 41001, 8443, true, false), 0},
+		{rejectedTS.Add(4*time.Second + time.Millisecond), buildTCPPacket(t, "198.51.100.99", "192.168.10.1", 8443, 41001, true, true), 0},
+		{retainedTS, buildDNSPacket(t, buildDNSQueryPayload(0x3001, "retained.example"), "10.0.0.10", "192.0.2.53", 53002, 53), 0},
+		{retainedTS.Add(time.Second), buildDNSPacket(t, buildDNSAResponsePayload(0x3001, "retained.example", "203.0.113.8"), "192.0.2.53", "10.0.0.10", 53, 53002), 0},
+		{retainedTS.Add(2 * time.Second), buildTCPPacket(t, "10.0.0.10", "203.0.113.8", 41002, 443, true, false), 0},
+		{retainedTS.Add(2*time.Second + time.Millisecond), buildTCPPacket(t, "203.0.113.8", "10.0.0.10", 443, 41002, true, true), 0},
+	}
+	for i, packet := range packets {
+		if err := w.WritePacket(gopacket.CaptureInfo{
+			Timestamp:     packet.ts,
+			CaptureLength: len(packet.data),
+			Length:        len(packet.data) + packet.originalLengthExtra,
+		}, packet.data); err != nil {
+			f.Close()
+			t.Fatalf("write fleet-admission packet %d: %v", i, err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close fleet-admission pcap: %v", err)
+	}
+}
+
+func writeFleetIsolationTestPCAP(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create mixed-fleet pcap: %v", err)
+	}
+	w := pcapgo.NewWriter(f)
+	if err := w.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {
+		f.Close()
+		t.Fatalf("write mixed-fleet pcap header: %v", err)
+	}
+
+	packets := [][]byte{
+		// Fleet B and unrelated handshakes would both produce topology edges
+		// without packet admission, making their absence from the NTM meaningful.
+		buildTCPPacket(t, "10.20.0.10", "192.168.2.20", 42000, 1883, true, false),
+		buildTCPPacket(t, "192.168.2.20", "10.20.0.10", 1883, 42000, true, true),
+		buildTCPPacket(t, "172.20.0.10", "172.21.0.20", 43000, 9000, true, false),
+		buildTCPPacket(t, "172.21.0.20", "172.20.0.10", 9000, 43000, true, true),
+		// Repeating A1's SYN must not inflate distinct fleet-device cardinality.
+		buildTCPPacket(t, "10.0.0.10", "192.168.1.20", 44000, 80, true, false),
+		buildTCPPacket(t, "10.0.0.10", "192.168.1.20", 44000, 80, true, false),
+		buildTCPPacket(t, "192.168.1.20", "10.0.0.10", 80, 44000, true, true),
+		buildTCPPacket(t, "10.0.0.11", "192.168.1.20", 44001, 80, true, false),
+		buildTCPPacket(t, "192.168.1.20", "10.0.0.11", 80, 44001, true, true),
+	}
+	base := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	for i, packet := range packets {
+		if err := w.WritePacket(gopacket.CaptureInfo{
+			Timestamp:     base.Add(time.Duration(i) * time.Millisecond),
+			CaptureLength: len(packet),
+			Length:        len(packet),
+		}, packet); err != nil {
+			f.Close()
+			t.Fatalf("write mixed-fleet packet %d: %v", i, err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close mixed-fleet pcap: %v", err)
+	}
+}
+
 func buildDNSArtifactTestTCPPacket(t *testing.T, response bool) []byte {
 	t.Helper()
 	srcPort, dstPort := layers.TCPPort(40000), layers.TCPPort(443)
@@ -880,6 +1327,11 @@ func buildDNSArtifactTestTCPPacket(t *testing.T, response bool) []byte {
 }
 
 func buildTCPPacket(t *testing.T, src, dst string, srcPort, dstPort uint16, syn, ack bool) []byte {
+	t.Helper()
+	return buildTCPPacketWithPayload(t, src, dst, srcPort, dstPort, syn, ack, nil)
+}
+
+func buildTCPPacketWithPayload(t *testing.T, src, dst string, srcPort, dstPort uint16, syn, ack bool, payload []byte) []byte {
 	t.Helper()
 	srcIP := net.ParseIP(src).To4()
 	dstIP := net.ParseIP(dst).To4()
@@ -894,16 +1346,44 @@ func buildTCPPacket(t *testing.T, src, dst string, srcPort, dstPort uint16, syn,
 		t.Fatalf("set TCP checksum network layer: %v", err)
 	}
 	buf := gopacket.NewSerializeBuffer()
+	layersToSerialize := []gopacket.SerializableLayer{eth, ip4, tcp}
+	if len(payload) > 0 {
+		layersToSerialize = append(layersToSerialize, gopacket.Payload(payload))
+	}
 	if err := gopacket.SerializeLayers(
 		buf,
 		gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true},
-		eth,
-		ip4,
-		tcp,
+		layersToSerialize...,
 	); err != nil {
 		t.Fatalf("serialize test TCP packet: %v", err)
 	}
 	return buf.Bytes()
+}
+
+func buildTLSClientHelloPayload(serverName string) []byte {
+	name := []byte(serverName)
+	serverNameList := make([]byte, 2+1+2+len(name))
+	binary.BigEndian.PutUint16(serverNameList[0:2], uint16(1+2+len(name)))
+	serverNameList[2] = 0
+	binary.BigEndian.PutUint16(serverNameList[3:5], uint16(len(name)))
+	copy(serverNameList[5:], name)
+
+	extensions := make([]byte, 4+len(serverNameList))
+	binary.BigEndian.PutUint16(extensions[2:4], uint16(len(serverNameList)))
+	copy(extensions[4:], serverNameList)
+	body := make([]byte, 0, 2+32+1+4+2+2+len(extensions))
+	body = append(body, 0x03, 0x03)
+	body = append(body, make([]byte, 32)...)
+	body = append(body, 0)
+	body = append(body, 0, 2, 0x13, 0x01)
+	body = append(body, 1, 0)
+	body = append(body, byte(len(extensions)>>8), byte(len(extensions)))
+	body = append(body, extensions...)
+
+	handshake := []byte{1, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
+	handshake = append(handshake, body...)
+	record := []byte{0x16, 0x03, 0x01, byte(len(handshake) >> 8), byte(len(handshake))}
+	return append(record, handshake...)
 }
 
 func buildUDPPacket(t *testing.T, src, dst string, srcPort, dstPort uint16) []byte {
@@ -1041,39 +1521,39 @@ func runDNSExtractForNTPRegression(t *testing.T, writePCAP func(*testing.T, stri
 	writePCAP(t, filepath.Join(readDir, "capture.pcap"))
 	outputRoot := t.TempDir()
 
-	flagReadDir = readDir
-	flagNetID = "net"
-	flagOutputRoot = outputRoot
-	flagFormat = "table"
-	flagFleet = ""
-	flagExportCSV = ""
-	flagConnectivityShort = false
-	flagRadiusIMSI = false
-	flagOnlyTCP = false
-	flagInferDNSFromConnections = false
-	flagAllowPrivateDNSDonation = false
-	flagIgnoreNTP = true
-	flagExcludePorts = "53"
-	flagFTPControlPorts = "21,990"
-	flagFTPPassiveMinPort = "30000"
-	flagServerSummaryExcludeUDPPorts = "33434-33534"
-	flagDNSIPFile = ""
-	flagDNSNormalizationRules = ""
-	flagTopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
-	flagActiveResolve = false
-	flagActiveResolvers = ""
-	flagReverseDNSLookup = false
-	flagTLSCertLookup = false
-	flagTLSCertLookupTimeoutSeconds = 15
-	flagDisableSNI = true
-	flagUnsorted = false
-	flagDebug = false
-	flagManifestOut = ""
-	flagPostHooks = nil
-	flagFleetScanWorkers = 0
-	flagEnforcePrivateAsSource = false
+	testDNSExtractOptions.ReadDir = readDir
+	testDNSExtractOptions.NetID = "net"
+	testDNSExtractOptions.OutputRoot = outputRoot
+	testDNSExtractOptions.Format = "table"
+	testDNSExtractOptions.Fleet = ""
+	testDNSExtractOptions.ExportCSV = ""
+	testDNSExtractOptions.ConnectivityShort = false
+	testDNSExtractOptions.RadiusIMSI = false
+	testDNSExtractOptions.OnlyTCP = false
+	testDNSExtractOptions.InferDNSFromConnections = false
+	testDNSExtractOptions.AllowPrivateDNSDonation = false
+	testDNSExtractOptions.IgnoreNTP = true
+	testDNSExtractOptions.ExcludePorts = "53"
+	testDNSExtractOptions.FTPControlPorts = "21,990"
+	testDNSExtractOptions.FTPPassiveMinPort = "30000"
+	testDNSExtractOptions.ServerSummaryExcludeUDPPorts = "33434-33534"
+	testDNSExtractOptions.DNSIPFile = ""
+	testDNSExtractOptions.DNSNormalizationRules = ""
+	testDNSExtractOptions.TopologyDNSWindow = dns.DefaultTopologyBuildOptions().MaxDNSAge
+	testDNSExtractOptions.ActiveResolve = false
+	testDNSExtractOptions.ActiveResolvers = ""
+	testDNSExtractOptions.ReverseDNSLookup = false
+	testDNSExtractOptions.TLSCertLookup = false
+	testDNSExtractOptions.TLSCertLookupTimeoutSeconds = 15
+	testDNSExtractOptions.DisableSNI = true
+	testDNSExtractOptions.Unsorted = false
+	testDNSExtractOptions.Debug = false
+	testDNSExtractOptions.ManifestOut = ""
+	testDNSExtractOptions.PostHooks = nil
+	testDNSExtractOptions.FleetScanWorkers = 0
+	testDNSExtractOptions.EnforcePrivateAsSource = false
 
-	if err := runDNSExtract(&cobra.Command{}, nil); err != nil {
+	if err := runDNSExtract(&cobra.Command{}, nil, testDNSExtractOptions); err != nil {
 		t.Fatalf("runDNSExtract: %v", err)
 	}
 
@@ -1288,15 +1768,21 @@ func TestDnsextractFleetScanWorkersPassedToSYNTrailScanner(t *testing.T) {
 	if err := os.WriteFile(fleetPath, []byte("10.0.0.1\n"), 0o644); err != nil {
 		t.Fatalf("write fleet file: %v", err)
 	}
+	fleet, err := syntrail.LoadFleetIPv4File(fleetPath)
+	if err != nil {
+		t.Fatalf("load fleet file: %v", err)
+	}
+	admit := pcaputil.IPv4EndpointAdmission(fleet.Contains)
 
 	artifacts, err := runSYNTrailSidecar(
 		context.Background(),
 		newSYNTrailTestOutputManager(t),
 		wantFiles,
-		fleetPath,
+		&fleet,
 		synTrailArtifactOptions{
 			ScanOptions: syntrail.ScanOptions{
-				Workers: 8,
+				Workers:         8,
+				PacketAdmission: admit,
 				Progress: func(done, total int, file string) {
 					progressUpdates = append(progressUpdates, fleetProgressUpdate{done: done, total: total, file: file})
 				},
@@ -1317,6 +1803,9 @@ func TestDnsextractFleetScanWorkersPassedToSYNTrailScanner(t *testing.T) {
 	}
 	if gotOpt.Progress == nil {
 		t.Fatal("scanner Progress callback = nil, want non-nil")
+	}
+	if gotOpt.PacketAdmission == nil {
+		t.Fatal("scanner PacketAdmission = nil, want fleet admission predicate")
 	}
 	wantProgress := []fleetProgressUpdate{
 		{done: 1, total: 2, file: wantFiles[0]},

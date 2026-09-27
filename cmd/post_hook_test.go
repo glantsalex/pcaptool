@@ -89,7 +89,7 @@ func TestRunPostHooks(t *testing.T) {
 
 	target := filepath.Join(runDir, "hook.out")
 	hook := "printf '%s' \"$PCAPTOOL_MANIFEST\" > " + filepath.Base(target)
-	if err := runPostHooks(context.Background(), om, manifestPath, []string{hook}); err != nil {
+	if err := runPostHooks(context.Background(), om, manifestPath, []string{hook}, false); err != nil {
 		t.Fatalf("runPostHooks: %v", err)
 	}
 

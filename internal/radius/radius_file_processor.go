@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -21,7 +22,13 @@ import (
 // IMSI detection: 14–16 digits is common, sometimes 15.
 var imsiDigitsRe = regexp.MustCompile(`^[0-9]{14,16}$`)
 
-func processRadiusFile(ctx context.Context, path string, collector *radiusCollector, dedup *deduper) error {
+func processRadiusFile(
+	ctx context.Context,
+	path string,
+	collector *radiusCollector,
+	dedup *deduper,
+	admit pcaputil.PacketAdmission,
+) error {
 
 	var src *gopacket.PacketSource
 
@@ -74,6 +81,9 @@ func processRadiusFile(ctx context.Context, path string, collector *radiusCollec
 		case pkt, ok := <-packets:
 			if !ok {
 				return nil
+			}
+			if admit != nil && !admit(pkt) {
+				continue
 			}
 			netL := pkt.NetworkLayer()
 			transL := pkt.TransportLayer()

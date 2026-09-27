@@ -86,6 +86,24 @@ pcaptool dnsextract \
   --post-hook '/opt/hooks/push-topology'
 ```
 
+### YAML configuration mode
+
+The existing command-line mode remains available as shown above. Alternatively, a strict schema-versioned YAML file can select and configure the command without a CLI subcommand:
+
+```bash
+pcaptool --config configs/pcaptool.example.yaml
+```
+
+Application configuration files use `schema_version: 1`, `command: dnsextract`, and a `dnsextract` block. Unknown fields, extra YAML documents, unsupported schema versions, and missing required values are rejected.
+
+When `--config` is present, the YAML file is authoritative. Recognized command configuration flags are still checked for valid CLI syntax but are ignored, with one warning; unknown flags and positional arguments remain errors. `--help` and the process-only `--no-banner` flag do not become YAML settings.
+
+Relative `read_dir`, `fleet`, `dns_ip_file`, `dns_normalization_rules`, and `output_root` paths are resolved from the directory containing the config file. Relative `export_csv` and `manifest_out` values retain their existing run-directory-relative behavior. Paths do not expand `~` or environment variables.
+
+`post_hooks` are trusted executable configuration and retain the existing shell execution semantics. Review a config file before running it if it was obtained from another source.
+
+See [`configs/pcaptool.example.yaml`](configs/pcaptool.example.yaml) for the complete v1 field set.
+
 ## Input Expectations
 
 `dnsextract` walks `--read-dir` recursively and processes files with these extensions:
@@ -367,7 +385,7 @@ This records provenance for newly learned CSV rows appended during the run.
 
 If `--manifest-out` is set, a copy of `_run-artifacts.json` is written to the requested path.
 
-#### TCP SYN trail sidecar artifacts
+#### Fleet-constrained processing and TCP SYN trail artifacts
 
 Produced only when `--fleet <path>` is set.
 
@@ -380,19 +398,23 @@ Produced only when `--fleet <path>` is set.
 - IPv6 entries are errors
 
 The SYN trail is packet-level initiator evidence from raw IPv4 TCP SYN packets.
-It is sidecar-only:
+Supplying `--fleet` also constrains every packet-derived analysis pass to IPv4
+packets whose source or destination is in that fleet. Non-IPv4 packets and
+packets with two non-fleet endpoints do not seed DNS, SNI, RADIUS, connection,
+topology, unresolved, service-endpoint, audit, debug, or sidecar evidence.
+Capture-date and first-packet metadata use the earliest admitted packet, or the
+existing unknown/empty representation when no packet matches.
 
-- it does not change DNS attribution
-- it does not change topology matrix output
-- it does not change service-endpoints output
-- it does not change connection inference
+The SYN-trail artifact generator remains a sidecar: it does not feed DNS
+attribution, topology, service-endpoint, or connection-inference results. It
+uses the same packet-admission rule, and:
+
 - `--exclude-ports` does not apply to SYN evidence artifacts
 
 The always-on fleet files are:
 
 - `public-servers-unique.csv`
-- `private-servers-unique.csv`
-- `private-probes-unique.csv`
+- `private-nonfleet-endpoints.json`
 - `flow-direction-correction.sql`
 
 With `--debug`, the sidecar additionally writes these detailed artifacts:
@@ -406,7 +428,7 @@ With `--debug`, the sidecar additionally writes these detailed artifacts:
 - `private-nonfleet-to-fleet-trail.csv`
 - `private-nonfleet-to-fleet-tcp-syn-unique.csv`
 
-`private-probes-unique.csv` and manifest key `private_probes_unique` replace the former `private-probes-syn-unique.csv` and `private_probes_syn_unique` names. The probe artifact remains always-on whenever the fleet sidecar runs; the rename does not change its row semantics.
+`private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses observed for that exact role/protocol/port behavior. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Probe targets retain the existing TCP-only qualification.
 
 Bucket meanings:
 
@@ -420,19 +442,21 @@ Bucket meanings:
   - `dst_ip` is private/local
   - `dst_ip` is not in fleet
   - debug manifest keys include: `fleet_to_private_nonfleet_trail`, `fleet_to_private_nonfleet_syn_unique`
-- private server unique summary
-  - `private-servers-unique.csv` contains unique `dst_ip,dst_port,protocol` rows from the fleet-to-private-nonfleet split
-  - TCP rows and non-excluded UDP rows are retained
+- private non-fleet endpoint summary
+  - `private-nonfleet-endpoints.json` merges server and probe behavior by private non-fleet IPv4 address
+  - server listeners come from the fleet-to-private-nonfleet split; TCP rows and non-excluded UDP rows are retained
+  - probe targets come from the private-nonfleet-to-fleet TCP evidence path
+  - repeated observations from the same fleet IPv4 address contribute one device to that behavior's `fleet_devices_count`
   - TCP passive FTP data ports are suppressed only when a matching control connection is observed
   - configured UDP destination ports are suppressed only from server summary artifacts
-  - manifest key: `private_servers_unique`
+  - manifest key: `private_nonfleet_endpoints`
 - flow direction correction SQL
   - `flow-direction-correction.sql` is generated only; pcaptool does not execute BigQuery
   - manifest key: `flow_direction_correction_sql`
   - SQL keeps `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders literal
   - source table: `flow-data-{net-id}`
   - materialized view: `mv-flow-data-{net-id}`
-  - private-server correction rules use the same cleaned `dst_ip,dst_port,protocol` semantics as `private-servers-unique.csv`
+  - private-server correction rules use the same cleaned `dst_ip,dst_port,protocol` evidence as the JSON artifact's `server.listeners`
   - the final materialized-view schema remains compatible with the flow table projection and does not include `swap_reason`
 - fleet to non-fleet unique
   - `fleet-to-public-unique.csv` and `fleet-to-private-nonfleet-syn-unique.csv` summarize fleet-to-non-fleet destinations by locality and protocol scope
@@ -472,11 +496,11 @@ Timestamp rules:
 
 The command is a multi-pass offline pipeline.
 
-### Optional TCP SYN trail sidecar
+### Fleet constraint and optional TCP SYN trail sidecar
 
-If `--fleet` is set, the PCAP corpus is also scanned for packet-level IPv4 TCP SYN evidence and UDP edge evidence. Server summaries, private probes, and `flow-direction-correction.sql` are always written; detailed trail and unique evidence artifacts require `--debug`. Debug selection changes only artifact writing and does not rescan the corpus. By default, `--fleet-scan-workers 0` auto-selects `min(GOMAXPROCS, file_count)` workers with a minimum of `1`; `--fleet-scan-workers 1` forces sequential scanning, and values greater than `1` force that many concurrent file scanners. Higher values can reduce wall-clock time on large directories but increase disk and CPU pressure. The generated BigQuery script creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
+If `--fleet` is set, all packet-processing passes admit only IPv4 packets whose source or destination belongs to the supplied fleet. The admitted corpus is also scanned for packet-level IPv4 TCP SYN evidence and UDP edge evidence. The public-server summary, private-nonfleet endpoint summary, and `flow-direction-correction.sql` are always written; detailed trail and unique evidence artifacts require `--debug`. Debug selection changes only artifact writing and does not rescan the corpus. By default, `--fleet-scan-workers 0` auto-selects `min(GOMAXPROCS, file_count)` workers with a minimum of `1`; `--fleet-scan-workers 1` forces sequential scanning, and values greater than `1` force that many concurrent file scanners. Higher values can reduce wall-clock time on large directories but increase disk and CPU pressure. The generated BigQuery script creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
 
-This sidecar does not feed DNS attribution, connection inference, topology generation, or service endpoint generation.
+The sidecar remains independent and does not feed DNS attribution, connection inference, topology generation, or service endpoint generation.
 The SQL script is not executed by pcaptool.
 
 ### Pass 1: optional RADIUS/IP-to-IMSI index
@@ -537,7 +561,7 @@ The heuristic high-port cutoff is controlled by `--ftp-passive-min-port` and def
 
 For a network with a non-standard control channel and lower passive data range, use `--ftp-control-ports 21,990,21000 --ftp-passive-min-port 10000`.
 
-The two server summary artifacts, `public-servers-unique.csv` and `private-servers-unique.csv`, also suppress explicitly identified UDP destination ports configured by `--server-summary-exclude-udp-ports`. The default is the inclusive traceroute range `33434-33534`. The value accepts strict comma-separated ports and inclusive ranges such as `53,33434-33534`; malformed, empty, reversed, and out-of-range entries are errors. Set the flag to an empty value to disable this suppression.
+The server summaries, `public-servers-unique.csv` and the `server.listeners` portion of `private-nonfleet-endpoints.json`, also suppress explicitly identified UDP destination ports configured by `--server-summary-exclude-udp-ports`. The default is the inclusive traceroute range `33434-33534`. The value accepts strict comma-separated ports and inclusive ranges such as `53,33434-33534`; malformed, empty, reversed, and out-of-range entries are errors. Set the flag to an empty value to disable this suppression.
 
 This UDP filter runs after passive FTP suppression and applies only to the two server summaries. Trail artifacts and edge-unique artifacts retain the original rows. TCP rows on the configured ports are retained, and records with an empty protocol are treated as TCP rather than UDP.
 
@@ -709,16 +733,18 @@ This policy is designed to reduce CSV contamination from:
 
 | Flag | Type | Default | Meaning |
 |---|---|---:|---|
+| `--config` | string | empty | run the command selected by a strict YAML application configuration file |
 | `--net-id` | string | required | logical network identifier; scopes the output directory |
 | `--output-root`, `-o` | string | `pcaptool_output` | root directory for all run output |
 | `--enforce-private-as-source` | bool | `false` | for UDP only, if one side is private/local treat it as the source side |
+| `--no-banner` | bool | `false` | suppress the startup banner; process-only and not a YAML field |
 
 ## `dnsextract` flags
 
 | Flag | Type | Default | Meaning |
 |---|---|---:|---|
 | `--read-dir`, `-r` | string | required | directory containing PCAP files; walked recursively |
-| `--fleet` | string | empty | optional fleet IPv4 list; when set, scans fleet evidence and writes always-on server/probe summaries and flow-direction SQL |
+| `--fleet` | string | empty | optional fleet IPv4 list; when set, admits only packets with a fleet IPv4 endpoint and writes always-on fleet summaries and flow-direction SQL |
 | `--fleet-scan-workers` | int | `0` | workers for `--fleet` artifact scanning; `0` auto-selects `min(GOMAXPROCS, file_count)` with minimum `1`, `1` is sequential, higher values force concurrent scanning |
 | `--format` | string | `table` | main output format: `table` or `json` |
 | `--export-csv` | string | empty | optional CSV export path for main records |
