@@ -267,7 +267,51 @@ func MergeEdgeObservedTimes(existing []time.Time, additions ...time.Time) []time
 }
 
 func (c *Collector) recordEdgeObservation(ek edgeKey, ts time.Time) {
-	c.edges[ek] = MergeEdgeObservedTimes(c.edges[ek], ts)
+	c.edges[ek] = appendEdgeObservedTime(c.edges[ek], ts)
+}
+
+// appendEdgeObservedTime updates a collector-owned, canonical timestamp slice
+// in place. Collector edge slices are never shared until Edges or
+// EdgesByFirstSeen copies them, so this avoids cloning and sorting the complete
+// slice for every observed packet while preserving the same bounded selection:
+// the true earliest timestamp plus the latest 127 timestamps.
+func appendEdgeObservedTime(times []time.Time, ts time.Time) []time.Time {
+	if ts.IsZero() {
+		return times
+	}
+
+	utc := ts.UTC()
+	insertAt := sort.Search(len(times), func(i int) bool {
+		return !times[i].Before(utc)
+	})
+	if insertAt < len(times) && times[insertAt].Equal(utc) {
+		return times
+	}
+
+	if len(times) < maxEdgeObservedTimes {
+		times = append(times, time.Time{})
+		copy(times[insertAt+1:], times[insertAt:len(times)-1])
+		times[insertAt] = utc
+		return times
+	}
+
+	if insertAt == 0 {
+		// A new true earliest observation displaces the previous earliest;
+		// the existing latest observations already occupy indexes 1..127.
+		times[0] = utc
+		return times
+	}
+	if insertAt == 1 {
+		// This timestamp is neither the true earliest nor one of the latest
+		// 127 observations, so it does not belong in the bounded result.
+		return times
+	}
+
+	// Drop the oldest non-earliest observation, shift only the affected
+	// prefix, and insert the new timestamp at its resulting sorted position.
+	copy(times[1:insertAt-1], times[2:insertAt])
+	times[insertAt-1] = utc
+	return times
 }
 
 func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {

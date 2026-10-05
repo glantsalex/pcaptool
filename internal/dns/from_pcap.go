@@ -252,8 +252,10 @@ func pickFallbackTxUniq(txs []*DNSTransaction, ts time.Time, win time.Duration) 
 // first packet seen for long-running endpoint tuples. DNS attribution is joined
 // later when building the topology matrix.
 //
-// This function is intentionally file-parallel. Each worker builds a local edge set
-// and the main goroutine merges the per-file edge slices to avoid lock contention.
+// This function is intentionally file-parallel. Each worker builds a local edge set.
+// Completed sets are merged incrementally in discovered file order through a bounded
+// dispatch window, avoiding both merge lock contention and corpus-sized retention of
+// per-file edge slices.
 func AttachConnectionsAndCollectEdgesFromPCAPs(
 	ctx context.Context,
 	files []string,
@@ -400,13 +402,6 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		}
 	}()
 
-	// --- Topology edge aggregation (new behavior) ---
-	type edgeBatch struct {
-		fileIdx int
-		edges   []connectivity.Edge
-	}
-	edgeCh := make(chan edgeBatch, 256)
-
 	// Worker pool over files
 	totalFiles := len(files)
 	if totalFiles == 0 {
@@ -414,16 +409,6 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		aggWG.Wait()
 		return nil, FirstPacketInfo{}, nil
 	}
-
-	edgeBatches := make([][]connectivity.Edge, totalFiles)
-	var edgeAggWG sync.WaitGroup
-	edgeAggWG.Add(1)
-	go func() {
-		defer edgeAggWG.Done()
-		for b := range edgeCh {
-			edgeBatches[b.fileIdx] = b.edges
-		}
-	}()
 
 	workers := runtime.GOMAXPROCS(0)
 	if workers > totalFiles {
@@ -433,26 +418,8 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		workers = 1
 	}
 
-	jobs := make(chan int)
-	var wg sync.WaitGroup
-	wg.Add(workers)
-
-	var firstErr error
-	var errMu sync.Mutex
-
 	var firstPkt FirstPacketInfo
 	var firstPktMu sync.Mutex
-
-	setErr := func(err error) {
-		if err == nil {
-			return
-		}
-		errMu.Lock()
-		if firstErr == nil {
-			firstErr = err
-		}
-		errMu.Unlock()
-	}
 
 	setFirstPacket := func(ts time.Time, file string) {
 		if ts.IsZero() {
@@ -469,247 +436,243 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 
 	var filesDone int64
 
-	worker := func() {
-		defer wg.Done()
-		for idx := range jobs {
-			// Respect context cancellation
+	scanFile := func(scanCtx context.Context, idx int) ([]connectivity.Edge, error) {
+		// Respect context cancellation before opening the next capture.
+		select {
+		case <-scanCtx.Done():
+			return nil, scanCtx.Err()
+		default:
+		}
+
+		path := files[idx]
+
+		handle, err := pcap.OpenOffline(path)
+		if err != nil {
+			return nil, fmt.Errorf("open pcap %s: %w", path, err)
+		}
+		defer handle.Close()
+
+		// One collector per file (no locks); merged after file completes.
+		opt := connectivity.DefaultOptions()
+		opt.ExcludedDstPorts = excludePorts
+		opt.EnforcePrivateAsSource = enforcePrivateAsSource
+		opt.FTPControlPorts = ftpControlPorts
+		opt.FTPPassiveMinPort = ftpPassiveMinPort
+
+		coll := connectivity.NewCollector(opt)
+
+		source := gopacket.NewPacketSource(handle, handle.LinkType())
+		source.NoCopy = true
+
+		var (
+			localEarliest time.Time
+			haveLocalTS   bool
+			scanErr       error
+		)
+
+		packets := source.Packets()
+	packetLoop:
+		for {
+			var packet gopacket.Packet
 			select {
-			case <-ctx.Done():
-				setErr(ctx.Err())
-				return
-			default:
+			case <-scanCtx.Done():
+				scanErr = scanCtx.Err()
+				break packetLoop
+			case nextPacket, ok := <-packets:
+				if !ok {
+					break packetLoop
+				}
+				packet = nextPacket
+			}
+			if scanOpt.PacketAdmission != nil && !scanOpt.PacketAdmission(packet) {
+				continue
 			}
 
-			path := files[idx]
-
-			handle, err := pcap.OpenOffline(path)
-			if err != nil {
-				setErr(fmt.Errorf("open pcap %s: %w", path, err))
-				return
+			md := packet.Metadata()
+			if md == nil {
+				continue
+			}
+			ts := md.Timestamp
+			if !haveLocalTS || ts.Before(localEarliest) {
+				localEarliest = ts
+				haveLocalTS = true
 			}
 
-			// One collector per file (no locks); merged after file completes.
-			opt := connectivity.DefaultOptions()
-			opt.ExcludedDstPorts = excludePorts
-			opt.EnforcePrivateAsSource = enforcePrivateAsSource
-			opt.FTPControlPorts = ftpControlPorts
-			opt.FTPPassiveMinPort = ftpPassiveMinPort
+			// --- NEW: collect topology edges (IPv4-only, per requirements) ---
+			coll.OnPacket(packet, ts)
 
-			coll := connectivity.NewCollector(opt)
+			// --- Existing DNS correlation logic (with safe fallback) ---
+			ip4 := packet.Layer(layers.LayerTypeIPv4)
+			ip6 := packet.Layer(layers.LayerTypeIPv6)
+			if ip4 == nil && ip6 == nil {
+				continue
+			}
 
-			source := gopacket.NewPacketSource(handle, handle.LinkType())
-			source.NoCopy = true
+			var srcIPStr, dstIPStr string
+			if ip4 != nil {
+				ip := ip4.(*layers.IPv4)
+				srcIPStr, dstIPStr = ip.SrcIP.String(), ip.DstIP.String()
+			} else {
+				ip := ip6.(*layers.IPv6)
+				srcIPStr, dstIPStr = ip.SrcIP.String(), ip.DstIP.String()
+			}
 
-			var (
-				localEarliest time.Time
-				haveLocalTS   bool
-			)
+			// Detect connection events: TCP SYN or any UDP (existing heuristic)
+			var dstPort uint16
+			var proto L4Proto
+			isConn := false
 
-			for packet := range source.Packets() {
-				select {
-				case <-ctx.Done():
-					handle.Close()
-					setErr(ctx.Err())
-					return
-				default:
-				}
-				if scanOpt.PacketAdmission != nil && !scanOpt.PacketAdmission(packet) {
-					continue
-				}
+			if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+				tcp := tcpLayer.(*layers.TCP)
+				if tcp.SYN && !tcp.ACK {
+					dstPort = uint16(tcp.DstPort)
 
-				md := packet.Metadata()
-				if md == nil {
-					continue
-				}
-				ts := md.Timestamp
-				if !haveLocalTS || ts.Before(localEarliest) {
-					localEarliest = ts
-					haveLocalTS = true
-				}
-
-				// --- NEW: collect topology edges (IPv4-only, per requirements) ---
-				coll.OnPacket(packet, ts)
-
-				// --- Existing DNS correlation logic (with safe fallback) ---
-				ip4 := packet.Layer(layers.LayerTypeIPv4)
-				ip6 := packet.Layer(layers.LayerTypeIPv6)
-				if ip4 == nil && ip6 == nil {
-					continue
-				}
-
-				var srcIPStr, dstIPStr string
-				if ip4 != nil {
-					ip := ip4.(*layers.IPv4)
-					srcIPStr, dstIPStr = ip.SrcIP.String(), ip.DstIP.String()
-				} else {
-					ip := ip6.(*layers.IPv6)
-					srcIPStr, dstIPStr = ip.SrcIP.String(), ip.DstIP.String()
-				}
-
-				// Detect connection events: TCP SYN or any UDP (existing heuristic)
-				var dstPort uint16
-				var proto L4Proto
-				isConn := false
-
-				if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-					tcp := tcpLayer.(*layers.TCP)
-					if tcp.SYN && !tcp.ACK {
-						dstPort = uint16(tcp.DstPort)
-
-						// IMPORTANT: don't correlate DNS itself as the "connection" for DNS transactions.
-						// Otherwise resolver IPs (10.4.0.230/240, 8.8.8.8, etc.) get injected into ResolvedIPs.
-						if dstPort == 53 {
-							continue
-						}
-
-						isConn = true
-						proto = L4ProtoTCP
-					}
-				} else if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
-					udp := udpLayer.(*layers.UDP)
-					dstPort = uint16(udp.DstPort)
-
-					// Same rule for UDP DNS queries.
+					// IMPORTANT: don't correlate DNS itself as the "connection" for DNS transactions.
+					// Otherwise resolver IPs (10.4.0.230/240, 8.8.8.8, etc.) get injected into ResolvedIPs.
 					if dstPort == 53 {
 						continue
 					}
-					if excludePorts != nil {
-						if _, ok := excludePorts[dstPort]; ok {
-							continue
-						}
-					}
+
 					isConn = true
-					proto = L4ProtoUDP
+					proto = L4ProtoTCP
 				}
+			} else if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
+				udp := udpLayer.(*layers.UDP)
+				dstPort = uint16(udp.DstPort)
 
-				if !isConn {
+				// Same rule for UDP DNS queries.
+				if dstPort == 53 {
 					continue
 				}
-
-				k := idxKey{Issuer: srcIPStr, Dst: dstIPStr}
-				txsForKey, ok := index[k]
-
-				var (
-					tx           *DNSTransaction
-					fromFallback bool
-				)
-
-				if ok {
-					tx = findLatestTxBefore(txsForKey, ts)
-				} else if inferDNSFromConnections {
-					// HARDENING #1: never issuer-only fallback for UDP (too ambiguous; causes name poisoning).
-					if proto == L4ProtoUDP {
-						if debugDNSFallback {
-							debugDNSFallbackf("skip-udp-fallback issuer=%s dst=%s:%d ts=%s", srcIPStr, dstIPStr, dstPort, ts.UTC().Format(time.RFC3339Nano))
-						}
+				if excludePorts != nil {
+					if _, ok := excludePorts[dstPort]; ok {
 						continue
 					}
+				}
+				isConn = true
+				proto = L4ProtoUDP
+			}
 
-					// HARDENING #2: TCP issuer-only fallback only if exactly one unresolved tx exists in window.
-					list := issuerTxs[srcIPStr]
-					eligibleCnt, unresCnt := 0, 0
-					tx, eligibleCnt, unresCnt = pickFallbackTxUniq(list, ts, maxConnDelay)
-					if tx == nil {
-						// Ambiguous issuer-only window -> do not backfill conn IP into any DNS name.
-						if debugDNSFallback {
-							debugDNSFallbackf("ambiguous issuer-only issuer=%s dst=%s:%d proto=%s ts=%s eligible=%d unresolved=%d",
-								srcIPStr, dstIPStr, dstPort, proto, ts.UTC().Format(time.RFC3339Nano), eligibleCnt, unresCnt)
-						}
-						continue
-					}
-					fromFallback = true
+			if !isConn {
+				continue
+			}
+
+			k := idxKey{Issuer: srcIPStr, Dst: dstIPStr}
+			txsForKey, ok := index[k]
+
+			var (
+				tx           *DNSTransaction
+				fromFallback bool
+			)
+
+			if ok {
+				tx = findLatestTxBefore(txsForKey, ts)
+			} else if inferDNSFromConnections {
+				// HARDENING #1: never issuer-only fallback for UDP (too ambiguous; causes name poisoning).
+				if proto == L4ProtoUDP {
 					if debugDNSFallback {
-						debugDNSFallbackf("fallback-selected issuer=%s name=%q resolver=%v dst=%s:%d proto=%s dt=%s eligible=%d unresolved=%d resolvedIPs=%d",
-							srcIPStr, tx.DNSName, tx.ResolverIP, dstIPStr, dstPort, proto, ts.Sub(tx.RequestTime), eligibleCnt, unresCnt, tx.ResolvedIPCount())
+						debugDNSFallbackf("skip-udp-fallback issuer=%s dst=%s:%d ts=%s", srcIPStr, dstIPStr, dstPort, ts.UTC().Format(time.RFC3339Nano))
 					}
-				} else {
 					continue
 				}
 
+				// HARDENING #2: TCP issuer-only fallback only if exactly one unresolved tx exists in window.
+				list := issuerTxs[srcIPStr]
+				eligibleCnt, unresCnt := 0, 0
+				tx, eligibleCnt, unresCnt = pickFallbackTxUniq(list, ts, maxConnDelay)
 				if tx == nil {
-					continue
-				}
-
-				dt := ts.Sub(tx.RequestTime)
-				if dt < 0 || dt > maxConnDelay {
-					if fromFallback && debugDNSFallback {
-						debugDNSFallbackf("fallback-outside-window issuer=%s name=%q dst=%s dt=%s max=%s",
-							srcIPStr, tx.DNSName, dstIPStr, dt, maxConnDelay)
+					// Ambiguous issuer-only window -> do not backfill conn IP into any DNS name.
+					if debugDNSFallback {
+						debugDNSFallbackf("ambiguous issuer-only issuer=%s dst=%s:%d proto=%s ts=%s eligible=%d unresolved=%d",
+							srcIPStr, dstIPStr, dstPort, proto, ts.UTC().Format(time.RFC3339Nano), eligibleCnt, unresCnt)
 					}
 					continue
 				}
-
-				// Actually-used dst IPv4 (for synack marking + optional backfill).
-				var usedDst4 net.IP
-				if ip := net.ParseIP(dstIPStr); ip != nil {
-					usedDst4 = ip.To4()
+				fromFallback = true
+				if debugDNSFallback {
+					debugDNSFallbackf("fallback-selected issuer=%s name=%q resolver=%v dst=%s:%d proto=%s dt=%s eligible=%d unresolved=%d resolvedIPs=%d",
+						srcIPStr, tx.DNSName, tx.ResolverIP, dstIPStr, dstPort, proto, ts.Sub(tx.RequestTime), eligibleCnt, unresCnt, tx.ResolvedIPCount())
 				}
+			} else {
+				continue
+			}
 
-				if fromFallback && usedDst4 != nil {
-					allow, csvDNS := allowConnectionInferredDNSBackfill(tx.DNSName, usedDst4.String(), ipToDNS)
-					if !allow {
-						if debugDNSFallback {
-							debugDNSFallbackf("fallback-suppressed-by-csv issuer=%s candidate_name=%q dst=%s:%d proto=%s csv_dns=%q",
-								srcIPStr, tx.DNSName, dstIPStr, dstPort, proto, csvDNS)
-						}
-						continue
+			if tx == nil {
+				continue
+			}
+
+			dt := ts.Sub(tx.RequestTime)
+			if dt < 0 || dt > maxConnDelay {
+				if fromFallback && debugDNSFallback {
+					debugDNSFallbackf("fallback-outside-window issuer=%s name=%q dst=%s dt=%s max=%s",
+						srcIPStr, tx.DNSName, dstIPStr, dt, maxConnDelay)
+				}
+				continue
+			}
+
+			// Actually-used dst IPv4 (for synack marking + optional backfill).
+			var usedDst4 net.IP
+			if ip := net.ParseIP(dstIPStr); ip != nil {
+				usedDst4 = ip.To4()
+			}
+
+			if fromFallback && usedDst4 != nil {
+				allow, csvDNS := allowConnectionInferredDNSBackfill(tx.DNSName, usedDst4.String(), ipToDNS)
+				if !allow {
+					if debugDNSFallback {
+						debugDNSFallbackf("fallback-suppressed-by-csv issuer=%s candidate_name=%q dst=%s:%d proto=%s csv_dns=%q",
+							srcIPStr, tx.DNSName, dstIPStr, dstPort, proto, csvDNS)
 					}
-				}
-
-				// Send candidate to aggregator
-				select {
-				case <-ctx.Done():
-					handle.Close()
-					setErr(ctx.Err())
-					return
-				case updates <- update{
-					tx: tx,
-					cand: ConnCandidate{
-						Port:  dstPort,
-						DT:    dt,
-						Proto: proto,
-					},
-					usedDst4:     usedDst4,
-					observedAt:   ts,
-					fromFallback: fromFallback,
-				}:
+					continue
 				}
 			}
 
-			handle.Close()
-			if haveLocalTS {
-				setFirstPacket(localEarliest, filepath.Base(path))
+			// Send candidate to aggregator
+			select {
+			case <-scanCtx.Done():
+				scanErr = scanCtx.Err()
+				break packetLoop
+			case updates <- update{
+				tx: tx,
+				cand: ConnCandidate{
+					Port:  dstPort,
+					DT:    dt,
+					Proto: proto,
+				},
+				usedDst4:     usedDst4,
+				observedAt:   ts,
+				fromFallback: fromFallback,
+			}:
 			}
-
-			// NEW: emit per-file unique edges to global edge aggregator.
-			edgeCh <- edgeBatch{fileIdx: idx, edges: coll.EdgesByFirstSeen()}
-
-			// Progress update (files completed)
-			done := int(atomic.AddInt64(&filesDone, 1))
-			progress.UpdateBar(done, totalFiles, "connections "+filepath.Base(path))
 		}
+		if scanErr != nil {
+			// PacketSource.Packets owns an asynchronous producer. Closing the
+			// handle stops further reads; draining joins the producer so it
+			// cannot remain blocked sending buffered packets after cancellation.
+			handle.Close()
+			for range packets {
+			}
+			return nil, scanErr
+		}
+
+		if haveLocalTS {
+			setFirstPacket(localEarliest, filepath.Base(path))
+		}
+
+		// Progress update (files completed)
+		done := int(atomic.AddInt64(&filesDone, 1))
+		progress.UpdateBar(done, totalFiles, "connections "+filepath.Base(path))
+		return coll.EdgesByFirstSeen(), nil
 	}
 
-	for i := 0; i < workers; i++ {
-		go worker()
-	}
-
-	for i := range files {
-		jobs <- i
-	}
-	close(jobs)
-
-	// Wait for workers and aggregators
-	wg.Wait()
+	edgeAccumulator := newEdgeAccumulator()
+	_, scanErr := runBoundedOrderedEdgeScans(ctx, totalFiles, workers, scanFile, edgeAccumulator.merge)
 
 	close(updates)
 	aggWG.Wait()
 
-	close(edgeCh)
-	edgeAggWG.Wait()
-
-	if firstErr != nil {
-		return nil, FirstPacketInfo{}, firstErr
+	if scanErr != nil {
+		return nil, FirstPacketInfo{}, scanErr
 	}
 
 	// Choose closest candidate (min dt) per DNS transaction (existing behavior)
@@ -729,43 +692,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		tx.Candidates = nil
 	}
 
-	type edgeKey struct {
-		issuer string
-		dst    string
-		proto  connectivity.L4Proto
-		port   uint16
-	}
-
-	// Flatten per-file edges in discovered file order while preserving bounded
-	// observation timestamps for duplicate endpoint tuples.
-	seenEdges := make(map[edgeKey]int, 65536)
-	var out []connectivity.Edge
-	for _, batch := range edgeBatches {
-		for _, e := range batch {
-			k := edgeKey{
-				issuer: e.IssuerIP,
-				dst:    e.DstIP,
-				proto:  e.Protocol,
-				port:   e.Port,
-			}
-			if idx, ok := seenEdges[k]; ok {
-				times := e.ObservedTimes
-				if len(times) == 0 && !e.FirstSeen.IsZero() {
-					times = []time.Time{e.FirstSeen}
-				}
-				out[idx].ObservedTimes = connectivity.MergeEdgeObservedTimes(out[idx].ObservedTimes, times...)
-				if len(out[idx].ObservedTimes) > 0 {
-					out[idx].FirstSeen = out[idx].ObservedTimes[0]
-				}
-				continue
-			}
-			if len(e.ObservedTimes) == 0 && !e.FirstSeen.IsZero() {
-				e.ObservedTimes = []time.Time{e.FirstSeen.UTC()}
-			}
-			seenEdges[k] = len(out)
-			out = append(out, e)
-		}
-	}
+	out := edgeAccumulator.edges()
 	out = suppressMergedFTPPassiveEdges(out, ftpPassiveMinPort, ftpControlPorts)
 	return out, firstPkt, nil
 }
