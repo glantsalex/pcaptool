@@ -193,7 +193,10 @@ const (
 )
 
 func bucketRecords(buckets syntrail.BucketedRecords, bucket syntrail.Bucket) []syntrail.Record {
-	return append([]syntrail.Record(nil), buckets[bucket]...)
+	// Borrow a read-only view. Selectors that feed an in-place sorting writer
+	// must first produce owned storage (for example, tcpSYNTrailRecords).
+	// Locality splitting and the other writers do not mutate this view.
+	return buckets[bucket]
 }
 
 func tcpSYNTrailRecords(records []syntrail.Record) []syntrail.Record {

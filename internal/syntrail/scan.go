@@ -62,7 +62,7 @@ func scanFilesSequential(
 	progress ScanProgressFunc,
 	admit pcaputil.PacketAdmission,
 ) ([]Record, error) {
-	results := make([]scanFileResult, len(files))
+	accumulator := newScanRecordAccumulator()
 	for i, file := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -74,13 +74,9 @@ func scanFilesSequential(
 		if err != nil {
 			return nil, err
 		}
-		results[i] = scanFileResult{
-			index:   i,
-			path:    file,
-			records: fileRecords,
-		}
+		accumulator.add(fileRecords)
 	}
-	return mergeScanFileResults(results), nil
+	return accumulator.records(), nil
 }
 
 func scanFilesConcurrent(
@@ -90,15 +86,31 @@ func scanFilesConcurrent(
 	progress ScanProgressFunc,
 	admit pcaputil.PacketAdmission,
 ) ([]Record, error) {
+	return scanFilesConcurrentWithScanner(ctx, files, workers, progress, admit, scanFile)
+}
+
+type scanFileFunc func(context.Context, string, pcaputil.PacketAdmission) ([]Record, error)
+
+func scanFilesConcurrentWithScanner(
+	ctx context.Context,
+	files []string,
+	workers int,
+	progress ScanProgressFunc,
+	admit pcaputil.PacketAdmission,
+	scanner scanFileFunc,
+) ([]Record, error) {
+	if workers < 1 {
+		workers = 1
+	}
 	if workers > len(files) {
 		workers = len(files)
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
+	scanCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	jobs := make(chan scanFileJob)
-	resultsCh := make(chan scanFileResult, len(files))
+	resultsCh := make(chan scanFileResult, workers)
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
@@ -106,12 +118,12 @@ func scanFilesConcurrent(
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				if err := ctx.Err(); err != nil {
+				if err := scanCtx.Err(); err != nil {
 					resultsCh <- scanFileResult{index: job.index, path: job.path, err: err}
 					continue
 				}
 
-				records, err := scanFile(ctx, job.path, admit)
+				records, err := scanner(scanCtx, job.path, admit)
 				if err != nil {
 					cancel()
 				}
@@ -126,53 +138,87 @@ func scanFilesConcurrent(
 	}
 
 	go func() {
-		defer close(jobs)
-		for i, file := range files {
-			if err := ctx.Err(); err != nil {
-				return
-			}
-			select {
-			case jobs <- scanFileJob{index: i, path: file}:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	go func() {
 		wg.Wait()
 		close(resultsCh)
 	}()
 
-	results := make([]scanFileResult, len(files))
-	seen := make([]bool, len(files))
+	accumulator := newScanRecordAccumulator()
+	pending := make(map[int]scanFileResult, workers)
+	nextDispatch := 0
+	nextCommit := 0
+	jobsClosed := false
 	var firstErr error
 	done := 0
-	for result := range resultsCh {
-		if result.index >= 0 && result.index < len(files) {
-			results[result.index] = result
-			seen[result.index] = true
+	ctxDone := scanCtx.Done()
+	for resultsCh != nil {
+		if !jobsClosed && (firstErr != nil || nextDispatch == len(files)) {
+			close(jobs)
+			jobsClosed = true
 		}
-		done++
-		if progress != nil {
-			progress(done, len(files), result.path)
+
+		var dispatchCh chan<- scanFileJob
+		var nextJob scanFileJob
+		// Bound the uncommitted file-index frontier. This prevents a slow early
+		// capture from allowing every later file batch to accumulate in memory.
+		if !jobsClosed && scanCtx.Err() == nil && nextDispatch-nextCommit < workers {
+			dispatchCh = jobs
+			nextJob = scanFileJob{index: nextDispatch, path: files[nextDispatch]}
 		}
-		if result.err != nil && shouldPreferScanError(firstErr, result.err) {
-			firstErr = result.err
-			cancel()
+
+		select {
+		case dispatchCh <- nextJob:
+			nextDispatch++
+
+		case result, ok := <-resultsCh:
+			if !ok {
+				resultsCh = nil
+				continue
+			}
+			done++
+			if progress != nil {
+				progress(done, len(files), result.path)
+			}
+			pending[result.index] = result
+			if result.err != nil && shouldPreferScanError(firstErr, result.err) {
+				firstErr = result.err
+				cancel()
+			}
+			if firstErr != nil {
+				clear(pending)
+				continue
+			}
+
+			for {
+				ordered, exists := pending[nextCommit]
+				if !exists || ordered.err != nil {
+					break
+				}
+				delete(pending, nextCommit)
+				accumulator.add(ordered.records)
+				nextCommit++
+			}
+
+		case <-ctxDone:
+			if shouldPreferScanError(firstErr, scanCtx.Err()) {
+				firstErr = scanCtx.Err()
+			}
+			clear(pending)
+			ctxDone = nil
 		}
+	}
+	if !jobsClosed {
+		close(jobs)
 	}
 	if firstErr != nil {
 		return nil, firstErr
 	}
-	for i := range files {
-		if !seen[i] {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
+	if nextCommit != len(files) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
+		return nil, fmt.Errorf("scan completed %d of %d packet captures", nextCommit, len(files))
 	}
-	return mergeScanFileResults(results), nil
+	return accumulator.records(), nil
 }
 
 func shouldPreferScanError(current, next error) bool {
@@ -200,22 +246,36 @@ type scanFileResult struct {
 	err     error
 }
 
-func mergeScanFileResults(results []scanFileResult) []Record {
-	var tcpRecords []Record
-	udpRecords := make(map[observedRecordKey]Record)
-	var udpOrder []observedRecordKey
+type scanRecordAccumulator struct {
+	tcpRecords []Record
+	udpRecords map[observedRecordKey]Record
+	udpOrder   []observedRecordKey
+}
 
-	for _, result := range results {
-		for _, record := range result.records {
-			if record.Protocol != ProtocolUDP {
-				tcpRecords = append(tcpRecords, record)
-				continue
-			}
-			addEarliestRecord(udpRecords, &udpOrder, record)
-		}
+func newScanRecordAccumulator() *scanRecordAccumulator {
+	return &scanRecordAccumulator{
+		udpRecords: make(map[observedRecordKey]Record),
 	}
+}
 
-	return appendOrderedRecords(tcpRecords, udpRecords, udpOrder)
+func (a *scanRecordAccumulator) add(records []Record) {
+	// The externally visible ordering contract is all TCP observations in
+	// file/packet order followed by first-seen UDP tuples. UDP timestamps may
+	// still be replaced by an earlier observation from a later file.
+	for _, record := range records {
+		if record.Protocol != ProtocolUDP {
+			a.tcpRecords = append(a.tcpRecords, record)
+			continue
+		}
+		addEarliestRecord(a.udpRecords, &a.udpOrder, record)
+	}
+}
+
+func (a *scanRecordAccumulator) records() []Record {
+	for _, key := range a.udpOrder {
+		a.tcpRecords = append(a.tcpRecords, a.udpRecords[key])
+	}
+	return a.tcpRecords
 }
 
 func scanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {

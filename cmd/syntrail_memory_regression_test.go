@@ -1,0 +1,232 @@
+package cmd
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	capture "github.com/aglants/pcaptool/internal/pcap"
+	"github.com/aglants/pcaptool/internal/syntrail"
+)
+
+// Exercise the scanner and all sidecar writers together. The expected raw
+// evidence is constructed from the fixture, independently of production
+// scanning/merging, and the legacy artifact selectors are frozen below.
+func TestFleetSidecarManyFileArtifactsMatchLegacy(t *testing.T) {
+	dir := t.TempDir()
+	files, wantRecords := writeFleetMemoryFixture(t, dir, 32, 12)
+	fleet, err := syntrail.ParseFleetIPv4List(strings.NewReader("10.0.0.1\n10.0.0.2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBuckets := syntrail.ClassifyRecords(wantRecords, fleet)
+	originalBuckets := make(syntrail.BucketedRecords, len(wantBuckets))
+	for bucket, records := range wantBuckets {
+		originalBuckets[bucket] = append([]syntrail.Record(nil), records...)
+	}
+	for _, debug := range []bool{false, true} {
+		t.Run(fmt.Sprintf("debug_%t", debug), func(t *testing.T) {
+			opt := fleetMemoryArtifactOptions(debug)
+			want := legacyFleetArtifactBytes(t, wantBuckets, opt, "fleet-memory")
+			for _, workers := range []int{1, 3, 8} {
+				t.Run(fmt.Sprintf("workers_%d", workers), func(t *testing.T) {
+					opt.ScanOptions = syntrail.ScanOptions{Workers: workers, PacketAdmission: capture.IPv4EndpointAdmission(fleet.Contains)}
+					records, err := syntrail.ScanFilesWithOptions(context.Background(), files, opt.ScanOptions)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(records, wantRecords) {
+						t.Fatal("scan changed TCP occurrences/order or UDP first-appearance/earliest evidence")
+					}
+					om := newSYNTrailTestOutputManagerForNet(t, "fleet-memory")
+					artifacts, err := runSYNTrailSidecar(context.Background(), om, files, &fleet, opt)
+					if err != nil {
+						t.Fatal(err)
+					}
+					entries, err := os.ReadDir(om.RunDir())
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(artifacts) != len(want) || len(entries) != len(want) {
+						t.Fatalf("artifact set changed: manifest keys=%d files=%d want=%d", len(artifacts), len(entries), len(want))
+					}
+					for name, expected := range want {
+						data, err := os.ReadFile(om.Path(name))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if !bytes.Equal(data, expected) {
+							t.Errorf("%s differs from frozen legacy selector output", name)
+						}
+					}
+				})
+			}
+			// The writer selectors may borrow input only when downstream code
+			// does not mutate it; in-place trail sorting must receive a copy.
+			om := newSYNTrailTestOutputManagerForNet(t, "fleet-memory")
+			if _, err := writeSYNTrailArtifacts(om, wantBuckets, opt); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(wantBuckets, originalBuckets) {
+				t.Fatal("artifact preparation mutated borrowed bucket evidence")
+			}
+		})
+	}
+}
+
+func fleetMemoryArtifactOptions(debug bool) synTrailArtifactOptions {
+	return synTrailArtifactOptions{
+		Debug: debug, FTPControlPorts: map[uint16]struct{}{21: {}, 990: {}},
+		FTPPassiveMinPort: 30000, ServerSummaryExcludeUDPPorts: map[uint16]struct{}{33434: {}},
+	}
+}
+
+// Each file deliberately contains repeated TCP occurrences, interleaved UDP,
+// rejected non-fleet traffic, and SYN+ACK packets. Later files have earlier
+// timestamps. FTP control evidence appears only in the final file.
+func writeFleetMemoryFixture(t *testing.T, dir string, fileCount, repetitions int) ([]string, []syntrail.Record) {
+	t.Helper()
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	var files []string
+	var tcp []syntrail.Record
+	type udpKey struct {
+		src, dst netip.Addr
+		port     uint16
+	}
+	udp := make(map[udpKey]syntrail.Record)
+	var order []udpKey
+	for fileIndex := 0; fileIndex < fileCount; fileIndex++ {
+		ts := base.Add(time.Duration(fileCount-fileIndex) * time.Minute)
+		src := fmt.Sprintf("10.0.0.%d", 1+fileIndex%2)
+		peer := fmt.Sprintf("10.0.0.%d", 2-fileIndex%2)
+		var packets []timestampedPacket
+		addTCP := func(from, to string, port uint16, timestamp time.Time) {
+			packets = append(packets, timestampedPacket{ts: timestamp, data: buildTCPPacket(t, from, to, 41000, port, true, false)})
+			tcp = append(tcp, syntrail.Record{SrcIP: netip.MustParseAddr(from), DstIP: netip.MustParseAddr(to), DstPort: port, Protocol: syntrail.ProtocolTCP, Timestamp: timestamp})
+		}
+		addUDP := func(from, to string, port uint16, timestamp time.Time) {
+			packets = append(packets, timestampedPacket{ts: timestamp, data: buildUDPPacket(t, from, to, 41000, port)})
+			key := udpKey{netip.MustParseAddr(from), netip.MustParseAddr(to), port}
+			r := syntrail.Record{SrcIP: key.src, DstIP: key.dst, DstPort: port, Protocol: syntrail.ProtocolUDP, Timestamp: timestamp}
+			old, exists := udp[key]
+			if !exists {
+				order = append(order, key)
+			}
+			if !exists || timestamp.Before(old.Timestamp) {
+				udp[key] = r
+			}
+		}
+		for i := 0; i < repetitions; i++ {
+			at := ts.Add(time.Duration(i%5) * time.Millisecond)
+			addTCP(src, "203.0.113.10", 443, at)
+			addTCP(src, "192.168.1.20", 8443, at)
+			addTCP(src, peer, 9443, at)
+			addTCP("192.168.1.30", src, 22, at)
+			addUDP(src, "203.0.113.10", 3478, at)
+			addUDP(src, "192.168.1.20", 33434, at)
+			addUDP(src, "192.168.1.20", 5353, at)
+			addUDP("192.168.1.30", src, 53, at)
+		}
+		addTCP(src, "203.0.113.20", 40000, ts)
+		addTCP(src, "192.168.1.40", 40000, ts)
+		if fileIndex == fileCount-1 {
+			for _, device := range []string{"10.0.0.1", "10.0.0.2"} {
+				addTCP(device, "203.0.113.20", 990, ts)
+				addTCP(device, "192.168.1.40", 990, ts)
+			}
+		}
+		packets = append(packets,
+			timestampedPacket{ts: ts, data: buildTCPPacket(t, "10.9.9.9", "203.0.113.10", 41000, 443, true, false)},
+			timestampedPacket{ts: ts, data: buildTCPPacket(t, "203.0.113.10", src, 443, 41000, true, true)},
+		)
+		path := filepath.Join(dir, fmt.Sprintf("capture-%04d.pcap", fileIndex))
+		writePacketsToPCAP(t, path, packets)
+		files = append(files, path)
+	}
+	for _, key := range order {
+		tcp = append(tcp, udp[key])
+	}
+	return files, tcp
+}
+
+// Freeze pre-change artifact selection independently of the production
+// selectors. Output writers themselves are unchanged by this optimization.
+func legacyFleetArtifactBytes(t *testing.T, buckets syntrail.BucketedRecords, opt synTrailArtifactOptions, netID string) map[string][]byte {
+	t.Helper()
+	clone := func(bucket syntrail.Bucket) []syntrail.Record {
+		return append([]syntrail.Record(nil), buckets[bucket]...)
+	}
+	public, private := syntrail.SplitFleetToNonFleetByDestinationLocality(clone(syntrail.BucketFleetToNonFleet))
+	tcpOnly := func(records []syntrail.Record) []syntrail.Record {
+		out := make([]syntrail.Record, 0, len(records))
+		for _, r := range records {
+			if r.Protocol == "" || r.Protocol == syntrail.ProtocolTCP {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	summary := func(records []syntrail.Record) []syntrail.Record {
+		type pair struct{ src, dst netip.Addr }
+		controls := make(map[pair]bool)
+		for _, r := range records {
+			if r.Protocol == "" || r.Protocol == syntrail.ProtocolTCP {
+				if _, ok := opt.FTPControlPorts[r.DstPort]; ok {
+					controls[pair{r.SrcIP, r.DstIP}] = true
+				}
+			}
+		}
+		var out []syntrail.Record
+		for _, r := range records {
+			_, control := opt.FTPControlPorts[r.DstPort]
+			if (r.Protocol == "" || r.Protocol == syntrail.ProtocolTCP) && r.DstPort >= opt.FTPPassiveMinPort && !control && controls[pair{r.SrcIP, r.DstIP}] {
+				continue
+			}
+			if r.Protocol == syntrail.ProtocolUDP {
+				if _, excluded := opt.ServerSummaryExcludeUDPPorts[r.DstPort]; excluded {
+					continue
+				}
+			}
+			out = append(out, r)
+		}
+		return out
+	}
+	files := make(map[string][]byte)
+	write := func(name string, fn func(io.Writer) error) {
+		var b bytes.Buffer
+		if err := fn(&b); err != nil {
+			t.Fatal(err)
+		}
+		files[name] = b.Bytes()
+	}
+	publicSummary, privateSummary := summary(public), summary(private)
+	probes := tcpOnly(clone(syntrail.BucketPrivateNonFleetToFleet))
+	write("public-servers-unique.csv", func(w io.Writer) error { return syntrail.WritePublicServersCSV(w, publicSummary) })
+	write(privateNonFleetEndpointsFilename, func(w io.Writer) error { return syntrail.WritePrivateNonFleetEndpointsJSON(w, privateSummary, probes) })
+	write(flowDirectionCorrectionSQLFilename, func(w io.Writer) error {
+		return writeFlowDirectionCorrectionSQLContent(w, netID, syntrail.PrivateServerTuples(privateSummary))
+	})
+	if opt.Debug {
+		write("fleet-to-public-trail.csv", func(w io.Writer) error { return syntrail.WriteProtocolTrailCSV(w, public) })
+		write("fleet-to-private-nonfleet-trail.csv", func(w io.Writer) error { return syntrail.WriteProtocolTrailCSV(w, private) })
+		write("fleet-to-public-unique.csv", func(w io.Writer) error { return syntrail.WriteProtocolUniqueCSV(w, public) })
+		write("fleet-to-private-nonfleet-syn-unique.csv", func(w io.Writer) error { return syntrail.WriteTCPUniqueCSV(w, tcpOnly(private)) })
+		write("fleet-to-fleet-tcp-syn-trail.csv", func(w io.Writer) error { return syntrail.WriteTrailCSV(w, tcpOnly(clone(syntrail.BucketFleetToFleet))) })
+		write("fleet-to-fleet-tcp-syn-unique.csv", func(w io.Writer) error {
+			return syntrail.WriteUniqueCSV(w, tcpOnly(clone(syntrail.BucketFleetToFleet)))
+		})
+		write("private-nonfleet-to-fleet-trail.csv", func(w io.Writer) error {
+			return syntrail.WriteProtocolTrailCSV(w, clone(syntrail.BucketPrivateNonFleetToFleet))
+		})
+		write("private-nonfleet-to-fleet-tcp-syn-unique.csv", func(w io.Writer) error { return syntrail.WriteUniqueCSV(w, probes) })
+	}
+	return files
+}
