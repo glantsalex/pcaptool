@@ -12,17 +12,17 @@ import (
 	"testing"
 )
 
-func TestConfigModeDoesNotRequireCLISubcommand(t *testing.T) {
+func TestConfigModeUsesCLIReadDirWithoutSubcommand(t *testing.T) {
 	configPath := writeApplicationConfig(t, `schema_version: 1
 command: dnsextract
 dnsextract:
   net_id: yaml-net
-  read_dir: ./pcaps
 `)
+	const runtimeReadDir = "/runtime/pcaps"
 
 	var got DNSExtractOptions
 	called := 0
-	err := executeConfigMode(context.Background(), []string{"--config", configPath}, io.Discard, io.Discard,
+	err := executeConfigMode(context.Background(), []string{"--config", configPath, "--read-dir", runtimeReadDir}, io.Discard, io.Discard,
 		func(_ context.Context, opts DNSExtractOptions) error {
 			called++
 			got = opts
@@ -37,9 +37,33 @@ dnsextract:
 	if got.NetID != "yaml-net" {
 		t.Fatalf("NetID = %q, want yaml-net", got.NetID)
 	}
-	wantReadDir := filepath.Join(filepath.Dir(configPath), "pcaps")
-	if got.ReadDir != wantReadDir {
-		t.Fatalf("ReadDir = %q, want %q", got.ReadDir, wantReadDir)
+	if got.ReadDir != runtimeReadDir {
+		t.Fatalf("ReadDir = %q, want unchanged CLI value %q", got.ReadDir, runtimeReadDir)
+	}
+}
+
+func TestConfigModeDoesNotExpandCLIReadDir(t *testing.T) {
+	configPath := writeApplicationConfig(t, `schema_version: 1
+command: dnsextract
+dnsextract:
+  net_id: test-net
+`)
+
+	for _, readDir := range []string{"~/pcaps", "$PCAP_STAGE/pcaps"} {
+		t.Run(readDir, func(t *testing.T) {
+			var got DNSExtractOptions
+			err := executeConfigMode(context.Background(), []string{"--config", configPath, "--read-dir", readDir}, io.Discard, io.Discard,
+				func(_ context.Context, opts DNSExtractOptions) error {
+					got = opts
+					return nil
+				})
+			if err != nil {
+				t.Fatalf("executeConfigMode() error = %v", err)
+			}
+			if got.ReadDir != readDir {
+				t.Fatalf("ReadDir = %q, want literal CLI value %q", got.ReadDir, readDir)
+			}
+		})
 	}
 }
 
@@ -55,7 +79,6 @@ func TestEquivalentCLIAndYAMLProduceEquivalentOptions(t *testing.T) {
 command: dnsextract
 dnsextract:
   net_id: equivalent-net
-  read_dir: %q
   fleet: %q
   fleet_scan_workers: 3
   output_root: %q
@@ -87,7 +110,7 @@ dnsextract:
   post_hooks:
     - first hook
     - second hook
-`, readDir, fleet, outputRoot, dnsIPFile, normalizationRules)
+`, fleet, outputRoot, dnsIPFile, normalizationRules)
 	configPath := filepath.Join(configDir, "config.yaml")
 	if err := os.WriteFile(configPath, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
@@ -131,7 +154,7 @@ dnsextract:
 	}
 
 	var yamlOptions DNSExtractOptions
-	if err := executeConfigMode(context.Background(), []string{"--config", configPath}, io.Discard, io.Discard,
+	if err := executeConfigMode(context.Background(), []string{"--config", configPath, "--read-dir", readDir}, io.Discard, io.Discard,
 		func(_ context.Context, opts DNSExtractOptions) error {
 			yamlOptions = opts
 			return nil
@@ -149,11 +172,11 @@ func TestConfigModeUsesSharedDNSExtractDefaults(t *testing.T) {
 command: dnsextract
 dnsextract:
   net_id: defaults-net
-  read_dir: ./pcaps
 `)
+	const runtimeReadDir = "relative/runtime-pcaps"
 
 	var got DNSExtractOptions
-	if err := executeConfigMode(context.Background(), []string{"--config", configPath}, io.Discard, io.Discard,
+	if err := executeConfigMode(context.Background(), []string{"--config", configPath, "-r", runtimeReadDir}, io.Discard, io.Discard,
 		func(_ context.Context, opts DNSExtractOptions) error {
 			got = opts
 			return nil
@@ -163,7 +186,7 @@ dnsextract:
 
 	want := DefaultDNSExtractOptions()
 	want.NetID = "defaults-net"
-	want.ReadDir = filepath.Join(filepath.Dir(configPath), "pcaps")
+	want.ReadDir = runtimeReadDir
 	want.OutputRoot = filepath.Join(filepath.Dir(configPath), want.OutputRoot)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("config defaults = %#v, want shared defaults %#v", got, want)
@@ -175,7 +198,6 @@ func TestConfigModeIgnoresRecognizedCLIOptionsAndWarnsDeterministically(t *testi
 command: dnsextract
 dnsextract:
   net_id: yaml-net
-  read_dir: ./pcaps
   debug: false
   format: table
 `)
@@ -184,6 +206,7 @@ dnsextract:
 	var got DNSExtractOptions
 	err := executeConfigMode(context.Background(), []string{
 		"--config", configPath,
+		"-r", "/stage/run42",
 		"--net-id", "WRONG",
 		"--format", "json",
 		"--debug",
@@ -195,7 +218,7 @@ dnsextract:
 	if err != nil {
 		t.Fatalf("executeConfigMode() error = %v", err)
 	}
-	if got.NetID != "yaml-net" || got.Format != "table" || got.Debug {
+	if got.NetID != "yaml-net" || got.ReadDir != "/stage/run42" || got.Format != "table" || got.Debug {
 		t.Fatalf("CLI values leaked into config options: %#v", got)
 	}
 	const wantWarning = "warning: --config is authoritative; ignored CLI options: --debug, --format, --net-id\n"
@@ -215,7 +238,6 @@ func TestConfigModePathResolution(t *testing.T) {
 command: dnsextract
 dnsextract:
   net_id: paths-net
-  read_dir: ./pcaps
   fleet: ./fleet.txt
   dns_ip_file: ~/dns.csv
   dns_normalization_rules: $PCAPTOOL_RULES/rules.yaml
@@ -229,7 +251,8 @@ dnsextract:
 	t.Chdir(workingDir)
 
 	var got DNSExtractOptions
-	if err := executeConfigMode(context.Background(), []string{"--config", "configs/app.yaml"}, io.Discard, io.Discard,
+	const runtimeReadDir = "./runtime/../pcaps"
+	if err := executeConfigMode(context.Background(), []string{"-r", runtimeReadDir, "--config", "configs/app.yaml"}, io.Discard, io.Discard,
 		func(_ context.Context, opts DNSExtractOptions) error {
 			got = opts
 			return nil
@@ -241,7 +264,7 @@ dnsextract:
 		got  string
 		want string
 	}{
-		"read_dir":                {got.ReadDir, filepath.Join(configDir, "pcaps")},
+		"read_dir":                {got.ReadDir, runtimeReadDir},
 		"fleet":                   {got.Fleet, filepath.Join(configDir, "fleet.txt")},
 		"dns_ip_file":             {got.DNSIPFile, filepath.Join(configDir, "~", "dns.csv")},
 		"dns_normalization_rules": {got.DNSNormalizationRules, filepath.Join(configDir, "$PCAPTOOL_RULES", "rules.yaml")},
@@ -261,20 +284,22 @@ func TestConfigModeRejectsInvalidCLIEnvelope(t *testing.T) {
 command: dnsextract
 dnsextract:
   net_id: test-net
-  read_dir: ./pcaps
 `)
 	tests := []struct {
 		name string
 		args []string
 		want string
 	}{
-		{name: "unknown flag", args: []string{"--config", configPath, "--not-a-flag"}, want: "unknown flag"},
-		{name: "malformed bool", args: []string{"--config", configPath, "--debug=maybe"}, want: "invalid argument"},
-		{name: "malformed int", args: []string{"--config", configPath, "--fleet-scan-workers=nope"}, want: "invalid argument"},
-		{name: "malformed duration", args: []string{"--config", configPath, "--topology-dns-window=nope"}, want: "invalid argument"},
-		{name: "positional argument", args: []string{"--config", configPath, "extra"}, want: "unknown command"},
-		{name: "explicit subcommand", args: []string{"--config", configPath, "dnsextract"}, want: "unknown command"},
-		{name: "duplicate selectors", args: []string{"--config", configPath, "--config=" + configPath}, want: "only once"},
+		{name: "unknown flag", args: []string{"--config", configPath, "--read-dir", "/pcaps", "--not-a-flag"}, want: "unknown flag"},
+		{name: "malformed bool", args: []string{"--config", configPath, "--read-dir", "/pcaps", "--debug=maybe"}, want: "invalid argument"},
+		{name: "malformed int", args: []string{"--config", configPath, "--read-dir", "/pcaps", "--fleet-scan-workers=nope"}, want: "invalid argument"},
+		{name: "malformed duration", args: []string{"--config", configPath, "--read-dir", "/pcaps", "--topology-dns-window=nope"}, want: "invalid argument"},
+		{name: "positional argument", args: []string{"--config", configPath, "--read-dir", "/pcaps", "extra"}, want: "unknown command"},
+		{name: "explicit subcommand", args: []string{"dnsextract", "--config", configPath, "--read-dir", "/pcaps"}, want: "unknown command"},
+		{name: "missing read dir", args: []string{"--config", configPath}, want: "--read-dir is required when --config is used"},
+		{name: "empty read dir", args: []string{"--config", configPath, "--read-dir="}, want: "--read-dir must be nonempty"},
+		{name: "empty short read dir", args: []string{"--config", configPath, "-r", ""}, want: "--read-dir must be nonempty"},
+		{name: "duplicate selectors", args: []string{"--config", configPath, "--read-dir", "/pcaps", "--config=" + configPath}, want: "only once"},
 		{name: "adjacent duplicate selectors", args: []string{"--config", "--config=" + configPath}, want: "only once"},
 		{name: "empty equals selector", args: []string{"--config="}, want: "non-empty path"},
 		{name: "empty separate selector", args: []string{"--config", ""}, want: "non-empty path"},
@@ -323,11 +348,10 @@ func TestConfigModeDoesNotTreatFlagValueAsHelp(t *testing.T) {
 command: dnsextract
 dnsextract:
   net_id: test-net
-  read_dir: ./pcaps
 `)
 	var stderr bytes.Buffer
 	called := false
-	err := executeConfigMode(context.Background(), []string{"--config", configPath, "--post-hook", "-h"}, io.Discard, &stderr,
+	err := executeConfigMode(context.Background(), []string{"--config", configPath, "--read-dir", "/pcaps", "--post-hook", "-h"}, io.Discard, &stderr,
 		func(context.Context, DNSExtractOptions) error {
 			called = true
 			return nil
@@ -348,9 +372,8 @@ func TestConfigModeNoBannerRemainsProcessOnly(t *testing.T) {
 command: dnsextract
 dnsextract:
   net_id: test-net
-  read_dir: ./pcaps
 `)
-	args := []string{"--config", configPath, "--no-banner"}
+	args := []string{"--config", configPath, "--read-dir", "/pcaps", "--no-banner"}
 	if !SuppressBannerFromArgs(args) {
 		t.Fatal("SuppressBannerFromArgs() = false, want true")
 	}
@@ -383,7 +406,6 @@ func TestConfigModeExecutesDNSExtractWithCaptureFixture(t *testing.T) {
 command: dnsextract
 dnsextract:
   net_id: config-integration
-  read_dir: ./pcaps
   output_root: ./output
   disable_sni: true
 `
@@ -391,7 +413,7 @@ dnsextract:
 		t.Fatal(err)
 	}
 
-	if err := executeConfigMode(context.Background(), []string{"--config", configPath}, io.Discard, io.Discard, executeDNSExtract); err != nil {
+	if err := executeConfigMode(context.Background(), []string{"--config", configPath, "--read-dir", readDir}, io.Discard, io.Discard, executeDNSExtract); err != nil {
 		t.Fatalf("executeConfigMode() error = %v", err)
 	}
 	runDir := findSingleRunDir(t, filepath.Join(configDir, "output"), "config-integration")
@@ -412,10 +434,9 @@ func TestConfigDurationUsesSharedSemanticValidation(t *testing.T) {
 command: dnsextract
 dnsextract:
   net_id: test-net
-  read_dir: ./pcaps
   topology_dns_window: -1s
 `)
-	err := executeConfigMode(context.Background(), []string{"--config", configPath}, io.Discard, io.Discard,
+	err := executeConfigMode(context.Background(), []string{"--config", configPath, "--read-dir", "/pcaps"}, io.Discard, io.Discard,
 		func(context.Context, DNSExtractOptions) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "--topology-dns-window must be >= 0") {
 		t.Fatalf("executeConfigMode() error = %v, want shared semantic validation error", err)
@@ -427,13 +448,12 @@ func TestConfigModePreservesExplicitZeroValues(t *testing.T) {
 command: dnsextract
 dnsextract:
   net_id: test-net
-  read_dir: ./pcaps
   fleet_scan_workers: 0
   topology_dns_window: 0s
   post_hooks: []
 `)
 	var got DNSExtractOptions
-	if err := executeConfigMode(context.Background(), []string{"--config", configPath}, io.Discard, io.Discard,
+	if err := executeConfigMode(context.Background(), []string{"--config", configPath, "--read-dir", "/pcaps"}, io.Discard, io.Discard,
 		func(_ context.Context, opts DNSExtractOptions) error {
 			got = opts
 			return nil
@@ -459,9 +479,8 @@ func TestConfigModeExecutorReceivesContext(t *testing.T) {
 command: dnsextract
 dnsextract:
   net_id: test-net
-  read_dir: ./pcaps
 `)
-	if err := executeConfigMode(ctx, []string{"--config", configPath}, io.Discard, io.Discard,
+	if err := executeConfigMode(ctx, []string{"--config", configPath, "--read-dir", "/pcaps"}, io.Discard, io.Discard,
 		func(got context.Context, _ DNSExtractOptions) error {
 			if got.Value(key) != "value" {
 				t.Fatal("executor did not receive config-mode context")

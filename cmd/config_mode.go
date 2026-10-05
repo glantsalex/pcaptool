@@ -44,11 +44,11 @@ func executeConfigMode(
 	if err != nil {
 		return err
 	}
-	ignored, helpRequested, err := validateConfigModeCLI(ctx, ordinaryArgs)
+	cli, err := validateConfigModeCLI(ctx, ordinaryArgs)
 	if err != nil {
 		return err
 	}
-	if helpRequested {
+	if cli.helpRequested {
 		return writeConfigModeHelp(ctx, stdout, stderr)
 	}
 
@@ -56,13 +56,13 @@ func executeConfigMode(
 	if err != nil {
 		return err
 	}
-	opts, err := dnsExtractOptionsFromConfig(config)
+	opts, err := dnsExtractOptionsFromConfig(config, cli.readDir)
 	if err != nil {
 		return err
 	}
 
-	if len(ignored) > 0 {
-		fmt.Fprintf(stderr, "warning: --config is authoritative; ignored CLI options: %s\n", strings.Join(ignored, ", "))
+	if len(cli.ignored) > 0 {
+		fmt.Fprintf(stderr, "warning: --config is authoritative; ignored CLI options: %s\n", strings.Join(cli.ignored, ", "))
 	}
 	return executor(ctx, opts)
 }
@@ -118,8 +118,18 @@ func extractConfigSelector(args []string) (string, []string, error) {
 	return configPath, ordinaryArgs, nil
 }
 
-func validateConfigModeCLI(ctx context.Context, args []string) ([]string, bool, error) {
-	root := newRootCommandWithExecutor(func(context.Context, DNSExtractOptions) error { return nil })
+type configModeCLIValues struct {
+	readDir       string
+	ignored       []string
+	helpRequested bool
+}
+
+func validateConfigModeCLI(ctx context.Context, args []string) (configModeCLIValues, error) {
+	var parsed DNSExtractOptions
+	root := newRootCommandWithExecutor(func(_ context.Context, opts DNSExtractOptions) error {
+		parsed = opts
+		return nil
+	})
 	root.SilenceErrors = true
 	root.SilenceUsage = true
 	root.SetOut(io.Discard)
@@ -127,7 +137,7 @@ func validateConfigModeCLI(ctx context.Context, args []string) ([]string, bool, 
 
 	dnsCommand := findCommand(root, "dnsextract")
 	if dnsCommand == nil {
-		return nil, false, fmt.Errorf("internal error: dnsextract command is not registered")
+		return configModeCLIValues{}, fmt.Errorf("internal error: dnsextract command is not registered")
 	}
 	dnsCommand.Args = cobra.NoArgs
 	clearRequiredAnnotation(root.PersistentFlags().Lookup("net-id"))
@@ -135,19 +145,26 @@ func validateConfigModeCLI(ctx context.Context, args []string) ([]string, bool, 
 
 	root.SetArgs(append([]string{"dnsextract"}, args...))
 	if err := root.ExecuteContext(ctx); err != nil {
-		return nil, false, err
+		return configModeCLIValues{}, err
 	}
 	if help := dnsCommand.Flags().Lookup("help"); help != nil && help.Changed {
-		return nil, true, nil
+		return configModeCLIValues{helpRequested: true}, nil
+	}
+	readDirFlag := dnsCommand.Flags().Lookup("read-dir")
+	if readDirFlag == nil || !readDirFlag.Changed {
+		return configModeCLIValues{}, fmt.Errorf("--read-dir is required when --config is used")
+	}
+	if strings.TrimSpace(parsed.ReadDir) == "" {
+		return configModeCLIValues{}, fmt.Errorf("--read-dir must be nonempty when --config is used")
 	}
 	ignoredSet := make(map[string]struct{})
 	root.PersistentFlags().Visit(func(flag *pflag.Flag) {
-		if !isConfigModeProcessFlag(flag.Name) {
+		if !isConfigModeEffectiveFlag(flag.Name) {
 			ignoredSet["--"+flag.Name] = struct{}{}
 		}
 	})
 	dnsCommand.Flags().Visit(func(flag *pflag.Flag) {
-		if !isConfigModeProcessFlag(flag.Name) {
+		if !isConfigModeEffectiveFlag(flag.Name) {
 			ignoredSet["--"+flag.Name] = struct{}{}
 		}
 	})
@@ -157,11 +174,14 @@ func validateConfigModeCLI(ctx context.Context, args []string) ([]string, bool, 
 		ignored = append(ignored, name)
 	}
 	sort.Strings(ignored)
-	return ignored, false, nil
+	return configModeCLIValues{
+		readDir: parsed.ReadDir,
+		ignored: ignored,
+	}, nil
 }
 
-func isConfigModeProcessFlag(name string) bool {
-	return name == configFlagName || name == "help" || name == "no-banner"
+func isConfigModeEffectiveFlag(name string) bool {
+	return name == configFlagName || name == "help" || name == "no-banner" || name == "read-dir"
 }
 
 func clearRequiredAnnotation(flag *pflag.Flag) {
@@ -180,12 +200,12 @@ func findCommand(root *cobra.Command, name string) *cobra.Command {
 	return nil
 }
 
-func dnsExtractOptionsFromConfig(config *appconfig.Config) (DNSExtractOptions, error) {
+func dnsExtractOptionsFromConfig(config *appconfig.Config, readDir string) (DNSExtractOptions, error) {
 	opts := DefaultDNSExtractOptions()
 	values := config.DNSExtract
 
 	setConfigValue(&opts.NetID, values.NetID)
-	setConfigValue(&opts.ReadDir, values.ReadDir)
+	opts.ReadDir = readDir
 	setConfigValue(&opts.Fleet, values.Fleet)
 	setConfigValue(&opts.FleetScanWorkers, values.FleetScanWorkers)
 	setConfigValue(&opts.OutputRoot, values.OutputRoot)
@@ -221,7 +241,6 @@ func dnsExtractOptionsFromConfig(config *appconfig.Config) (DNSExtractOptions, e
 	}
 
 	configDir := filepath.Dir(config.Path)
-	opts.ReadDir = resolveConfigRelativePath(configDir, opts.ReadDir)
 	opts.Fleet = resolveConfigRelativePath(configDir, opts.Fleet)
 	opts.DNSIPFile = resolveConfigRelativePath(configDir, opts.DNSIPFile)
 	opts.DNSNormalizationRules = resolveConfigRelativePath(configDir, opts.DNSNormalizationRules)

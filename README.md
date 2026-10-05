@@ -91,14 +91,15 @@ pcaptool dnsextract \
 The existing command-line mode remains available as shown above. Alternatively, a strict schema-versioned YAML file can select and configure the command without a CLI subcommand:
 
 ```bash
-pcaptool --config configs/pcaptool.example.yaml
+pcaptool --config configs/pcaptool.example.yaml \
+  --read-dir /path/to/pcaps
 ```
 
-Application configuration files use `schema_version: 1`, `command: dnsextract`, and a `dnsextract` block. Unknown fields, extra YAML documents, unsupported schema versions, and missing required values are rejected.
+Application configuration files use `schema_version: 1`, `command: dnsextract`, and a `dnsextract` block. Unknown fields, extra YAML documents, unsupported schema versions, and missing required values are rejected. `read_dir` is intentionally not a YAML field: the YAML describes stable stream configuration, while `--read-dir`/`-r` supplies the staged PCAP location for the current run.
 
-When `--config` is present, the YAML file is authoritative. Recognized command configuration flags are still checked for valid CLI syntax but are ignored, with one warning; unknown flags and positional arguments remain errors. `--help` and the process-only `--no-banner` flag do not become YAML settings.
+When `--config` is present, `--read-dir` or `-r` is required and remains effective. The YAML file is authoritative for all other dnsextract configuration. Other recognized command configuration flags are still checked for valid CLI syntax but are ignored, with one warning; unknown flags and positional arguments remain errors. `--help` and the process-only `--no-banner` flag do not become YAML settings.
 
-Relative `read_dir`, `fleet`, `dns_ip_file`, `dns_normalization_rules`, and `output_root` paths are resolved from the directory containing the config file. Relative `export_csv` and `manifest_out` values retain their existing run-directory-relative behavior. Paths do not expand `~` or environment variables.
+The CLI-supplied `--read-dir` retains normal CLI path semantics, so relative values remain relative to the process working directory. Relative YAML `fleet`, `dns_ip_file`, `dns_normalization_rules`, and `output_root` paths are resolved from the directory containing the config file. Relative `export_csv` and `manifest_out` values retain their existing run-directory-relative behavior. Paths do not expand `~` or environment variables.
 
 `post_hooks` are trusted executable configuration and retain the existing shell execution semantics. Review a config file before running it if it was obtained from another source.
 

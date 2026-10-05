@@ -33,7 +33,6 @@ type Config struct {
 // zero value so the command layer can apply its shared defaults.
 type DNSExtractConfig struct {
 	NetID                        *string   `yaml:"net_id"`
-	ReadDir                      *string   `yaml:"read_dir"`
 	Fleet                        *string   `yaml:"fleet"`
 	FleetScanWorkers             *int      `yaml:"fleet_scan_workers"`
 	OutputRoot                   *string   `yaml:"output_root"`
@@ -144,9 +143,6 @@ func (c *Config) validate() error {
 	}
 	if c.DNSExtract.NetID == nil || strings.TrimSpace(*c.DNSExtract.NetID) == "" {
 		return fmt.Errorf("dnsextract.net_id: field is required")
-	}
-	if c.DNSExtract.ReadDir == nil || strings.TrimSpace(*c.DNSExtract.ReadDir) == "" {
-		return fmt.Errorf("dnsextract.read_dir: field is required")
 	}
 	return nil
 }

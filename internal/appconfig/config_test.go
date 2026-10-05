@@ -16,7 +16,6 @@ const minimalConfig = `schema_version: 1
 command: dnsextract
 dnsextract:
   net_id: test-net
-  read_dir: ./pcaps
 `
 
 func TestLoadValidConfig(t *testing.T) {
@@ -78,9 +77,6 @@ func TestLoadResolvesConfigPathFromWorkingDirectory(t *testing.T) {
 	if config.Path != absPath {
 		t.Fatalf("Path = %q, want %q", config.Path, absPath)
 	}
-	if got := *config.DNSExtract.ReadDir; got != "./pcaps" {
-		t.Fatalf("ReadDir = %q, want unchanged relative path", got)
-	}
 }
 
 func TestLoadPreservesAbsoluteConfigPath(t *testing.T) {
@@ -103,17 +99,16 @@ func TestLoadRejectsInvalidDocuments(t *testing.T) {
 		{name: "empty", content: "", want: "empty YAML document"},
 		{name: "comments only", content: "# no document\n", want: "empty YAML document"},
 		{name: "multiple documents", content: minimalConfig + "---\n" + minimalConfig, want: "multiple YAML documents"},
-		{name: "missing schema version", content: "command: dnsextract\ndnsextract:\n  net_id: n\n  read_dir: p\n", want: "schema_version: field is required"},
+		{name: "missing schema version", content: "command: dnsextract\ndnsextract:\n  net_id: n\n", want: "schema_version: field is required"},
 		{name: "unsupported schema version", content: strings.Replace(minimalConfig, "schema_version: 1", "schema_version: 2", 1), want: "schema_version: unsupported value 2; use 1"},
-		{name: "missing command", content: "schema_version: 1\ndnsextract:\n  net_id: n\n  read_dir: p\n", want: "command: field is required"},
+		{name: "missing command", content: "schema_version: 1\ndnsextract:\n  net_id: n\n", want: "command: field is required"},
 		{name: "blank command", content: strings.Replace(minimalConfig, "command: dnsextract", "command: '  '", 1), want: "command: field is required"},
 		{name: "unsupported command", content: strings.Replace(minimalConfig, "command: dnsextract", "command: serviceclassify", 1), want: `command: unsupported value "serviceclassify"; use dnsextract`},
 		{name: "missing dnsextract", content: "schema_version: 1\ncommand: dnsextract\n", want: `dnsextract: block is required for command "dnsextract"`},
 		{name: "null dnsextract", content: "schema_version: 1\ncommand: dnsextract\ndnsextract: null\n", want: `dnsextract: block is required for command "dnsextract"`},
-		{name: "missing net id", content: "schema_version: 1\ncommand: dnsextract\ndnsextract:\n  read_dir: p\n", want: "dnsextract.net_id: field is required"},
+		{name: "missing net id", content: "schema_version: 1\ncommand: dnsextract\ndnsextract: {}\n", want: "dnsextract.net_id: field is required"},
 		{name: "blank net id", content: strings.Replace(minimalConfig, "net_id: test-net", "net_id: '  '", 1), want: "dnsextract.net_id: field is required"},
-		{name: "missing read dir", content: "schema_version: 1\ncommand: dnsextract\ndnsextract:\n  net_id: n\n", want: "dnsextract.read_dir: field is required"},
-		{name: "blank read dir", content: strings.Replace(minimalConfig, "read_dir: ./pcaps", "read_dir: '  '", 1), want: "dnsextract.read_dir: field is required"},
+		{name: "read dir is not a YAML field", content: minimalConfig + "  read_dir: ./pcaps\n", want: "field read_dir not found in type appconfig.DNSExtractConfig"},
 		{name: "unknown root field", content: minimalConfig + "unknown: true\n", want: "field unknown not found in type appconfig.Config"},
 		{name: "unknown nested field", content: minimalConfig + "  unknown: true\n", want: "field unknown not found in type appconfig.DNSExtractConfig"},
 		{name: "other command block", content: minimalConfig + "serviceclassify: {}\n", want: "field serviceclassify not found in type appconfig.Config"},

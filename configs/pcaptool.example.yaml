@@ -3,7 +3,6 @@ command: dnsextract
 
 dnsextract:
   net_id: andel-1
-  read_dir: ./pcaps
 
   fleet: ./fleet.txt
   fleet_scan_workers: 0
