@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"time"
 
 	"github.com/aglants/pcaptool/internal/connectivity"
 	"github.com/aglants/pcaptool/internal/syntrail"
@@ -16,6 +17,7 @@ type synTrailArtifactOptions struct {
 	ServerSummaryExcludeUDPPorts map[uint16]struct{}
 	ScanOptions                  syntrail.ScanOptions
 	Debug                        bool
+	FirstFilePacketTimestamp     time.Time
 }
 
 var (
@@ -88,7 +90,7 @@ func writeSYNTrailArtifacts(
 		artifacts[spec.key] = path
 	}
 
-	path, err := writePrivateNonFleetEndpointsArtifact(om, privateServerRecords, privateProbeRecords)
+	path, err := writePrivateNonFleetEndpointsArtifact(om, privateServerRecords, privateProbeRecords, opt.FirstFilePacketTimestamp)
 	if err != nil {
 		return nil, err
 	}
@@ -327,6 +329,7 @@ func writePrivateNonFleetEndpointsArtifact(
 	om *OutputManager,
 	serverRecords []syntrail.Record,
 	probeRecords []syntrail.Record,
+	firstPacket time.Time,
 ) (string, error) {
 	f, err := om.Create(privateNonFleetEndpointsFilename)
 	if err != nil {
@@ -334,7 +337,7 @@ func writePrivateNonFleetEndpointsArtifact(
 	}
 
 	path := f.Name()
-	writeErr := syntrail.WritePrivateNonFleetEndpointsJSON(f, serverRecords, probeRecords)
+	writeErr := syntrail.WritePrivateNonFleetEndpointsJSON(f, serverRecords, probeRecords, firstPacket)
 	closeErr := f.Close()
 	if writeErr != nil {
 		return "", fmt.Errorf("write %s: %w", privateNonFleetEndpointsFilename, writeErr)

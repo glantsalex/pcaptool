@@ -403,6 +403,7 @@ func TestDnsextractFleetAdmissionIsolatesMixedCaptureArtifacts(t *testing.T) {
 	}
 	wantPrivateEndpoints := syntrail.PrivateNonFleetEndpointsDocument{
 		SchemaVersion: 1,
+		SnapshotTime:  time.Date(2026, 9, 12, 0, 0, 0, 0, time.UTC).UnixMilli(),
 		Endpoints: []syntrail.PrivateNonFleetEndpoint{
 			{
 				IP: "192.168.1.20",

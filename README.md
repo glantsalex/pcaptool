@@ -434,6 +434,14 @@ With `--debug`, the sidecar additionally writes these detailed artifacts:
 
 `private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses observed for that exact role/protocol/port behavior. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Probe targets retain the existing TCP-only qualification.
 
+The top-level `snapshot_time` is an integer Unix timestamp in milliseconds,
+aligned to 00:00:00 UTC on the date of the first packet in the first capture
+in lexicographically sorted discovery order. This uses the raw first packet,
+before fleet or connection filtering, not the earliest timestamp across captures
+or the first worker to finish. If the first capture is empty, `snapshot_time` is
+`0` (unknown); later captures do not supply a fallback. Endpoint aggregation and
+the manifest's earliest-admitted-packet metadata are unchanged.
+
 Bucket meanings:
 
 - fleet to public

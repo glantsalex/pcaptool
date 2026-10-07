@@ -8,15 +8,16 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWritePrivateNonFleetEndpointsJSONEmpty(t *testing.T) {
 	var buffer bytes.Buffer
-	if err := WritePrivateNonFleetEndpointsJSON(&buffer, nil, nil); err != nil {
+	if err := WritePrivateNonFleetEndpointsJSON(&buffer, nil, nil, time.Time{}); err != nil {
 		t.Fatalf("WritePrivateNonFleetEndpointsJSON() error = %v", err)
 	}
 
-	want := "{\n  \"schema_version\": 1,\n  \"endpoints\": []\n}\n"
+	want := "{\n  \"schema_version\": 1,\n  \"snapshot_time\": 0,\n  \"endpoints\": []\n}\n"
 	if got := buffer.String(); got != want {
 		t.Fatalf("WritePrivateNonFleetEndpointsJSON() = %q, want %q", got, want)
 	}
@@ -43,7 +44,7 @@ func TestWritePrivateNonFleetEndpointsJSONAggregatesDistinctDevicesAndSorts(t *t
 	}
 
 	var buffer bytes.Buffer
-	if err := WritePrivateNonFleetEndpointsJSON(&buffer, serverRecords, probeRecords); err != nil {
+	if err := WritePrivateNonFleetEndpointsJSON(&buffer, serverRecords, probeRecords, time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("WritePrivateNonFleetEndpointsJSON() error = %v", err)
 	}
 
@@ -53,6 +54,7 @@ func TestWritePrivateNonFleetEndpointsJSONAggregatesDistinctDevicesAndSorts(t *t
 	}
 	want := PrivateNonFleetEndpointsDocument{
 		SchemaVersion: 1,
+		SnapshotTime:  1790812800000,
 		Endpoints: []PrivateNonFleetEndpoint{
 			{
 				IP:     "10.0.0.2",
@@ -99,7 +101,7 @@ func TestWritePrivateNonFleetEndpointsJSONAggregatesDistinctDevicesAndSorts(t *t
 }
 
 func TestWritePrivateNonFleetEndpointsJSONReportsWriteFailure(t *testing.T) {
-	err := WritePrivateNonFleetEndpointsJSON(failingWriter{}, nil, nil)
+	err := WritePrivateNonFleetEndpointsJSON(failingWriter{}, nil, nil, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "encode private non-fleet endpoints JSON") {
 		t.Fatalf("WritePrivateNonFleetEndpointsJSON() error = %v, want contextual encoding error", err)
 	}
@@ -112,7 +114,7 @@ func TestWritePrivateNonFleetEndpointsJSONIgnoresNonIPv4Evidence(t *testing.T) {
 	}
 
 	var buffer bytes.Buffer
-	if err := WritePrivateNonFleetEndpointsJSON(&buffer, serverRecords, nil); err != nil {
+	if err := WritePrivateNonFleetEndpointsJSON(&buffer, serverRecords, nil, time.Time{}); err != nil {
 		t.Fatalf("WritePrivateNonFleetEndpointsJSON() error = %v", err)
 	}
 
@@ -122,6 +124,47 @@ func TestWritePrivateNonFleetEndpointsJSONIgnoresNonIPv4Evidence(t *testing.T) {
 	}
 	if len(got.Endpoints) != 0 {
 		t.Fatalf("endpoints = %#v, want empty for non-IPv4 evidence", got.Endpoints)
+	}
+}
+
+func TestWritePrivateNonFleetEndpointsJSONSnapshotTime(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first time.Time
+		want  int64
+	}{
+		{name: "unknown", first: time.Time{}, want: 0},
+		{name: "UTC midnight", first: time.UnixMilli(1790812800000), want: 1790812800000},
+		{name: "example timestamp at 08 UTC", first: time.UnixMilli(1790841600000), want: 1790812800000},
+		{name: "UTC afternoon with subseconds", first: time.UnixMilli(1790812800000).Add(15*time.Hour + 123456789*time.Nanosecond), want: 1790812800000},
+		{name: "timezone crosses previous UTC day", first: time.Date(2026, 10, 2, 1, 0, 0, 0, time.FixedZone("UTC+3", 3*3600)), want: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC).UnixMilli()},
+		{name: "timezone crosses next UTC year", first: time.Date(2026, 12, 31, 23, 0, 0, 0, time.FixedZone("UTC-3", -3*3600)), want: time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()},
+		{name: "leap day", first: time.Date(2024, 2, 29, 23, 59, 59, 999999999, time.UTC), want: 1709164800000},
+		{name: "before Unix epoch", first: time.Unix(-1, 0), want: -86400000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buffer bytes.Buffer
+			if err := WritePrivateNonFleetEndpointsJSON(&buffer, nil, nil, tc.first); err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]json.RawMessage
+			if err := json.Unmarshal(buffer.Bytes(), &document); err != nil {
+				t.Fatal(err)
+			}
+			if len(document) != 3 {
+				t.Fatalf("document keys = %v, want schema_version, snapshot_time, endpoints", document)
+			}
+			var got int64
+			if bytes.Equal(bytes.TrimSpace(document["snapshot_time"]), []byte("null")) {
+				t.Fatal("snapshot_time must not be null")
+			}
+			if err := json.Unmarshal(document["snapshot_time"], &got); err != nil {
+				t.Fatalf("snapshot_time must be a present JSON integer: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("snapshot_time = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 

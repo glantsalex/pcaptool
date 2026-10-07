@@ -179,7 +179,9 @@ func TestDNSExtractDefaultFleetScanRecoversMixedInterfacePCAPNGWithOneStrictFile
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantArtifacts := legacyFleetArtifactBytes(t, syntrail.ClassifyRecords(wantRecords, fleet), fleetMemoryArtifactOptions(true), "fleet-fallback")
+	artifactOpt := fleetMemoryArtifactOptions(true)
+	artifactOpt.FirstFilePacketTimestamp = time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	wantArtifacts := legacyFleetArtifactBytes(t, syntrail.ClassifyRecords(wantRecords, fleet), artifactOpt, "fleet-fallback")
 
 	originalScanner := scanSYNTrailFilesWithOptions
 	originalFileScanner := scanSYNTrailFile
@@ -467,7 +469,9 @@ func legacyFleetArtifactBytes(t *testing.T, buckets syntrail.BucketedRecords, op
 	publicSummary, privateSummary := summary(public), summary(private)
 	probes := tcpOnly(clone(syntrail.BucketPrivateNonFleetToFleet))
 	write("public-servers-unique.csv", func(w io.Writer) error { return syntrail.WritePublicServersCSV(w, publicSummary) })
-	write(privateNonFleetEndpointsFilename, func(w io.Writer) error { return syntrail.WritePrivateNonFleetEndpointsJSON(w, privateSummary, probes) })
+	write(privateNonFleetEndpointsFilename, func(w io.Writer) error {
+		return syntrail.WritePrivateNonFleetEndpointsJSON(w, privateSummary, probes, opt.FirstFilePacketTimestamp)
+	})
 	write(flowDirectionCorrectionSQLFilename, func(w io.Writer) error {
 		return writeFlowDirectionCorrectionSQLContent(w, netID, syntrail.PrivateServerTuples(privateSummary))
 	})

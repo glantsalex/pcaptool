@@ -47,10 +47,16 @@ const (
 	maxCandidatesPerTX = 8               // safety guard
 )
 
-// FirstPacketInfo describes the earliest packet observed while processing PCAPs.
+// FirstPacketInfo describes capture chronology observed while processing PCAPs.
 type FirstPacketInfo struct {
+	// Timestamp and PCAPFile describe the earliest admitted packet across all files.
 	Timestamp time.Time
 	PCAPFile  string
+
+	// FirstFilePacketTimestamp is the first packet in files[0], before admission
+	// filtering. It is independent of worker scheduling and timestamp ordering,
+	// and remains zero if the first capture is empty.
+	FirstFilePacketTimestamp time.Time
 }
 
 // PacketFileObserver receives admitted decoded packets for one capture file.
@@ -440,6 +446,8 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 
 	var firstPkt FirstPacketInfo
 	var firstPktMu sync.Mutex
+	// Only the files[0] worker writes this; read after all workers have joined.
+	var firstFilePacketTimestamp time.Time
 
 	setFirstPacket := func(ts time.Time, file string) {
 		if ts.IsZero() {
@@ -493,6 +501,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 			haveLocalTS        bool
 			scanErr            error
 			readErrorValidated bool
+			haveFirstPacket    bool
 		)
 
 		var packets <-chan gopacket.Packet
@@ -538,6 +547,12 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 					}
 					packet = nextPacket
 				}
+			}
+			if idx == 0 && !haveFirstPacket {
+				if md := packet.Metadata(); md != nil {
+					firstFilePacketTimestamp = md.Timestamp.UTC()
+				}
+				haveFirstPacket = true
 			}
 			if scanOpt.PacketAdmission != nil && !scanOpt.PacketAdmission(packet) {
 				continue
@@ -737,6 +752,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 	if scanErr != nil {
 		return nil, FirstPacketInfo{}, scanErr
 	}
+	firstPkt.FirstFilePacketTimestamp = firstFilePacketTimestamp
 
 	// Choose closest candidate (min dt) per DNS transaction (existing behavior)
 	for _, tx := range txs {

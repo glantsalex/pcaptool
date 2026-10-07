@@ -7,14 +7,17 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"time"
 )
 
 const privateNonFleetEndpointsSchemaVersion = 1
 
 // PrivateNonFleetEndpointsDocument is the versioned private non-fleet endpoint artifact.
 type PrivateNonFleetEndpointsDocument struct {
-	SchemaVersion int                       `json:"schema_version"`
-	Endpoints     []PrivateNonFleetEndpoint `json:"endpoints"`
+	SchemaVersion int `json:"schema_version"`
+	// SnapshotTime is midnight UTC in Unix milliseconds, or 0 if unknown.
+	SnapshotTime int64                     `json:"snapshot_time"`
+	Endpoints    []PrivateNonFleetEndpoint `json:"endpoints"`
 }
 
 // PrivateNonFleetEndpoint describes all observed server and probe behaviors for one IPv4 endpoint.
@@ -54,8 +57,15 @@ type endpointAccumulator struct {
 // WritePrivateNonFleetEndpointsJSON writes schema v1 endpoint behavior JSON.
 // Server records must already have the existing server-summary filters applied;
 // probe records must already be restricted to the existing TCP qualification path.
-func WritePrivateNonFleetEndpointsJSON(w io.Writer, serverRecords, probeRecords []Record) error {
+// firstPacket is the first packet timestamp in the first discovered capture,
+// before admission filtering. Its UTC calendar day is encoded as Unix milliseconds;
+// a zero timestamp produces snapshot_time 0 (unknown).
+func WritePrivateNonFleetEndpointsJSON(w io.Writer, serverRecords, probeRecords []Record, firstPacket time.Time) error {
 	document := buildPrivateNonFleetEndpointsDocument(serverRecords, probeRecords)
+	if !firstPacket.IsZero() {
+		utc := firstPacket.UTC()
+		document.SnapshotTime = time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+	}
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(document); err != nil {

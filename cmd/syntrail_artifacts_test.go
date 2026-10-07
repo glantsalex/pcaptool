@@ -117,6 +117,7 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	assertSYNTrailFile(t, om, privateNonFleetEndpointsFilename, ""+
 		"{\n"+
 		"  \"schema_version\": 1,\n"+
+		"  \"snapshot_time\": 0,\n"+
 		"  \"endpoints\": [\n"+
 		"    {\n"+
 		"      \"ip\": \"10.4.0.230\",\n"+
@@ -293,7 +294,7 @@ func TestWriteSYNTrailArtifactsNonDebugWritesOnlyAlwaysOnFiles(t *testing.T) {
 	if _, err := os.Stat(om.Path("private-probes-syn-unique.csv")); !os.IsNotExist(err) {
 		t.Fatalf("private-probes-syn-unique.csv stat error = %v, want not exist", err)
 	}
-	assertSYNTrailFile(t, om, privateNonFleetEndpointsFilename, "{\n  \"schema_version\": 1,\n  \"endpoints\": []\n}\n")
+	assertSYNTrailFile(t, om, privateNonFleetEndpointsFilename, "{\n  \"schema_version\": 1,\n  \"snapshot_time\": 0,\n  \"endpoints\": []\n}\n")
 	for _, filename := range []string{"private-servers-unique.csv", "private-probes-unique.csv"} {
 		if _, err := os.Stat(om.Path(filename)); !os.IsNotExist(err) {
 			t.Fatalf("%s stat error = %v, want not exist", filename, err)
@@ -758,7 +759,7 @@ var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
 	{
 		filename: privateNonFleetEndpointsFilename,
 		key:      privateNonFleetEndpointsKey,
-		header:   "{\n  \"schema_version\": 1,\n  \"endpoints\": []\n}\n",
+		header:   "{\n  \"schema_version\": 1,\n  \"snapshot_time\": 0,\n  \"endpoints\": []\n}\n",
 	},
 	{
 		filename: flowDirectionCorrectionSQLFilename,

@@ -397,6 +397,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 			FTPPassiveMinPort:            ftpPassiveMinPort,
 			ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
 			Debug:                        opts.Debug,
+			FirstFilePacketTimestamp:     firstPktInfo.FirstFilePacketTimestamp,
 		}
 		if !useSharedFleetScan {
 			progress.SetStage("Running fleet trail sidecar...")
