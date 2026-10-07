@@ -153,6 +153,52 @@ func TestRunBoundedOrderedEdgeScansBoundsSlowFrontier(t *testing.T) {
 	}
 }
 
+func TestRunBoundedOrderedFileScansCommitsObserversInFileOrder(t *testing.T) {
+	const (
+		totalFiles = 8
+		workers    = 3
+	)
+	releaseFirst := make(chan struct{})
+	startedLater := make(chan struct{}, workers-1)
+	var committed []int
+
+	scan := func(ctx context.Context, idx int) (orderedFileScanOutput, error) {
+		if idx == 0 {
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+				return orderedFileScanOutput{}, ctx.Err()
+			}
+		} else if idx < workers {
+			startedLater <- struct{}{}
+		}
+		return orderedFileScanOutput{afterEdges: func() { committed = append(committed, idx) }}, nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := runBoundedOrderedFileScans(
+			context.Background(), totalFiles, workers, scan, func([]connectivity.Edge) {},
+		)
+		done <- err
+	}()
+	for range workers - 1 {
+		select {
+		case <-startedLater:
+		case <-time.After(time.Second):
+			t.Fatal("later file scan did not complete while file zero was blocked")
+		}
+	}
+	close(releaseFirst)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	want := []int{0, 1, 2, 3, 4, 5, 6, 7}
+	if !reflect.DeepEqual(committed, want) {
+		t.Fatalf("observer commit order = %v, want %v", committed, want)
+	}
+}
+
 func TestRunBoundedOrderedEdgeScansEmptyAndNonPositiveWorkers(t *testing.T) {
 	called := false
 	stats, err := runBoundedOrderedEdgeScans(context.Background(), 0, 0, func(context.Context, int) ([]connectivity.Edge, error) {
@@ -302,14 +348,6 @@ func TestAttachConnectionsPreservesFirstEightCandidateCap(t *testing.T) {
 		dst    = "198.51.100.1"
 	)
 	requestTime := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
-	tx := &DNSTransaction{
-		RequestTime:  requestTime,
-		IssuerIP:     net.ParseIP(issuer),
-		DNSName:      "candidate-cap.example",
-		NameEvidence: EvDNSAnswer,
-	}
-	tx.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer)
-
 	packets := make([]dnsAdmissionPacket, 0, maxCandidatesPerTX+1)
 	for idx := 0; idx < maxCandidatesPerTX; idx++ {
 		packets = append(packets, dnsAdmissionPacket{
@@ -328,20 +366,36 @@ func TestAttachConnectionsPreservesFirstEightCandidateCap(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "candidate-cap.pcap")
 	writeConnectionAdmissionPCAP(t, path, packets)
 
-	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(
-		context.Background(), []string{path}, []*DNSTransaction{tx}, false, false, nil, false, nil, nil, 0,
-	)
-	if err != nil {
-		t.Fatalf("connection scan: %v", err)
-	}
-	if tx.DestinationPort == nil || *tx.DestinationPort != 4100 {
-		t.Fatalf("selected destination port = %v, want first-eight minimum 4100", tx.DestinationPort)
-	}
-	if len(tx.ObservedEndpointBindings) != maxCandidatesPerTX+1 {
-		t.Fatalf("observed bindings = %d, want all %d observations", len(tx.ObservedEndpointBindings), maxCandidatesPerTX+1)
-	}
-	if !tx.HasObservedEndpointBinding(dst, L4ProtoTCP, 4999, requestTime.Add(10*time.Millisecond)) {
-		t.Fatal("ninth observation was omitted from endpoint bindings")
+	for _, tc := range []struct {
+		name string
+		opt  PacketScanOptions
+	}{
+		{name: "legacy asynchronous reader"},
+		{name: "shared synchronous reader", opt: PacketScanOptions{NewFileObserver: func(_ int, _ string) PacketFileObserver {
+			return PacketFileObserver{}
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &DNSTransaction{
+				RequestTime: requestTime, IssuerIP: net.ParseIP(issuer), DNSName: "candidate-cap.example", NameEvidence: EvDNSAnswer,
+			}
+			tx.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer)
+			_, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
+				context.Background(), []string{path}, []*DNSTransaction{tx}, false, false, nil, false, nil, nil, 0, tc.opt,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tx.DestinationPort == nil || *tx.DestinationPort != 4100 {
+				t.Fatalf("selected destination port = %v, want first-eight minimum 4100", tx.DestinationPort)
+			}
+			if len(tx.ObservedEndpointBindings) != maxCandidatesPerTX+1 {
+				t.Fatalf("observed bindings = %d, want all %d observations", len(tx.ObservedEndpointBindings), maxCandidatesPerTX+1)
+			}
+			if !tx.HasObservedEndpointBinding(dst, L4ProtoTCP, 4999, requestTime.Add(10*time.Millisecond)) {
+				t.Fatal("ninth observation was omitted from endpoint bindings")
+			}
+		})
 	}
 }
 

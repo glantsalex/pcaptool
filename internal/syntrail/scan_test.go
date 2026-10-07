@@ -142,7 +142,7 @@ func TestScanFileDedupesUDPWithinOneFile(t *testing.T) {
 		udp4Packet(base, "10.1.2.3", "203.0.113.10", 53),
 	})
 
-	records, err := scanFile(context.Background(), path, nil)
+	records, err := ScanFile(context.Background(), path, nil)
 	if err != nil {
 		t.Fatalf("scanFile() error = %v", err)
 	}
@@ -513,7 +513,7 @@ func TestScanFileReadsPCAPNG(t *testing.T) {
 		tcp4Packet(ts, "100.64.1.10", "203.0.113.99", 443, true, false),
 	})
 
-	records, err := scanFile(context.Background(), path, nil)
+	records, err := ScanFile(context.Background(), path, nil)
 	if err != nil {
 		t.Fatalf("scanFile() error = %v", err)
 	}
@@ -522,6 +522,57 @@ func TestScanFileReadsPCAPNG(t *testing.T) {
 	}
 	if records[0].SrcIP != netip.MustParseAddr("100.64.1.10") {
 		t.Fatalf("src IP = %v, want 100.64.1.10", records[0].SrcIP)
+	}
+}
+
+func TestScanFilesMixedPCAPAndPCAPNGPreservesLegacyOrdering(t *testing.T) {
+	base := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	pcapPath := writePCAP(t, []testPacket{
+		tcp4Packet(base.Add(time.Second), "10.0.0.1", "203.0.113.10", 443, true, false),
+		udp4Packet(base.Add(5*time.Second), "10.0.0.1", "203.0.113.20", 53),
+	})
+	pcapngPath := writePCAPNG(t, []testPacket{
+		tcp4Packet(base.Add(2*time.Second), "10.0.0.2", "203.0.113.11", 8443, true, false),
+		udp4Packet(base, "10.0.0.1", "203.0.113.20", 53),
+		udp4Packet(base.Add(3*time.Second), "10.0.0.2", "203.0.113.21", 5353),
+	})
+
+	got, err := ScanFilesWithOptions(context.Background(), []string{pcapPath, pcapngPath}, ScanOptions{Workers: 2})
+	if err != nil {
+		t.Fatalf("ScanFilesWithOptions() error = %v", err)
+	}
+	want := []Record{
+		{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.10"), DstPort: 443, Protocol: ProtocolTCP, Timestamp: base.Add(time.Second)},
+		{SrcIP: netip.MustParseAddr("10.0.0.2"), DstIP: netip.MustParseAddr("203.0.113.11"), DstPort: 8443, Protocol: ProtocolTCP, Timestamp: base.Add(2 * time.Second)},
+		{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.20"), DstPort: 53, Protocol: ProtocolUDP, Timestamp: base},
+		{SrcIP: netip.MustParseAddr("10.0.0.2"), DstIP: netip.MustParseAddr("203.0.113.21"), DstPort: 5353, Protocol: ProtocolUDP, Timestamp: base.Add(3 * time.Second)},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ScanFilesWithOptions() = %+v, want %+v", got, want)
+	}
+}
+
+func TestScanFilesReturnsFatalTruncatedCaptureReadError(t *testing.T) {
+	path := writePCAP(t, []testPacket{
+		tcp4Packet(time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC), "10.0.0.1", "203.0.113.10", 443, true, false),
+	})
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat packet capture: %v", err)
+	}
+	if err := os.Truncate(path, info.Size()-1); err != nil {
+		t.Fatalf("truncate packet capture: %v", err)
+	}
+
+	records, err := ScanFilesWithOptions(context.Background(), []string{path}, ScanOptions{Workers: 2})
+	if err == nil {
+		t.Fatal("ScanFilesWithOptions() error = nil, want truncated capture read error")
+	}
+	if records != nil {
+		t.Fatalf("ScanFilesWithOptions() records = %+v, want nil", records)
+	}
+	if !strings.Contains(err.Error(), "read packet from") || !strings.Contains(err.Error(), path) {
+		t.Fatalf("ScanFilesWithOptions() error = %q, want read context and path", err)
 	}
 }
 

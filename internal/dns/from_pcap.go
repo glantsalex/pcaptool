@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/aglants/pcaptool/internal/connectivity"
@@ -51,10 +53,28 @@ type FirstPacketInfo struct {
 	PCAPFile  string
 }
 
-// PacketScanOptions controls packet admission for PCAP processing. A nil
-// PacketAdmission preserves the historical behavior and admits every packet.
+// PacketFileObserver receives admitted decoded packets for one capture file.
+// The file worker owns Observe and OnReadError; Commit runs later on the scan
+// coordinator in discovered-file order. OnReadError may validate and replace
+// partial observer evidence before libpcap retries a generic read error.
+// Implementations must copy any packet data they retain.
+type PacketFileObserver struct {
+	Observe     func(gopacket.Packet)
+	OnReadError func(context.Context, error) error
+	Commit      func()
+}
+
+// PacketFileObserverFactory creates one observer per capture file.
+type PacketFileObserverFactory func(fileIndex int, path string) PacketFileObserver
+
+// PacketScanOptions controls packet admission and optional observation for
+// PCAP processing. Nil fields preserve the historical connection-scan path.
 type PacketScanOptions struct {
 	PacketAdmission pcaputil.PacketAdmission
+
+	// NewFileObserver receives admitted packets before topology or DNS
+	// correlation filters. Its Commit callback is invoked in file-index order.
+	NewFileObserver PacketFileObserverFactory
 }
 
 // BuildTransactionsFromPCAPs:
@@ -436,11 +456,11 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 
 	var filesDone int64
 
-	scanFile := func(scanCtx context.Context, idx int) ([]connectivity.Edge, error) {
+	scanFile := func(scanCtx context.Context, idx int) (orderedFileScanOutput, error) {
 		// Respect context cancellation before opening the next capture.
 		select {
 		case <-scanCtx.Done():
-			return nil, scanCtx.Err()
+			return orderedFileScanOutput{}, scanCtx.Err()
 		default:
 		}
 
@@ -448,7 +468,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 
 		handle, err := pcap.OpenOffline(path)
 		if err != nil {
-			return nil, fmt.Errorf("open pcap %s: %w", path, err)
+			return orderedFileScanOutput{}, fmt.Errorf("open pcap %s: %w", path, err)
 		}
 		defer handle.Close()
 
@@ -463,29 +483,67 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 
 		source := gopacket.NewPacketSource(handle, handle.LinkType())
 		source.NoCopy = true
+		var fileObserver PacketFileObserver
+		if scanOpt.NewFileObserver != nil {
+			fileObserver = scanOpt.NewFileObserver(idx, path)
+		}
 
 		var (
-			localEarliest time.Time
-			haveLocalTS   bool
-			scanErr       error
+			localEarliest      time.Time
+			haveLocalTS        bool
+			scanErr            error
+			readErrorValidated bool
 		)
 
-		packets := source.Packets()
+		var packets <-chan gopacket.Packet
+		if scanOpt.NewFileObserver == nil {
+			packets = source.Packets()
+		}
 	packetLoop:
 		for {
 			var packet gopacket.Packet
-			select {
-			case <-scanCtx.Done():
-				scanErr = scanCtx.Err()
-				break packetLoop
-			case nextPacket, ok := <-packets:
-				if !ok {
+			if packets == nil {
+				select {
+				case <-scanCtx.Done():
+					scanErr = scanCtx.Err()
+					break packetLoop
+				default:
+				}
+				nextPacket, err := nextPacketForSharedScan(scanCtx, source, func(readErr error) error {
+					if readErrorValidated {
+						return nil
+					}
+					readErrorValidated = true
+					if fileObserver.OnReadError == nil {
+						return readErr
+					}
+					return fileObserver.OnReadError(scanCtx, readErr)
+				})
+				if err == io.EOF {
+					break packetLoop
+				}
+				if err != nil {
+					scanErr = fmt.Errorf("read packet from %q: %w", path, err)
 					break packetLoop
 				}
 				packet = nextPacket
+			} else {
+				select {
+				case <-scanCtx.Done():
+					scanErr = scanCtx.Err()
+					break packetLoop
+				case nextPacket, ok := <-packets:
+					if !ok {
+						break packetLoop
+					}
+					packet = nextPacket
+				}
 			}
 			if scanOpt.PacketAdmission != nil && !scanOpt.PacketAdmission(packet) {
 				continue
+			}
+			if fileObserver.Observe != nil {
+				fileObserver.Observe(packet)
 			}
 
 			md := packet.Metadata()
@@ -649,10 +707,12 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 			// PacketSource.Packets owns an asynchronous producer. Closing the
 			// handle stops further reads; draining joins the producer so it
 			// cannot remain blocked sending buffered packets after cancellation.
-			handle.Close()
-			for range packets {
+			if packets != nil {
+				handle.Close()
+				for range packets {
+				}
 			}
-			return nil, scanErr
+			return orderedFileScanOutput{}, scanErr
 		}
 
 		if haveLocalTS {
@@ -662,11 +722,14 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		// Progress update (files completed)
 		done := int(atomic.AddInt64(&filesDone, 1))
 		progress.UpdateBar(done, totalFiles, "connections "+filepath.Base(path))
-		return coll.EdgesByFirstSeen(), nil
+		return orderedFileScanOutput{
+			edges:      coll.EdgesByFirstSeen(),
+			afterEdges: fileObserver.Commit,
+		}, nil
 	}
 
 	edgeAccumulator := newEdgeAccumulator()
-	_, scanErr := runBoundedOrderedEdgeScans(ctx, totalFiles, workers, scanFile, edgeAccumulator.merge)
+	_, scanErr := runBoundedOrderedFileScans(ctx, totalFiles, workers, scanFile, edgeAccumulator.merge)
 
 	close(updates)
 	aggWG.Wait()
@@ -695,6 +758,53 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 	out := edgeAccumulator.edges()
 	out = suppressMergedFTPPassiveEdges(out, ftpPassiveMinPort, ftpControlPorts)
 	return out, firstPkt, nil
+}
+
+// nextPacketForSharedScan preserves PacketSource.Packets retry behavior while
+// exposing terminal read errors to the shared fleet scan. In particular,
+// libpcap advances past unsupported PCAPNG interface blocks with a generic
+// error; the historical asynchronous reader retried those errors and continued.
+func nextPacketForSharedScan(
+	ctx context.Context,
+	source *gopacket.PacketSource,
+	onGenericReadError func(error) error,
+) (gopacket.Packet, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		packet, err := source.NextPacket()
+		if err == nil {
+			return packet, nil
+		}
+		if networkErr, ok := err.(net.Error); ok && networkErr.Temporary() {
+			continue
+		}
+		if err == syscall.EAGAIN {
+			continue
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF || err == io.ErrNoProgress ||
+			err == io.ErrClosedPipe || err == io.ErrShortBuffer || err == syscall.EBADF ||
+			strings.Contains(err.Error(), "use of closed file") {
+			return nil, err
+		}
+		if onGenericReadError == nil {
+			return nil, err
+		}
+		if recoveryErr := onGenericReadError(err); recoveryErr != nil {
+			return nil, recoveryErr
+		}
+
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func suppressMergedFTPPassiveEdges(edges []connectivity.Edge, minPassivePort uint16, ftpControlPorts map[uint16]struct{}) []connectivity.Edge {

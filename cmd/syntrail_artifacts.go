@@ -18,7 +18,10 @@ type synTrailArtifactOptions struct {
 	Debug                        bool
 }
 
-var scanSYNTrailFilesWithOptions = syntrail.ScanFilesWithOptions
+var (
+	scanSYNTrailFile             = syntrail.ScanFile
+	scanSYNTrailFilesWithOptions = syntrail.ScanFilesWithOptions
+)
 
 func runSYNTrailSidecar(
 	ctx context.Context,
@@ -39,11 +42,20 @@ func runSYNTrailSidecar(
 		opt.ScanOptions.Progress(len(files), len(files), "")
 	}
 
-	artifacts, err := writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, *fleet), opt)
+	artifacts, err := writeSYNTrailArtifactsFromRecords(om, records, *fleet, opt)
 	if err != nil {
 		return nil, fmt.Errorf("write SYN trail artifacts: %w", err)
 	}
 	return artifacts, nil
+}
+
+func writeSYNTrailArtifactsFromRecords(
+	om *OutputManager,
+	records []syntrail.Record,
+	fleet syntrail.FleetSet,
+	opt synTrailArtifactOptions,
+) (map[string]string, error) {
+	return writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, fleet), opt)
 }
 
 func writeSYNTrailArtifacts(

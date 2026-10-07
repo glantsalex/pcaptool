@@ -1674,7 +1674,7 @@ func TestTruncatedDNSPacketsArtifactIsHeaderOnlyWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestDnsextractFleetScanWorkersDefaultIsAuto(t *testing.T) {
+func TestDnsextractFleetScanWorkersDefaultUsesSharedConnectionScan(t *testing.T) {
 	cmd := dnsextractCommandForTest(t)
 	flag := cmd.Flags().Lookup("fleet-scan-workers")
 	if flag == nil {
@@ -1682,6 +1682,9 @@ func TestDnsextractFleetScanWorkersDefaultIsAuto(t *testing.T) {
 	}
 	if flag.DefValue != "0" {
 		t.Fatalf("--fleet-scan-workers default = %q, want 0", flag.DefValue)
+	}
+	if !strings.Contains(flag.Usage, "0 shares the connection scan for PCAP/PCAPNG") {
+		t.Fatalf("--fleet-scan-workers usage = %q, want shared-scan contract", flag.Usage)
 	}
 }
 
@@ -1705,28 +1708,35 @@ func TestDnsextractFleetScanWorkersIgnoredWithoutFleet(t *testing.T) {
 
 func TestDnsextractEffectiveFleetScanWorkers(t *testing.T) {
 	old := runtime.GOMAXPROCS(4)
-	t.Cleanup(func() {
-		runtime.GOMAXPROCS(old)
-	})
-
+	t.Cleanup(func() { runtime.GOMAXPROCS(old) })
 	tests := []struct {
 		name      string
 		requested int
 		fileCount int
 		want      int
 	}{
-		{name: "auto no files", requested: 0, fileCount: 0, want: 1},
-		{name: "auto one file", requested: 0, fileCount: 1, want: 1},
-		{name: "auto caps at gomaxprocs", requested: 0, fileCount: 10, want: 4},
+		{name: "auto no files", fileCount: 0, want: 1},
+		{name: "auto one file", fileCount: 1, want: 1},
+		{name: "auto caps at gomaxprocs", fileCount: 10, want: 4},
 		{name: "explicit one", requested: 1, fileCount: 10, want: 1},
 		{name: "explicit many", requested: 8, fileCount: 2, want: 8},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := effectiveFleetScanWorkers(tt.requested, tt.fileCount); got != tt.want {
-				t.Fatalf("effectiveFleetScanWorkers(%d, %d) = %d, want %d", tt.requested, tt.fileCount, got, tt.want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := effectiveFleetScanWorkers(tc.requested, tc.fileCount); got != tc.want {
+				t.Fatalf("effectiveFleetScanWorkers(%d, %d) = %d, want %d", tc.requested, tc.fileCount, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDnsextractSharedFleetScanRejectsUnknownOrUnreadableCaptureFormat(t *testing.T) {
+	unknown := filepath.Join(t.TempDir(), "unknown.pcap")
+	if err := os.WriteFile(unknown, []byte("unknown format"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if canUseSharedFleetScan([]string{unknown, filepath.Join(t.TempDir(), "missing.pcap")}) {
+		t.Fatal("unknown or unreadable capture was admitted to shared fleet scanning")
 	}
 }
 

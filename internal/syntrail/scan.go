@@ -62,21 +62,21 @@ func scanFilesSequential(
 	progress ScanProgressFunc,
 	admit pcaputil.PacketAdmission,
 ) ([]Record, error) {
-	accumulator := newScanRecordAccumulator()
+	accumulator := NewAccumulator()
 	for i, file := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		fileRecords, err := scanFile(ctx, file, admit)
+		fileRecords, err := ScanFile(ctx, file, admit)
 		if progress != nil {
 			progress(i+1, len(files), file)
 		}
 		if err != nil {
 			return nil, err
 		}
-		accumulator.add(fileRecords)
+		accumulator.Add(fileRecords)
 	}
-	return accumulator.records(), nil
+	return accumulator.TakeRecords(), nil
 }
 
 func scanFilesConcurrent(
@@ -86,7 +86,7 @@ func scanFilesConcurrent(
 	progress ScanProgressFunc,
 	admit pcaputil.PacketAdmission,
 ) ([]Record, error) {
-	return scanFilesConcurrentWithScanner(ctx, files, workers, progress, admit, scanFile)
+	return scanFilesConcurrentWithScanner(ctx, files, workers, progress, admit, ScanFile)
 }
 
 type scanFileFunc func(context.Context, string, pcaputil.PacketAdmission) ([]Record, error)
@@ -142,7 +142,7 @@ func scanFilesConcurrentWithScanner(
 		close(resultsCh)
 	}()
 
-	accumulator := newScanRecordAccumulator()
+	accumulator := NewAccumulator()
 	pending := make(map[int]scanFileResult, workers)
 	nextDispatch := 0
 	nextCommit := 0
@@ -194,7 +194,7 @@ func scanFilesConcurrentWithScanner(
 					break
 				}
 				delete(pending, nextCommit)
-				accumulator.add(ordered.records)
+				accumulator.Add(ordered.records)
 				nextCommit++
 			}
 
@@ -218,7 +218,7 @@ func scanFilesConcurrentWithScanner(
 		}
 		return nil, fmt.Errorf("scan completed %d of %d packet captures", nextCommit, len(files))
 	}
-	return accumulator.records(), nil
+	return accumulator.TakeRecords(), nil
 }
 
 func shouldPreferScanError(current, next error) bool {
@@ -246,19 +246,25 @@ type scanFileResult struct {
 	err     error
 }
 
-type scanRecordAccumulator struct {
+// Accumulator merges completed per-file trail records in file order while
+// preserving TCP observations and globally deduplicating UDP tuples.
+// Accumulator is not safe for concurrent use; the scan coordinator owns it.
+type Accumulator struct {
 	tcpRecords []Record
 	udpRecords map[observedRecordKey]Record
 	udpOrder   []observedRecordKey
 }
 
-func newScanRecordAccumulator() *scanRecordAccumulator {
-	return &scanRecordAccumulator{
+// NewAccumulator returns an empty trail record accumulator.
+func NewAccumulator() *Accumulator {
+	return &Accumulator{
 		udpRecords: make(map[observedRecordKey]Record),
 	}
 }
 
-func (a *scanRecordAccumulator) add(records []Record) {
+// Add merges one completed file's records. Callers must add files in the
+// discovered file order to preserve externally visible trail ordering.
+func (a *Accumulator) Add(records []Record) {
 	// The externally visible ordering contract is all TCP observations in
 	// file/packet order followed by first-seen UDP tuples. UDP timestamps may
 	// still be replaced by an earlier observation from a later file.
@@ -271,14 +277,52 @@ func (a *scanRecordAccumulator) add(records []Record) {
 	}
 }
 
-func (a *scanRecordAccumulator) records() []Record {
+// TakeRecords returns the accumulated records and transfers ownership of the
+// returned slice to the caller. The accumulator must not be used afterward.
+func (a *Accumulator) TakeRecords() []Record {
 	for _, key := range a.udpOrder {
 		a.tcpRecords = append(a.tcpRecords, a.udpRecords[key])
 	}
-	return a.tcpRecords
+	records := a.tcpRecords
+	a.tcpRecords = nil
+	a.udpRecords = nil
+	a.udpOrder = nil
+	return records
 }
 
-func scanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
+// Collector extracts trail evidence from one decoded capture file. Collector
+// is owned by one file worker and is not safe for concurrent use.
+type Collector struct {
+	tcpRecords []Record
+	udpRecords map[observedRecordKey]Record
+	udpOrder   []observedRecordKey
+}
+
+// NewCollector returns an empty per-file packet collector.
+func NewCollector() *Collector {
+	return &Collector{udpRecords: make(map[observedRecordKey]Record)}
+}
+
+// Observe records eligible raw TCP SYN and UDP evidence from packet. All
+// retained fields are copied into stable value types before Observe returns.
+func (c *Collector) Observe(packet gopacket.Packet) {
+	if record, ok := synRecord(packet); ok {
+		c.tcpRecords = append(c.tcpRecords, record)
+	}
+	if record, ok := udpRecord(packet); ok {
+		addEarliestRecord(c.udpRecords, &c.udpOrder, record)
+	}
+}
+
+// TakeRecords returns this file's records and transfers ownership of the
+// returned slice to the caller. The collector must not be used afterward.
+func (c *Collector) TakeRecords() []Record {
+	return appendOrderedRecords(c.tcpRecords, c.udpRecords, c.udpOrder)
+}
+
+// ScanFile scans one packet capture for trail evidence and returns no partial
+// records if the capture cannot be read completely.
+func ScanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -295,9 +339,7 @@ func scanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) 
 	}
 	src.NoCopy = true
 
-	var tcpRecords []Record
-	udpRecords := make(map[observedRecordKey]Record)
-	var udpOrder []observedRecordKey
+	collector := NewCollector()
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -306,7 +348,7 @@ func scanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) 
 
 		packet, err := src.NextPacket()
 		if err == io.EOF {
-			return appendOrderedRecords(tcpRecords, udpRecords, udpOrder), nil
+			return collector.TakeRecords(), nil
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read packet from %q: %w", path, err)
@@ -315,12 +357,7 @@ func scanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) 
 			continue
 		}
 
-		if record, ok := synRecord(packet); ok {
-			tcpRecords = append(tcpRecords, record)
-		}
-		if record, ok := udpRecord(packet); ok {
-			addEarliestRecord(udpRecords, &udpOrder, record)
-		}
+		collector.Observe(packet)
 	}
 }
 

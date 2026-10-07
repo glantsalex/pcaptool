@@ -113,13 +113,40 @@ func TestScanRecordAccumulatorPreservesLateEarliestUDPAndTCPDuplicates(t *testin
 	udpEarlier := udpFirst
 	udpEarlier.Timestamp = base.Add(-time.Second)
 
-	accumulator := newScanRecordAccumulator()
-	accumulator.add([]Record{tcp, tcp, udpFirst, udpSecond})
-	accumulator.add([]Record{udpEarlier})
+	accumulator := NewAccumulator()
+	accumulator.Add([]Record{tcp, tcp, udpFirst, udpSecond})
+	accumulator.Add([]Record{udpEarlier})
 
 	want := []Record{tcp, tcp, udpEarlier, udpSecond}
-	if got := accumulator.records(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("scanRecordAccumulator.records() = %+v, want %+v", got, want)
+	if got := accumulator.TakeRecords(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Accumulator.TakeRecords() = %+v, want %+v", got, want)
+	}
+}
+
+func TestAccumulatorTakeRecordsReusesTCPBackingStorageWhenCapacityAllows(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	tcp := Record{
+		SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.1"),
+		DstPort: 443, Protocol: ProtocolTCP, Timestamp: base,
+	}
+	udp := Record{
+		SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.2"),
+		DstPort: 53, Protocol: ProtocolUDP, Timestamp: base,
+	}
+	accumulator := NewAccumulator()
+	accumulator.tcpRecords = make([]Record, 1, 2)
+	accumulator.tcpRecords[0] = tcp
+	originalFirst := &accumulator.tcpRecords[0]
+	accumulator.Add([]Record{udp})
+
+	records := accumulator.TakeRecords()
+	if len(records) != 2 || &records[0] != originalFirst {
+		t.Fatalf("TakeRecords() copied preallocated TCP storage: len=%d reused=%v", len(records), len(records) > 0 && &records[0] == originalFirst)
+	}
+	if accumulator.tcpRecords != nil || accumulator.udpRecords != nil || accumulator.udpOrder != nil {
+		t.Fatal("TakeRecords() retained transferred record storage")
 	}
 }
 
@@ -392,11 +419,11 @@ func BenchmarkScanRecordAccumulatorLegacyShape(b *testing.B) {
 }
 
 func accumulatedScanFileResults(results []scanFileResult) []Record {
-	accumulator := newScanRecordAccumulator()
+	accumulator := NewAccumulator()
 	for _, result := range results {
-		accumulator.add(result.records)
+		accumulator.Add(result.records)
 	}
-	return accumulator.records()
+	return accumulator.TakeRecords()
 }
 
 func generatedScanFileResults(seed int64, fileCount, recordsPerFile int) []scanFileResult {

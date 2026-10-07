@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -27,6 +28,7 @@ import (
 	"github.com/aglants/pcaptool/internal/syntrail"
 	"github.com/aglants/pcaptool/output"
 	"github.com/aglants/pcaptool/progress"
+	"github.com/google/gopacket"
 )
 
 var (
@@ -62,7 +64,7 @@ func newDNSExtractCommandWithExecutor(opts *DNSExtractOptions, executor dnsExtra
 		&opts.FleetScanWorkers,
 		"fleet-scan-workers",
 		defaults.FleetScanWorkers,
-		"Number of workers for --fleet artifact scanning; 0 auto-selects min(GOMAXPROCS, file count), 1 is sequential.",
+		"Separate --fleet artifact scan workers; 0 shares the connection scan for PCAP/PCAPNG and falls back for unknown capture formats, positive values always use a separate scan.",
 	)
 	cmd.Flags().StringVar(&opts.Format, "format", defaults.Format, "Output format: table|json")
 	cmd.Flags().StringVar(&opts.ExportCSV, "export-csv", defaults.ExportCSV, "Optional CSV export path (relative paths are placed under the run output directory)")
@@ -319,6 +321,45 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 			return fmt.Errorf("load --dns-ip-file: %w", err)
 		}
 	}
+	useSharedFleetScan := fleet != nil && opts.FleetScanWorkers == 0 && canUseSharedFleetScan(files)
+	connectionScanOpt := dns.PacketScanOptions{PacketAdmission: packetAdmission}
+	var sharedFleetAccumulator *syntrail.Accumulator
+	var fleetCompatibilityRereads atomic.Int64
+	if useSharedFleetScan {
+		sharedFleetAccumulator = syntrail.NewAccumulator()
+		connectionScanOpt.NewFileObserver = func(_ int, path string) dns.PacketFileObserver {
+			collector := syntrail.NewCollector()
+			var replacement []syntrail.Record
+			fallbackValidated := false
+			return dns.PacketFileObserver{
+				Observe: func(packet gopacket.Packet) {
+					if !fallbackValidated {
+						collector.Observe(packet)
+					}
+				},
+				OnReadError: func(ctx context.Context, readErr error) error {
+					records, err := scanSYNTrailFile(ctx, path, packetAdmission)
+					if err != nil {
+						return fmt.Errorf("validate fleet evidence after connection read error %v: %w", readErr, err)
+					}
+					replacement = records
+					collector = nil
+					fallbackValidated = true
+					fleetCompatibilityRereads.Add(1)
+					return nil
+				},
+				Commit: func() {
+					if fallbackValidated {
+						sharedFleetAccumulator.Add(replacement)
+						replacement = nil
+						return
+					}
+					sharedFleetAccumulator.Add(collector.TakeRecords())
+					collector = nil
+				},
+			}
+		}
+	}
 	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		ctx,
 		files,
@@ -330,10 +371,13 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 		ipToDNS,
 		ftpControlPorts,
 		ftpPassiveMinPort,
-		dns.PacketScanOptions{PacketAdmission: packetAdmission},
+		connectionScanOpt,
 	)
 	if err != nil {
 		return err
+	}
+	if count := fleetCompatibilityRereads.Load(); count > 0 {
+		progress.SetStage(fmt.Sprintf("Fleet evidence compatibility rereads: %d file(s).", count))
 	}
 
 	layoutTimestamp := firstPktInfo.Timestamp
@@ -347,25 +391,40 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 
 	var synTrailArtifacts map[string]string
 	if fleet != nil {
-		progress.SetStage("Running fleet trail sidecar...")
 		synTrailStartedAt := time.Now()
-		scanWorkers := effectiveFleetScanWorkers(opts.FleetScanWorkers, len(files))
-		synTrailArtifacts, err = runSYNTrailSidecar(ctx, om, files, fleet, synTrailArtifactOptions{
+		artifactOpt := synTrailArtifactOptions{
 			FTPControlPorts:              ftpControlPorts,
 			FTPPassiveMinPort:            ftpPassiveMinPort,
 			ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
 			Debug:                        opts.Debug,
-			ScanOptions: syntrail.ScanOptions{
-				Workers:         scanWorkers,
+		}
+		if !useSharedFleetScan {
+			progress.SetStage("Running fleet trail sidecar...")
+			artifactOpt.ScanOptions = syntrail.ScanOptions{
+				Workers:         effectiveFleetScanWorkers(opts.FleetScanWorkers, len(files)),
 				Progress:        fleetTrailScanProgress(progress.UpdateBar),
 				PacketAdmission: packetAdmission,
-			},
-		})
-		synTrailElapsed := time.Since(synTrailStartedAt).Round(time.Millisecond)
-		if err != nil {
-			return fmt.Errorf("run fleet trail sidecar (elapsed %s): %w", synTrailElapsed, err)
+			}
+			synTrailArtifacts, err = runSYNTrailSidecar(ctx, om, files, fleet, artifactOpt)
+			synTrailElapsed := time.Since(synTrailStartedAt).Round(time.Millisecond)
+			if err != nil {
+				return fmt.Errorf("run fleet trail sidecar (elapsed %s): %w", synTrailElapsed, err)
+			}
+			progress.SetStage(fmt.Sprintf("Fleet trail sidecar complete (elapsed %s).", synTrailElapsed))
+		} else {
+			progress.SetStage("Writing fleet trail artifacts...")
+			synTrailArtifacts, err = writeSYNTrailArtifactsFromRecords(
+				om,
+				sharedFleetAccumulator.TakeRecords(),
+				*fleet,
+				artifactOpt,
+			)
+			synTrailElapsed := time.Since(synTrailStartedAt).Round(time.Millisecond)
+			if err != nil {
+				return fmt.Errorf("write fleet trail artifacts (elapsed %s): %w", synTrailElapsed, err)
+			}
+			progress.SetStage(fmt.Sprintf("Fleet trail artifacts complete (elapsed %s).", synTrailElapsed))
 		}
-		progress.SetStage(fmt.Sprintf("Fleet trail sidecar complete (elapsed %s).", synTrailElapsed))
 	}
 
 	// --------------------------------------------------------------------
@@ -851,23 +910,6 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	return nil
 }
 
-func effectiveFleetScanWorkers(requested, fileCount int) int {
-	if requested > 0 {
-		return requested
-	}
-	gomax := runtime.GOMAXPROCS(0)
-	if gomax < 1 {
-		gomax = 1
-	}
-	if fileCount < 1 {
-		return 1
-	}
-	if gomax > fileCount {
-		return fileCount
-	}
-	return gomax
-}
-
 func fleetTrailScanProgress(update func(done, total int, message string)) syntrail.ScanProgressFunc {
 	return func(done, total int, file string) {
 		if file == "" {
@@ -876,6 +918,33 @@ func fleetTrailScanProgress(update func(done, total int, message string)) syntra
 		}
 		update(done, total, "Fleet trail "+filepath.Base(file))
 	}
+}
+
+func canUseSharedFleetScan(files []string) bool {
+	for _, file := range files {
+		supported, err := pcap.SupportsSharedPacketScan(file)
+		if err != nil || !supported {
+			return false
+		}
+	}
+	return true
+}
+
+func effectiveFleetScanWorkers(requested, fileCount int) int {
+	if requested > 0 {
+		return requested
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 1 {
+		workers = 1
+	}
+	if fileCount < 1 {
+		return 1
+	}
+	if workers > fileCount {
+		return fileCount
+	}
+	return workers
 }
 
 func writeIPDNSAppendAudit(

@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -15,6 +16,9 @@ import (
 
 	capture "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/aglants/pcaptool/internal/syntrail"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcapgo"
 )
 
 // Exercise the scanner and all sidecar writers together. The expected raw
@@ -79,6 +83,259 @@ func TestFleetSidecarManyFileArtifactsMatchLegacy(t *testing.T) {
 				t.Fatal("artifact preparation mutated borrowed bucket evidence")
 			}
 		})
+	}
+}
+
+func TestDNSExtractSharedFleetScanArtifactsMatchExplicitLegacyScan(t *testing.T) {
+	readDir := t.TempDir()
+	writeFleetMemoryFixture(t, readDir, 4, 3)
+	fleetPath := filepath.Join(t.TempDir(), "fleet.txt")
+	if err := os.WriteFile(fleetPath, []byte("10.0.0.1\n10.0.0.2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	originalScanner := scanSYNTrailFilesWithOptions
+	t.Cleanup(func() { scanSYNTrailFilesWithOptions = originalScanner })
+	legacyScanCalls := 0
+	scanSYNTrailFilesWithOptions = func(ctx context.Context, files []string, opt syntrail.ScanOptions) ([]syntrail.Record, error) {
+		legacyScanCalls++
+		return originalScanner(ctx, files, opt)
+	}
+
+	for _, debug := range []bool{false, true} {
+		t.Run(fmt.Sprintf("debug_%t", debug), func(t *testing.T) {
+			run := func(workers int) (map[string][]byte, int) {
+				beforeCalls := legacyScanCalls
+				outputRoot := t.TempDir()
+				opts := DefaultDNSExtractOptions()
+				opts.ReadDir = readDir
+				opts.NetID = "fleet-memory"
+				opts.OutputRoot = outputRoot
+				opts.Fleet = fleetPath
+				opts.FleetScanWorkers = workers
+				opts.OnlyTCP = true
+				opts.ExcludePorts = "53,123,443,8443"
+				opts.EnforcePrivateAsSource = true
+				opts.DisableSNI = true
+				opts.Debug = debug
+				opts.IgnoreNTP = false
+				if err := executeDNSExtract(context.Background(), opts); err != nil {
+					t.Fatalf("executeDNSExtract(workers=%d): %v", workers, err)
+				}
+
+				runDir := findSingleRunDir(t, outputRoot, opts.NetID)
+				artifacts := make(map[string][]byte)
+				for _, spec := range expectedSYNTrailArtifacts {
+					if spec.debugOnly && !debug {
+						continue
+					}
+					contents, err := os.ReadFile(filepath.Join(runDir, spec.filename))
+					if err != nil {
+						t.Fatalf("read %s: %v", spec.filename, err)
+					}
+					artifacts[spec.filename] = contents
+				}
+				return artifacts, legacyScanCalls - beforeCalls
+			}
+
+			shared, sharedCalls := run(0)
+			if sharedCalls != 0 {
+				t.Fatalf("default shared path invoked legacy scanner %d times, want 0", sharedCalls)
+			}
+			legacy, legacyCalls := run(2)
+			if legacyCalls != 1 {
+				t.Fatalf("explicit worker path invoked legacy scanner %d times, want 1", legacyCalls)
+			}
+			if !reflect.DeepEqual(shared, legacy) {
+				for name, want := range legacy {
+					if !bytes.Equal(shared[name], want) {
+						t.Errorf("shared %s differs from explicit legacy scan", name)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestDNSExtractDefaultFleetScanRecoversMixedInterfacePCAPNGWithOneStrictFileScan(t *testing.T) {
+	readDir := t.TempDir()
+	path := filepath.Join(readDir, "mixed-interfaces.pcap")
+	writeMixedInterfaceFleetPCAPNG(t, path)
+	if !canUseSharedFleetScan([]string{path}) {
+		t.Fatal("PCAPNG input named .pcap was not admitted to shared fleet scanning")
+	}
+	fleetPath := filepath.Join(t.TempDir(), "fleet.txt")
+	if err := os.WriteFile(fleetPath, []byte("10.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fleet, err := syntrail.LoadFleetIPv4File(fleetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRecords, err := syntrail.ScanFilesWithOptions(context.Background(), []string{path}, syntrail.ScanOptions{
+		Workers:         1,
+		PacketAdmission: capture.IPv4EndpointAdmission(fleet.Contains),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArtifacts := legacyFleetArtifactBytes(t, syntrail.ClassifyRecords(wantRecords, fleet), fleetMemoryArtifactOptions(true), "fleet-fallback")
+
+	originalScanner := scanSYNTrailFilesWithOptions
+	originalFileScanner := scanSYNTrailFile
+	t.Cleanup(func() {
+		scanSYNTrailFilesWithOptions = originalScanner
+		scanSYNTrailFile = originalFileScanner
+	})
+	legacyCalls := 0
+	scanSYNTrailFilesWithOptions = func(ctx context.Context, files []string, opt syntrail.ScanOptions) ([]syntrail.Record, error) {
+		legacyCalls++
+		return originalScanner(ctx, files, opt)
+	}
+	strictFileScans := 0
+	scanSYNTrailFile = func(ctx context.Context, path string, admit capture.PacketAdmission) ([]syntrail.Record, error) {
+		strictFileScans++
+		return originalFileScanner(ctx, path, admit)
+	}
+
+	outputRoot := t.TempDir()
+	opts := DefaultDNSExtractOptions()
+	opts.ReadDir = readDir
+	opts.NetID = "fleet-fallback"
+	opts.OutputRoot = outputRoot
+	opts.Fleet = fleetPath
+	opts.FleetScanWorkers = 0
+	opts.DisableSNI = true
+	opts.Debug = true
+	opts.IgnoreNTP = false
+	if err := executeDNSExtract(context.Background(), opts); err != nil {
+		t.Fatalf("executeDNSExtract() mixed-interface recovery error = %v", err)
+	}
+	if legacyCalls != 0 {
+		t.Fatalf("default shared path invoked full legacy scanner %d times, want 0", legacyCalls)
+	}
+	if strictFileScans != 1 {
+		t.Fatalf("strict compatibility file scans = %d, want 1", strictFileScans)
+	}
+	runDir := findSingleRunDir(t, outputRoot, opts.NetID)
+	for name, want := range wantArtifacts {
+		got, err := os.ReadFile(filepath.Join(runDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("recovered %s differs from strict legacy fleet scan", name)
+		}
+	}
+	trail, err := os.ReadFile(filepath.Join(runDir, "fleet-to-public-trail.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"10.0.0.1,203.0.113.10,443,tcp",
+		"10.0.0.1,203.0.113.11,8443,tcp",
+	} {
+		if !strings.Contains(string(trail), want) {
+			t.Fatalf("recovered fleet trail omitted compatible-interface evidence %q:\n%s", want, trail)
+		}
+	}
+	manifest := readRunArtifactsManifest(t, runDir)
+	matrix := mustReadTestFile(t, manifest.Files["network_topology_matrix_json"])
+	for _, want := range []string{"203.0.113.10", "203.0.113.11"} {
+		if !strings.Contains(matrix, want) {
+			t.Fatalf("connection correlation did not continue to compatible endpoint %s after read error:\n%s", want, matrix)
+		}
+	}
+}
+
+func TestDNSExtractMixedInterfaceStrictFileRecoveryFailureReturnsBeforeOutput(t *testing.T) {
+	readDir := t.TempDir()
+	writeMixedInterfaceFleetPCAPNG(t, filepath.Join(readDir, "mixed-interfaces.pcap"))
+	fleetPath := filepath.Join(t.TempDir(), "fleet.txt")
+	if err := os.WriteFile(fleetPath, []byte("10.0.0.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	originalFileScanner := scanSYNTrailFile
+	originalScanner := scanSYNTrailFilesWithOptions
+	t.Cleanup(func() {
+		scanSYNTrailFile = originalFileScanner
+		scanSYNTrailFilesWithOptions = originalScanner
+	})
+	wantErr := errors.New("strict fleet reread failed")
+	scanSYNTrailFile = func(context.Context, string, capture.PacketAdmission) ([]syntrail.Record, error) {
+		return nil, wantErr
+	}
+	scanSYNTrailFilesWithOptions = func(context.Context, []string, syntrail.ScanOptions) ([]syntrail.Record, error) {
+		t.Fatal("full legacy scanner called from shared recovery")
+		return nil, nil
+	}
+
+	outputRoot := t.TempDir()
+	opts := DefaultDNSExtractOptions()
+	opts.ReadDir = readDir
+	opts.NetID = "fleet-recovery-error"
+	opts.OutputRoot = outputRoot
+	opts.Fleet = fleetPath
+	opts.FleetScanWorkers = 0
+	opts.DisableSNI = true
+	opts.IgnoreNTP = false
+	err := executeDNSExtract(context.Background(), opts)
+	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "validate fleet evidence after connection read error") {
+		t.Fatalf("executeDNSExtract() error = %v, want contextual %v", err, wantErr)
+	}
+	entries, readErr := os.ReadDir(outputRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("strict recovery failure wrote output entries: %v", entries)
+	}
+}
+
+func writeMixedInterfaceFleetPCAPNG(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := pcapgo.NewNgWriter(f, layers.LinkTypeEthernet)
+	if err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	rawInterface, err := w.AddInterface(pcapgo.NgInterface{LinkType: layers.LinkTypeRaw, SnapLength: 65535})
+	if err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	packets := []struct {
+		ts             time.Time
+		data           []byte
+		interfaceIndex int
+	}{
+		{ts: base, data: buildTCPPacket(t, "10.0.0.1", "203.0.113.10", 41000, 443, true, false)},
+		{ts: base.Add(time.Millisecond), data: buildTCPPacket(t, "203.0.113.10", "10.0.0.1", 443, 41000, true, true)},
+		{ts: base.Add(time.Second), data: []byte{0x45, 0, 0, 20}, interfaceIndex: rawInterface},
+		{ts: base.Add(2 * time.Second), data: buildTCPPacket(t, "10.0.0.1", "203.0.113.11", 41000, 8443, true, false)},
+		{ts: base.Add(2*time.Second + time.Millisecond), data: buildTCPPacket(t, "203.0.113.11", "10.0.0.1", 8443, 41000, true, true)},
+	}
+	for _, packet := range packets {
+		ci := gopacket.CaptureInfo{
+			Timestamp: packet.ts, CaptureLength: len(packet.data), Length: len(packet.data), InterfaceIndex: packet.interfaceIndex,
+		}
+		if err := w.WritePacket(ci, packet.data); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
