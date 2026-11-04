@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"time"
 
 	"github.com/aglants/pcaptool/internal/connectivity"
 	"github.com/aglants/pcaptool/internal/syntrail"
@@ -20,9 +21,13 @@ type synTrailArtifactOptions struct {
 	ServerSummaryExcludeUDPPorts map[uint16]struct{}
 	ScanOptions                  syntrail.ScanOptions
 	Debug                        bool
+	FirstFilePacketTimestamp     time.Time
 }
 
-var scanSYNTrailFilesWithOptions = syntrail.ScanFilesWithOptions
+var (
+	scanSYNTrailFile             = syntrail.ScanFileWithOptions
+	scanSYNTrailFilesWithOptions = syntrail.ScanFilesWithOptions
+)
 
 func runSYNTrailSidecar(
 	ctx context.Context,
@@ -35,30 +40,10 @@ func runSYNTrailSidecar(
 		return nil, nil
 	}
 
-	opt.ScanOptions.SyslogEligible = func(src, dst netip.Addr) bool {
-		return fleet.Contains(src) && !fleet.Contains(dst) && direction.Private(dst)
-	}
-	opt.ScanOptions.SyslogCache = syntrail.NewSyslogCache()
-	if opt.DirectionRegistry != "" {
-		raw, err := os.ReadFile(opt.DirectionRegistry)
-		if err != nil {
-			return nil, err
-		}
-		d, err := direction.Decode(raw)
-		if err != nil {
-			return nil, err
-		}
-		if err = d.ValidateRegistry(d.AccountID, om.NetID()); err != nil {
-			return nil, err
-		}
-		for _, e := range d.Endpoints {
-			ip, _ := netip.ParseAddr(e.IP)
-			for _, b := range e.Server.Listeners {
-				if b.Protocol == "udp" && b.Evidence == "syslog" {
-					opt.ScanOptions.SyslogCache.Add(ip, b.Port)
-				}
-			}
-		}
+	var err error
+	opt.ScanOptions, err = directionScanOptions(fleet, opt.DirectionRegistry, om.NetID(), opt.ScanOptions)
+	if err != nil {
+		return nil, err
 	}
 	records, err := scanSYNTrailFilesWithOptions(ctx, files, opt.ScanOptions)
 	if err != nil {
@@ -68,11 +53,20 @@ func runSYNTrailSidecar(
 		opt.ScanOptions.Progress(len(files), len(files), "")
 	}
 
-	artifacts, err := writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, *fleet), opt)
+	artifacts, err := writeSYNTrailArtifactsFromRecords(om, records, *fleet, opt)
 	if err != nil {
 		return nil, fmt.Errorf("write SYN trail artifacts: %w", err)
 	}
 	return artifacts, nil
+}
+
+func writeSYNTrailArtifactsFromRecords(
+	om *OutputManager,
+	records []syntrail.Record,
+	fleet syntrail.FleetSet,
+	opt synTrailArtifactOptions,
+) (map[string]string, error) {
+	return writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, fleet), opt)
 }
 
 func writeSYNTrailArtifacts(
@@ -105,7 +99,7 @@ func writeSYNTrailArtifacts(
 		artifacts[spec.key] = path
 	}
 
-	path, err := writePrivateNonFleetEndpointsArtifact(om, privateServerRecords, privateProbeRecords)
+	path, err := writePrivateNonFleetEndpointsArtifact(om, privateServerRecords, privateProbeRecords, opt.FirstFilePacketTimestamp)
 	if err != nil {
 		return nil, err
 	}
@@ -362,6 +356,7 @@ func writePrivateNonFleetEndpointsArtifact(
 	om *OutputManager,
 	serverRecords []syntrail.Record,
 	probeRecords []syntrail.Record,
+	firstPacket time.Time,
 ) (string, error) {
 	f, err := om.Create(privateNonFleetEndpointsFilename)
 	if err != nil {
@@ -369,7 +364,7 @@ func writePrivateNonFleetEndpointsArtifact(
 	}
 
 	path := f.Name()
-	writeErr := syntrail.WritePrivateNonFleetEndpointsJSON(f, serverRecords, probeRecords)
+	writeErr := syntrail.WritePrivateNonFleetEndpointsJSON(f, serverRecords, probeRecords, firstPacket)
 	closeErr := f.Close()
 	if writeErr != nil {
 		return "", fmt.Errorf("write %s: %w", privateNonFleetEndpointsFilename, writeErr)
@@ -378,4 +373,34 @@ func writePrivateNonFleetEndpointsArtifact(
 		return "", fmt.Errorf("close %s: %w", privateNonFleetEndpointsFilename, closeErr)
 	}
 	return path, nil
+}
+
+// directionScanOptions supplies identical qualification policy to both scans.
+func directionScanOptions(fleet *syntrail.FleetSet, registry, netID string, scanOpt syntrail.ScanOptions) (syntrail.ScanOptions, error) {
+	scanOpt.SyslogEligible = func(src, dst netip.Addr) bool {
+		return fleet.Contains(src) && !fleet.Contains(dst) && direction.Private(dst)
+	}
+	scanOpt.SyslogCache = syntrail.NewSyslogCache()
+	if registry != "" {
+		raw, err := os.ReadFile(registry)
+		if err != nil {
+			return scanOpt, err
+		}
+		d, err := direction.Decode(raw)
+		if err != nil {
+			return scanOpt, err
+		}
+		if err = d.ValidateRegistry(d.AccountID, netID); err != nil {
+			return scanOpt, err
+		}
+		for _, e := range d.Endpoints {
+			ip, _ := netip.ParseAddr(e.IP)
+			for _, b := range e.Server.Listeners {
+				if b.Protocol == "udp" && b.Evidence == "syslog" {
+					scanOpt.SyslogCache.Add(ip, b.Port)
+				}
+			}
+		}
+	}
+	return scanOpt, nil
 }

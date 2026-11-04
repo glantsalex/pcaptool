@@ -406,9 +406,12 @@ topology, unresolved, service-endpoint, audit, debug, or sidecar evidence.
 Capture-date and first-packet metadata use the earliest admitted packet, or the
 existing unknown/empty representation when no packet matches.
 
-The SYN-trail artifact generator remains a sidecar: it does not feed DNS
-attribution, topology, service-endpoint, or connection-inference results. It
-uses the same packet-admission rule, and:
+The SYN-trail artifact generator remains independent: it does not feed DNS
+attribution, topology, service-endpoint, or connection-inference results. By
+default, PCAP and PCAPNG captures share the connection scan rather than scanning
+the captures again. A reader compatibility error triggers a strict reread of
+only that file for fleet evidence; correlation keeps its historical reader and
+retry behavior. It uses the same packet-admission rule, and:
 
 - `--exclude-ports` does not apply to SYN evidence artifacts
 
@@ -430,6 +433,14 @@ With `--debug`, the sidecar additionally writes these detailed artifacts:
 - `private-nonfleet-to-fleet-tcp-syn-unique.csv`
 
 `private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses observed for that exact role/protocol/port behavior. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Probe targets retain the existing TCP-only qualification.
+
+The top-level `snapshot_time` is an integer Unix timestamp in milliseconds,
+aligned to 00:00:00 UTC on the date of the first packet in the first capture
+in lexicographically sorted discovery order. This uses the raw first packet,
+before fleet or connection filtering, not the earliest timestamp across captures
+or the first worker to finish. If the first capture is empty, `snapshot_time` is
+`0` (unknown); later captures do not supply a fallback. Endpoint aggregation and
+the manifest's earliest-admitted-packet metadata are unchanged.
 
 Bucket meanings:
 
@@ -499,9 +510,9 @@ The command is a multi-pass offline pipeline.
 
 ### Fleet constraint and optional TCP SYN trail sidecar
 
-If `--fleet` is set, all packet-processing passes admit only IPv4 packets whose source or destination belongs to the supplied fleet. The admitted corpus is also scanned for packet-level IPv4 TCP SYN evidence and UDP edge evidence. The public-server summary, private-nonfleet endpoint summary, and `flow-direction-correction.sql` are always written; detailed trail and unique evidence artifacts require `--debug`. Debug selection changes only artifact writing and does not rescan the corpus. By default, `--fleet-scan-workers 0` auto-selects `min(GOMAXPROCS, file_count)` workers with a minimum of `1`; `--fleet-scan-workers 1` forces sequential scanning, and values greater than `1` force that many concurrent file scanners. Higher values can reduce wall-clock time on large directories but increase disk and CPU pressure. The generated BigQuery script creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
+If `--fleet` is set, all packet-processing passes admit only IPv4 packets whose source or destination belongs to the supplied fleet. Packet-level IPv4 TCP SYN evidence and UDP edge evidence are collected independently of connection-correlation filters. The public-server summary, private-nonfleet endpoint summary, and `flow-direction-correction.sql` are always written; detailed trail and unique evidence artifacts require `--debug`. Debug selection changes only artifact writing and does not rescan the corpus. By default, `--fleet-scan-workers 0` collects fleet evidence during connection correlation for PCAP/PCAPNG captures, using its bounded file workers; with RADIUS disabled and no reader compatibility errors, this reduces the pipeline to two full capture scans (DNS/SNI, then connections/fleet evidence). Capture format is checked from file headers, not filename extensions. A recoverable libpcap read error triggers one strict compatibility reread of the affected file for fleet evidence; malformed captures still fail, and correlation retains its historical reader/retry behavior. Other capture formats retain the full separate scan with automatic worker selection (`min(GOMAXPROCS, file_count)`, minimum `1`). Explicit positive values also retain the separate fleet scan: `1` is sequential, and values greater than `1` use that many concurrent file scanners, capped by the file count. The generated BigQuery script creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
 
-The sidecar remains independent and does not feed DNS attribution, connection inference, topology generation, or service endpoint generation.
+Fleet classification and artifact writing remain independent and do not feed DNS attribution, connection inference, topology generation, or service endpoint generation. Sharing packet reads does not share their filtering policies.
 The SQL script is not executed by pcaptool.
 
 ### Pass 1: optional RADIUS/IP-to-IMSI index
@@ -746,7 +757,7 @@ This policy is designed to reduce CSV contamination from:
 |---|---|---:|---|
 | `--read-dir`, `-r` | string | required | directory containing PCAP files; walked recursively |
 | `--fleet` | string | empty | optional fleet IPv4 list; when set, admits only packets with a fleet IPv4 endpoint and writes always-on fleet summaries and flow-direction SQL |
-| `--fleet-scan-workers` | int | `0` | workers for `--fleet` artifact scanning; `0` auto-selects `min(GOMAXPROCS, file_count)` with minimum `1`, `1` is sequential, higher values force concurrent scanning |
+| `--fleet-scan-workers` | int | `0` | `0` shares connection scanning for PCAP/PCAPNG, with compatibility fallback; positive values force a separate scan (`1` sequential, higher values concurrent, capped by file count) |
 | `--format` | string | `table` | main output format: `table` or `json` |
 | `--export-csv` | string | empty | optional CSV export path for main records |
 | `--short`, `-s` | bool | `false` | squash topology to one row per issuer/DNS/port |

@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -186,6 +187,54 @@ func TestAttachConnectionsPacketAdmissionFiltersEdgesAndEarliest(t *testing.T) {
 	}
 	if len(noEdges) != 0 || !noFirst.Timestamp.IsZero() || noFirst.PCAPFile != "" {
 		t.Fatalf("no-match scan = edges %+v first %+v, want empty", noEdges, noFirst)
+	}
+}
+
+func TestAttachConnectionsFirstFilePacketTimestamp(t *testing.T) {
+	first := time.Date(2026, 10, 2, 15, 30, 45, 123000000, time.UTC)
+	earlier := first.Add(-48 * time.Hour)
+	for _, shared := range []bool{false, true} {
+		for _, emptyFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("shared_%t/empty_first_%t", shared, emptyFirst), func(t *testing.T) {
+				dir := t.TempDir()
+				files := []string{filepath.Join(dir, "a.pcap"), filepath.Join(dir, "b.pcap")}
+				var firstPackets []dnsAdmissionPacket
+				if !emptyFirst {
+					firstPackets = []dnsAdmissionPacket{
+						// Rejected by admission, but still anchors snapshot_time.
+						{ts: first, data: buildConnectionInferenceTestTCPPacket(t, "192.168.1.1", "192.168.1.2", 41000, 443, true, false)},
+						// Earlier in time but later in packet order: not the snapshot source.
+						{ts: earlier, data: buildConnectionInferenceTestTCPPacket(t, "10.0.0.1", "192.168.1.2", 41001, 443, true, false)},
+					}
+				}
+				writeConnectionAdmissionPCAP(t, files[0], firstPackets)
+				writeConnectionAdmissionPCAP(t, files[1], []dnsAdmissionPacket{
+					{ts: earlier.Add(-24 * time.Hour), data: buildConnectionInferenceTestTCPPacket(t, "10.0.0.1", "192.168.1.2", 41002, 443, true, false)},
+				})
+				opt := PacketScanOptions{PacketAdmission: pcaputil.IPv4EndpointAdmission(func(ip netip.Addr) bool {
+					return ip == netip.MustParseAddr("10.0.0.1")
+				})}
+				if shared {
+					opt.NewFileObserver = func(_ int, _ string) PacketFileObserver { return PacketFileObserver{} }
+				}
+				_, got, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
+					context.Background(), files, nil, false, false, nil, false, nil, nil, 0, opt,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := first
+				if emptyFirst {
+					want = time.Time{}
+				}
+				if !got.FirstFilePacketTimestamp.Equal(want) {
+					t.Fatalf("first file packet timestamp = %v, want %v", got.FirstFilePacketTimestamp, want)
+				}
+				if !got.Timestamp.Equal(earlier.Add(-24*time.Hour)) || got.PCAPFile != filepath.Base(files[1]) {
+					t.Fatalf("existing earliest admitted metadata changed: %+v", got)
+				}
+			})
+		}
 	}
 }
 

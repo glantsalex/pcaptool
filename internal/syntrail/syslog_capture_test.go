@@ -88,7 +88,7 @@ func BenchmarkSyslogSampleScan(b *testing.B) {
 				if mode != "baseline" {
 					eligible = func(_, _ netip.Addr) bool { return true }
 				}
-				if _, err := scanFileWithSyslog(context.Background(), path, nil, cache, eligible); err != nil {
+				if _, err := ScanFileWithOptions(context.Background(), path, ScanOptions{SyslogCache: cache, SyslogEligible: eligible}); err != nil {
 					b.Fatal(err)
 				}
 			}

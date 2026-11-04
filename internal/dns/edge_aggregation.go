@@ -61,6 +61,13 @@ func (a *edgeAccumulator) edges() []connectivity.Edge {
 type edgeScanFunc func(context.Context, int) ([]connectivity.Edge, error)
 type edgeCommitFunc func([]connectivity.Edge)
 
+type orderedFileScanFunc func(context.Context, int) (orderedFileScanOutput, error)
+
+type orderedFileScanOutput struct {
+	edges      []connectivity.Edge
+	afterEdges func()
+}
+
 type orderedEdgeScanStats struct {
 	maxOutstanding int
 	maxPending     int
@@ -68,7 +75,7 @@ type orderedEdgeScanStats struct {
 
 type orderedEdgeScanResult struct {
 	fileIdx int
-	edges   []connectivity.Edge
+	output  orderedFileScanOutput
 	err     error
 }
 
@@ -81,6 +88,29 @@ func runBoundedOrderedEdgeScans(
 	totalFiles int,
 	workerCount int,
 	scan edgeScanFunc,
+	commit edgeCommitFunc,
+) (orderedEdgeScanStats, error) {
+	return runBoundedOrderedFileScans(
+		ctx,
+		totalFiles,
+		workerCount,
+		func(ctx context.Context, fileIdx int) (orderedFileScanOutput, error) {
+			edges, err := scan(ctx, fileIdx)
+			return orderedFileScanOutput{edges: edges}, err
+		},
+		commit,
+	)
+}
+
+// runBoundedOrderedFileScans extends the edge scan coordinator with an
+// optional per-file callback that runs immediately after that file's edges are
+// committed. Both commits retain discovered-file order and the same bounded
+// outstanding frontier.
+func runBoundedOrderedFileScans(
+	ctx context.Context,
+	totalFiles int,
+	workerCount int,
+	scan orderedFileScanFunc,
 	commit edgeCommitFunc,
 ) (orderedEdgeScanStats, error) {
 	var stats orderedEdgeScanStats
@@ -112,9 +142,9 @@ func runBoundedOrderedEdgeScans(
 					if !ok {
 						return
 					}
-					edges, err := scan(scanCtx, fileIdx)
+					output, err := scan(scanCtx, fileIdx)
 					select {
-					case results <- orderedEdgeScanResult{fileIdx: fileIdx, edges: edges, err: err}:
+					case results <- orderedEdgeScanResult{fileIdx: fileIdx, output: output, err: err}:
 					case <-scanCtx.Done():
 						return
 					}
@@ -129,7 +159,7 @@ func runBoundedOrderedEdgeScans(
 
 	nextDispatch := 0
 	nextCommit := 0
-	pending := make(map[int][]connectivity.Edge, workerCount)
+	pending := make(map[int]orderedFileScanOutput, workerCount)
 	jobsOpen := true
 	closeJobs := func() {
 		if jobsOpen {
@@ -194,16 +224,19 @@ func runBoundedOrderedEdgeScans(
 				continue
 			}
 
-			pending[result.fileIdx] = result.edges
+			pending[result.fileIdx] = result.output
 			if len(pending) > stats.maxPending {
 				stats.maxPending = len(pending)
 			}
 			for {
-				edges, exists := pending[nextCommit]
+				output, exists := pending[nextCommit]
 				if !exists {
 					break
 				}
-				commit(edges)
+				commit(output.edges)
+				if output.afterEdges != nil {
+					output.afterEdges()
+				}
 				delete(pending, nextCommit)
 				nextCommit++
 			}

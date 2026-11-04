@@ -58,14 +58,10 @@ func ScanFilesWithOptions(ctx context.Context, files []string, opts ScanOptions)
 		cache = NewSyslogCache()
 	}
 	scanner := func(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
-		return scanFileWithSyslog(ctx, path, admit, cache, opts.SyslogEligible)
+		return ScanFileWithOptions(ctx, path, ScanOptions{PacketAdmission: admit, SyslogCache: cache, SyslogEligible: opts.SyslogEligible})
 	}
 	records, err := scanFilesConcurrentWithScanner(ctx, files, opts.Workers, opts.Progress, opts.PacketAdmission, scanner)
-	for i := range records {
-		if records[i].Protocol == ProtocolUDP {
-			records[i].SyslogQualified = cache.Known(records[i].DstIP, records[i].DstPort)
-		}
-	}
+	ApplySyslogQualifications(records, cache)
 	return records, err
 }
 
@@ -75,21 +71,21 @@ func scanFilesSequential(
 	progress ScanProgressFunc,
 	admit pcaputil.PacketAdmission,
 ) ([]Record, error) {
-	accumulator := newScanRecordAccumulator()
+	accumulator := NewAccumulator()
 	for i, file := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		fileRecords, err := scanFile(ctx, file, admit)
+		fileRecords, err := ScanFile(ctx, file, admit)
 		if progress != nil {
 			progress(i+1, len(files), file)
 		}
 		if err != nil {
 			return nil, err
 		}
-		accumulator.add(fileRecords)
+		accumulator.Add(fileRecords)
 	}
-	return accumulator.records(), nil
+	return accumulator.TakeRecords(), nil
 }
 
 func scanFilesConcurrent(
@@ -99,7 +95,7 @@ func scanFilesConcurrent(
 	progress ScanProgressFunc,
 	admit pcaputil.PacketAdmission,
 ) ([]Record, error) {
-	return scanFilesConcurrentWithScanner(ctx, files, workers, progress, admit, scanFile)
+	return scanFilesConcurrentWithScanner(ctx, files, workers, progress, admit, ScanFile)
 }
 
 type scanFileFunc func(context.Context, string, pcaputil.PacketAdmission) ([]Record, error)
@@ -155,7 +151,7 @@ func scanFilesConcurrentWithScanner(
 		close(resultsCh)
 	}()
 
-	accumulator := newScanRecordAccumulator()
+	accumulator := NewAccumulator()
 	pending := make(map[int]scanFileResult, workers)
 	nextDispatch := 0
 	nextCommit := 0
@@ -207,7 +203,7 @@ func scanFilesConcurrentWithScanner(
 					break
 				}
 				delete(pending, nextCommit)
-				accumulator.add(ordered.records)
+				accumulator.Add(ordered.records)
 				nextCommit++
 			}
 
@@ -231,7 +227,7 @@ func scanFilesConcurrentWithScanner(
 		}
 		return nil, fmt.Errorf("scan completed %d of %d packet captures", nextCommit, len(files))
 	}
-	return accumulator.records(), nil
+	return accumulator.TakeRecords(), nil
 }
 
 func shouldPreferScanError(current, next error) bool {
@@ -259,19 +255,25 @@ type scanFileResult struct {
 	err     error
 }
 
-type scanRecordAccumulator struct {
+// Accumulator merges completed per-file trail records in file order while
+// preserving TCP observations and globally deduplicating UDP tuples.
+// Accumulator is not safe for concurrent use; the scan coordinator owns it.
+type Accumulator struct {
 	tcpRecords []Record
 	udpRecords map[observedRecordKey]Record
 	udpOrder   []observedRecordKey
 }
 
-func newScanRecordAccumulator() *scanRecordAccumulator {
-	return &scanRecordAccumulator{
+// NewAccumulator returns an empty trail record accumulator.
+func NewAccumulator() *Accumulator {
+	return &Accumulator{
 		udpRecords: make(map[observedRecordKey]Record),
 	}
 }
 
-func (a *scanRecordAccumulator) add(records []Record) {
+// Add merges one completed file's records. Callers must add files in the
+// discovered file order to preserve externally visible trail ordering.
+func (a *Accumulator) Add(records []Record) {
 	// The externally visible ordering contract is all TCP observations in
 	// file/packet order followed by first-seen UDP tuples. UDP timestamps may
 	// still be replaced by an earlier observation from a later file.
@@ -284,17 +286,75 @@ func (a *scanRecordAccumulator) add(records []Record) {
 	}
 }
 
-func (a *scanRecordAccumulator) records() []Record {
+// TakeRecords returns the accumulated records and transfers ownership of the
+// returned slice to the caller. The accumulator must not be used afterward.
+func (a *Accumulator) TakeRecords() []Record {
 	for _, key := range a.udpOrder {
 		a.tcpRecords = append(a.tcpRecords, a.udpRecords[key])
 	}
-	return a.tcpRecords
+	records := a.tcpRecords
+	a.tcpRecords = nil
+	a.udpRecords = nil
+	a.udpOrder = nil
+	return records
 }
 
-func scanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
-	return scanFileWithSyslog(ctx, path, admit, NewSyslogCache(), nil)
+// Collector extracts trail evidence from one decoded capture file. Collector
+// is owned by one file worker and is not safe for concurrent use.
+type Collector struct {
+	syslogCache    *SyslogCache
+	syslogEligible func(netip.Addr, netip.Addr) bool
+	tcpRecords     []Record
+	udpRecords     map[observedRecordKey]Record
+	udpOrder       []observedRecordKey
 }
-func scanFileWithSyslog(ctx context.Context, path string, admit pcaputil.PacketAdmission, cache *SyslogCache, eligible func(netip.Addr, netip.Addr) bool) ([]Record, error) {
+
+// NewCollector returns an empty per-file packet collector.
+func NewCollector() *Collector {
+	return NewCollectorWithOptions(ScanOptions{})
+}
+
+// NewCollectorWithOptions shares positive syslog evidence across file workers.
+// Packet admission is the caller's responsibility, before Observe.
+func NewCollectorWithOptions(opts ScanOptions) *Collector {
+	cache := opts.SyslogCache
+	if cache == nil {
+		cache = NewSyslogCache()
+	}
+	return &Collector{udpRecords: make(map[observedRecordKey]Record), syslogCache: cache, syslogEligible: opts.SyslogEligible}
+}
+
+// Observe records eligible raw TCP SYN and UDP evidence from packet. All
+// retained fields are copied into stable value types before Observe returns.
+func (c *Collector) Observe(packet gopacket.Packet) {
+	if record, ok := synRecord(packet); ok {
+		c.tcpRecords = append(c.tcpRecords, record)
+	}
+	if record, ok := udpRecord(packet); ok {
+		if c.syslogEligible != nil && c.syslogEligible(record.SrcIP, record.DstIP) {
+			udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
+			record.SyslogQualified = c.syslogCache.Qualify(record.DstIP, record.DstPort, udp.Payload)
+		}
+		addEarliestRecord(c.udpRecords, &c.udpOrder, record)
+	}
+}
+
+// TakeRecords returns this file's records and transfers ownership of the
+// returned slice to the caller. The collector must not be used afterward.
+func (c *Collector) TakeRecords() []Record {
+	records := appendOrderedRecords(c.tcpRecords, c.udpRecords, c.udpOrder)
+	ApplySyslogQualifications(records, c.syslogCache)
+	return records
+}
+
+// ScanFile scans one packet capture for trail evidence and returns no partial
+// records if the capture cannot be read completely.
+func ScanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
+	return ScanFileWithOptions(ctx, path, ScanOptions{PacketAdmission: admit})
+}
+
+// ScanFileWithOptions performs a strict file scan with optional syslog evidence.
+func ScanFileWithOptions(ctx context.Context, path string, opts ScanOptions) ([]Record, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -311,9 +371,7 @@ func scanFileWithSyslog(ctx context.Context, path string, admit pcaputil.PacketA
 	}
 	src.NoCopy = true
 
-	var tcpRecords []Record
-	udpRecords := make(map[observedRecordKey]Record)
-	var udpOrder []observedRecordKey
+	collector := NewCollectorWithOptions(opts)
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -322,25 +380,16 @@ func scanFileWithSyslog(ctx context.Context, path string, admit pcaputil.PacketA
 
 		packet, err := src.NextPacket()
 		if err == io.EOF {
-			return appendOrderedRecords(tcpRecords, udpRecords, udpOrder), nil
+			return collector.TakeRecords(), nil
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read packet from %q: %w", path, err)
 		}
-		if admit != nil && !admit(packet) {
+		if opts.PacketAdmission != nil && !opts.PacketAdmission(packet) {
 			continue
 		}
 
-		if record, ok := synRecord(packet); ok {
-			tcpRecords = append(tcpRecords, record)
-		}
-		if record, ok := udpRecord(packet); ok {
-			if eligible != nil && eligible(record.SrcIP, record.DstIP) {
-				udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
-				record.SyslogQualified = cache.Qualify(record.DstIP, record.DstPort, udp.Payload)
-			}
-			addEarliestRecord(udpRecords, &udpOrder, record)
-		}
+		collector.Observe(packet)
 	}
 }
 
@@ -509,4 +558,17 @@ func netipAddrFromIPv4(ip net.IP) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	return netip.AddrFrom4([4]byte{ip4[0], ip4[1], ip4[2], ip4[3]}), true
+}
+
+// ApplySyslogQualifications propagates evidence discovered by any file worker
+// to earlier records. Call after all workers complete, before classification.
+func ApplySyslogQualifications(records []Record, cache *SyslogCache) {
+	if cache == nil {
+		return
+	}
+	for i := range records {
+		if records[i].Protocol == ProtocolUDP {
+			records[i].SyslogQualified = cache.Known(records[i].DstIP, records[i].DstPort)
+		}
+	}
 }
