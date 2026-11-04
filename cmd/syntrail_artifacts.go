@@ -382,15 +382,20 @@ func directionScanOptions(fleet *syntrail.FleetSet, registry, netID string, scan
 	}
 	scanOpt.SyslogCache = syntrail.NewSyslogCache()
 	if registry != "" {
+		logInputAccess(os.Stderr, "direction-registry", registry, false, false)
 		raw, err := os.ReadFile(registry)
 		if err != nil {
+			logInputLoad(os.Stderr, "direction-registry", registry, err)
 			return scanOpt, err
 		}
 		d, err := direction.Decode(raw)
 		if err != nil {
+			logInputLoad(os.Stderr, "direction-registry", registry, err)
 			return scanOpt, err
 		}
-		if err = d.ValidateRegistry(d.AccountID, netID); err != nil {
+		err = d.ValidateRegistry(d.AccountID, netID)
+		logInputLoad(os.Stderr, "direction-registry", registry, err)
+		if err != nil {
 			return scanOpt, err
 		}
 		for _, e := range d.Endpoints {

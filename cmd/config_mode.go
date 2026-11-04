@@ -52,7 +52,9 @@ func executeConfigMode(
 		return writeConfigModeHelp(ctx, stdout, stderr)
 	}
 
+	logInputAccess(stderr, "config", configPath, false, false)
 	config, err := appconfig.Load(configPath)
+	logInputLoad(stderr, "config", configPath, err)
 	if err != nil {
 		return err
 	}

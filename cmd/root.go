@@ -20,6 +20,7 @@ var rootCmd = newRootCommand()
 
 // Execute runs the root command.
 func Execute() {
+	logReceivedArguments(os.Stderr, os.Args)
 	if hasConfigSelector(os.Args[1:]) {
 		if err := executeConfigMode(context.Background(), os.Args[1:], os.Stdout, os.Stderr, executeDNSExtract); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

@@ -21,31 +21,42 @@ func newDirectionRegistryCommand(opts *DNSExtractOptions, merge bool) *cobra.Com
 		}
 		old := direction.Document{SchemaVersion: direction.Version, AccountID: account, StreamID: opts.NetID, Endpoints: []direction.Endpoint{}}
 		if registry != "" {
+			logInputAccess(c.ErrOrStderr(), "registry", registry, false, false)
 			data, err := os.ReadFile(registry)
 			if err != nil {
+				logInputLoad(c.ErrOrStderr(), "registry", registry, err)
 				return err
 			}
 			old, err = direction.Decode(data)
 			if err != nil {
+				logInputLoad(c.ErrOrStderr(), "registry", registry, err)
 				return err
 			}
 		} else if !merge {
 			return fmt.Errorf("--registry required")
 		}
-		if err := old.ValidateRegistry(account, opts.NetID); err != nil {
+		validationErr := old.ValidateRegistry(account, opts.NetID)
+		if registry != "" {
+			logInputLoad(c.ErrOrStderr(), "registry", registry, validationErr)
+		}
+		if err := validationErr; err != nil {
 			return err
 		}
 		var data []byte
 		if merge {
+			logInputAccess(c.ErrOrStderr(), "discoveries", discoveries, false, false)
 			raw, err := os.ReadFile(discoveries)
 			if err != nil {
+				logInputLoad(c.ErrOrStderr(), "discoveries", discoveries, err)
 				return err
 			}
 			daily, err := direction.Decode(raw)
 			if err != nil {
+				logInputLoad(c.ErrOrStderr(), "discoveries", discoveries, err)
 				return err
 			}
 			d, err := direction.Merge(old, daily, account, opts.NetID, day)
+			logInputLoad(c.ErrOrStderr(), "discoveries", discoveries, err)
 			if err != nil {
 				return err
 			}

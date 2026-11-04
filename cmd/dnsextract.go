@@ -218,6 +218,7 @@ func runDNSExtractWithExecutor(cmd *cobra.Command, _ []string, opts DNSExtractOp
 
 func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	runStartedAt := time.Now().UTC()
+	logDNSExtractInputs(os.Stderr, opts)
 
 	validated, err := validateDNSExtractOptions(opts)
 	if err != nil {
@@ -229,6 +230,13 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 
 	progress.SetStage("Discovering PCAP files...")
 	files, err := pcap.DiscoverPCAPFiles(opts.ReadDir)
+	status := "discovered"
+	if err != nil {
+		status = "discovery_failed"
+	}
+	discovery := inputPathFields("read-dir", opts.ReadDir, status)
+	discovery["capture_files"] = len(files)
+	infoDiagnostic(os.Stderr, "capture_discovery", discovery)
 	if err != nil {
 		return err
 	}
@@ -242,6 +250,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	)
 	if opts.Fleet != "" {
 		loadedFleet, err := syntrail.LoadFleetIPv4File(opts.Fleet)
+		logInputLoad(os.Stderr, "fleet", opts.Fleet, err)
 		if err != nil {
 			return fmt.Errorf("load --fleet IPv4 file: %w", err)
 		}
@@ -318,6 +327,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	var ipToDNS map[string][]string
 	if strings.TrimSpace(opts.DNSIPFile) != "" {
 		ipToDNS, err = dns.LoadIPToDNSWithTopologyOverlay(opts.DNSIPFile, opts.NetID)
+		logInputLoad(os.Stderr, "dns-ip-file-with-optional-overlay", opts.DNSIPFile, err)
 		if err != nil {
 			return fmt.Errorf("load --dns-ip-file: %w", err)
 		}
@@ -548,6 +558,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	var dnsNormalizationAudit []dns.DNSNormalizationAudit
 	if strings.TrimSpace(opts.DNSNormalizationRules) != "" {
 		rules, err := dns.LoadDNSNormalizationRules(opts.DNSNormalizationRules)
+		logInputLoad(os.Stderr, "dns-normalization-rules", opts.DNSNormalizationRules, err)
 		if err != nil {
 			return fmt.Errorf("load --dns-normalization-rules: %w", err)
 		}
