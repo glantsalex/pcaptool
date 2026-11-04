@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "account_id": "fixture",
+  "stream_id": "single",
+  "endpoints": [
+    {
+      "ip": "10.4.100.58",
+      "server": {
+        "listeners": [
+          {
+            "protocol": "tcp",
+            "port": 80,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          }
+        ]
+      },
+      "probe": {
+        "targets": []
+      }
+    }
+  ]
+}

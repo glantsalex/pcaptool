@@ -455,17 +455,17 @@ func TestDnsextractFleetAdmissionIsolatesMixedCaptureArtifacts(t *testing.T) {
 		t.Fatalf("network topology tuples = %#v, want %#v", gotTopology, wantTopology)
 	}
 
-	directionSQL := mustReadTestFile(t, manifest.Files[flowDirectionCorrectionSQLKey])
-	wantLearnedClause := "AND protocol_lc = 'tcp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 80"
+	directionSQL := strings.Join(strings.Fields(mustReadTestFile(t, manifest.Files[flowDirectionCorrectionSQLKey])), " ")
+	wantLearnedClause := "src_ip = '192.168.1.20' AND src_port IN (80)"
 	if count := strings.Count(directionSQL, wantLearnedClause); count != 1 {
 		t.Fatalf("learned Fleet-A server clause count = %d, want 1 in:\n%s", count, directionSQL)
 	}
-	if count := strings.Count(directionSQL, "THEN 'private_server_"); count != 1 {
+	if count := strings.Count(directionSQL, "THEN 'learned_endpoint_reversed"); count != 1 {
 		t.Fatalf("total learned private-server clause count = %d, want 1 in:\n%s", count, directionSQL)
 	}
 	for _, excludedClause := range []string{
-		"AND src_ip = '192.168.2.20'\n       AND src_port = 1883",
-		"AND src_ip = '172.21.0.20'\n       AND src_port = 9000",
+		"'192.168.2.20'",
+		"'172.21.0.20'",
 	} {
 		if strings.Contains(directionSQL, excludedClause) {
 			t.Fatalf("excluded mixed-capture tuple %q leaked into directionality SQL:\n%s", excludedClause, directionSQL)

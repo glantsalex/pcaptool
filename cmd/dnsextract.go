@@ -102,6 +102,7 @@ func newDNSExtractCommandWithExecutor(opts *DNSExtractOptions, executor dnsExtra
 		defaults.DNSNormalizationRules,
 		"Optional YAML rules file for normalizing selected direct DNS topology names before donation.",
 	)
+	cmd.Flags().StringVar(&opts.DirectionRegistry, "direction-registry", "", "Trusted cumulative registry used to seed syslog qualification")
 	cmd.Flags().StringVar(
 		&opts.ExcludePorts,
 		"exclude-ports",
@@ -351,6 +352,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 		synTrailStartedAt := time.Now()
 		scanWorkers := effectiveFleetScanWorkers(opts.FleetScanWorkers, len(files))
 		synTrailArtifacts, err = runSYNTrailSidecar(ctx, om, files, fleet, synTrailArtifactOptions{
+			DirectionRegistry:            opts.DirectionRegistry,
 			FTPControlPorts:              ftpControlPorts,
 			FTPPassiveMinPort:            ftpPassiveMinPort,
 			ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,

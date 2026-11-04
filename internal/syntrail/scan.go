@@ -33,6 +33,9 @@ type ScanOptions struct {
 	// PacketAdmission, when non-nil, is applied immediately after packet
 	// decoding. Rejected packets cannot contribute trail evidence.
 	PacketAdmission pcaputil.PacketAdmission
+	SyslogCache     *SyslogCache
+	// SyslogEligible restricts qualification to fleet -> private nonfleet.
+	SyslogEligible func(src, dst netip.Addr) bool
 }
 
 // ScanFiles scans packet captures for raw observed IPv4 TCP SYN and eligible
@@ -50,10 +53,20 @@ func ScanFilesWithOptions(ctx context.Context, files []string, opts ScanOptions)
 	if len(files) == 0 {
 		return nil, nil
 	}
-	if opts.Workers <= 1 {
-		return scanFilesSequential(ctx, files, opts.Progress, opts.PacketAdmission)
+	cache := opts.SyslogCache
+	if cache == nil {
+		cache = NewSyslogCache()
 	}
-	return scanFilesConcurrent(ctx, files, opts.Workers, opts.Progress, opts.PacketAdmission)
+	scanner := func(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
+		return scanFileWithSyslog(ctx, path, admit, cache, opts.SyslogEligible)
+	}
+	records, err := scanFilesConcurrentWithScanner(ctx, files, opts.Workers, opts.Progress, opts.PacketAdmission, scanner)
+	for i := range records {
+		if records[i].Protocol == ProtocolUDP {
+			records[i].SyslogQualified = cache.Known(records[i].DstIP, records[i].DstPort)
+		}
+	}
+	return records, err
 }
 
 func scanFilesSequential(
@@ -279,6 +292,9 @@ func (a *scanRecordAccumulator) records() []Record {
 }
 
 func scanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
+	return scanFileWithSyslog(ctx, path, admit, NewSyslogCache(), nil)
+}
+func scanFileWithSyslog(ctx context.Context, path string, admit pcaputil.PacketAdmission, cache *SyslogCache, eligible func(netip.Addr, netip.Addr) bool) ([]Record, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -319,6 +335,10 @@ func scanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) 
 			tcpRecords = append(tcpRecords, record)
 		}
 		if record, ok := udpRecord(packet); ok {
+			if eligible != nil && eligible(record.SrcIP, record.DstIP) {
+				udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
+				record.SyslogQualified = cache.Qualify(record.DstIP, record.DstPort, udp.Payload)
+			}
 			addEarliestRecord(udpRecords, &udpOrder, record)
 		}
 	}

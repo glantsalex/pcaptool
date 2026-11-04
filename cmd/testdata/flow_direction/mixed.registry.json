@@ -1,0 +1,382 @@
+{
+  "schema_version": 1,
+  "account_id": "fixture",
+  "stream_id": "mixed",
+  "endpoints": [
+    {
+      "ip": "10.4.100.58",
+      "server": {
+        "listeners": [
+          {
+            "protocol": "tcp",
+            "port": 80,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 443,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1883,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "udp",
+            "port": 53,
+            "evidence": "syslog",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "udp",
+            "port": 6514,
+            "evidence": "syslog",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          }
+        ]
+      },
+      "probe": {
+        "targets": [
+          {
+            "protocol": "tcp",
+            "port": 22,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          }
+        ]
+      }
+    },
+    {
+      "ip": "10.4.100.59",
+      "server": {
+        "listeners": [
+          {
+            "protocol": "tcp",
+            "port": 443,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "udp",
+            "port": 6514,
+            "evidence": "syslog",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          }
+        ]
+      },
+      "probe": {
+        "targets": [
+          {
+            "protocol": "tcp",
+            "port": 80,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          }
+        ]
+      }
+    },
+    {
+      "ip": "100.65.1.1",
+      "server": {
+        "listeners": [
+          {
+            "protocol": "tcp",
+            "port": 1000,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1001,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1002,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1003,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1004,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1005,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1006,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1007,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1008,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1009,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1010,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1011,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1012,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1013,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1014,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1015,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1016,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1017,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1018,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1019,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1020,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1021,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1022,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1023,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1024,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1025,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1026,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1027,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1028,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1029,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1030,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1031,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1032,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1033,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1034,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1035,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1036,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1037,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1038,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          },
+          {
+            "protocol": "tcp",
+            "port": 1039,
+            "evidence": "tcp_syn",
+            "first_seen": "2026-10-01",
+            "last_seen": "2026-10-04"
+          }
+        ]
+      },
+      "probe": {
+        "targets": []
+      }
+    }
+  ]
+}

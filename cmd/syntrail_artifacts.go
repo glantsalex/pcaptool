@@ -2,15 +2,19 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/aglants/pcaptool/internal/direction"
 	"io"
 	"net/netip"
+	"os"
 
 	"github.com/aglants/pcaptool/internal/connectivity"
 	"github.com/aglants/pcaptool/internal/syntrail"
 )
 
 type synTrailArtifactOptions struct {
+	DirectionRegistry            string
 	FTPControlPorts              map[uint16]struct{}
 	FTPPassiveMinPort            uint16
 	ServerSummaryExcludeUDPPorts map[uint16]struct{}
@@ -31,6 +35,31 @@ func runSYNTrailSidecar(
 		return nil, nil
 	}
 
+	opt.ScanOptions.SyslogEligible = func(src, dst netip.Addr) bool {
+		return fleet.Contains(src) && !fleet.Contains(dst) && direction.Private(dst)
+	}
+	opt.ScanOptions.SyslogCache = syntrail.NewSyslogCache()
+	if opt.DirectionRegistry != "" {
+		raw, err := os.ReadFile(opt.DirectionRegistry)
+		if err != nil {
+			return nil, err
+		}
+		d, err := direction.Decode(raw)
+		if err != nil {
+			return nil, err
+		}
+		if err = d.ValidateRegistry(d.AccountID, om.NetID()); err != nil {
+			return nil, err
+		}
+		for _, e := range d.Endpoints {
+			ip, _ := netip.ParseAddr(e.IP)
+			for _, b := range e.Server.Listeners {
+				if b.Protocol == "udp" && b.Evidence == "syslog" {
+					opt.ScanOptions.SyslogCache.Add(ip, b.Port)
+				}
+			}
+		}
+	}
 	records, err := scanSYNTrailFilesWithOptions(ctx, files, opt.ScanOptions)
 	if err != nil {
 		return nil, fmt.Errorf("scan SYN trail packet captures: %w", err)
@@ -82,7 +111,25 @@ func writeSYNTrailArtifacts(
 	}
 	artifacts[privateNonFleetEndpointsKey] = path
 
-	path, err = writeFlowDirectionCorrectionSQL(om, syntrail.PrivateServerTuples(privateServerRecords))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var d direction.Document
+	if err = json.Unmarshal(raw, &d); err != nil {
+		return nil, err
+	}
+	sqlFile, err := om.Create(flowDirectionCorrectionSQLFilename)
+	if err != nil {
+		return nil, err
+	}
+	path = sqlFile.Name()
+	_, writeErr := io.WriteString(sqlFile, flowDirectionCorrectionSQLForDocument(om.NetID(), d))
+	closeErr := sqlFile.Close()
+	err = writeErr
+	if err == nil {
+		err = closeErr
+	}
 	if err != nil {
 		return nil, err
 	}

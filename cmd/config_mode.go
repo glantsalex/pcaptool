@@ -61,6 +61,7 @@ func executeConfigMode(
 		return err
 	}
 
+	opts.DirectionRegistry = cli.directionRegistry
 	if len(cli.ignored) > 0 {
 		fmt.Fprintf(stderr, "warning: --config is authoritative; ignored CLI options: %s\n", strings.Join(cli.ignored, ", "))
 	}
@@ -119,9 +120,10 @@ func extractConfigSelector(args []string) (string, []string, error) {
 }
 
 type configModeCLIValues struct {
-	readDir       string
-	ignored       []string
-	helpRequested bool
+	readDir           string
+	directionRegistry string
+	ignored           []string
+	helpRequested     bool
 }
 
 func validateConfigModeCLI(ctx context.Context, args []string) (configModeCLIValues, error) {
@@ -175,13 +177,14 @@ func validateConfigModeCLI(ctx context.Context, args []string) (configModeCLIVal
 	}
 	sort.Strings(ignored)
 	return configModeCLIValues{
-		readDir: parsed.ReadDir,
-		ignored: ignored,
+		readDir:           parsed.ReadDir,
+		directionRegistry: parsed.DirectionRegistry,
+		ignored:           ignored,
 	}, nil
 }
 
 func isConfigModeEffectiveFlag(name string) bool {
-	return name == configFlagName || name == "help" || name == "no-banner" || name == "read-dir"
+	return name == configFlagName || name == "help" || name == "no-banner" || name == "read-dir" || name == "direction-registry"
 }
 
 func clearRequiredAnnotation(flag *pflag.Flag) {

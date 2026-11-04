@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aglants/pcaptool/internal/direction"
 	"github.com/aglants/pcaptool/internal/syntrail"
 )
 
@@ -169,19 +170,19 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 	assertFlowDirectionCorrectionSQL(t, om, []string{
 		"`{{gcp_project_id}}.{{bq_dataset}}.mv-flow-data-404163-1`",
 		"`{{gcp_project_id}}.{{bq_dataset}}.flow-data-404163-1`",
-		"WHEN (NOT src_is_private) AND dst_is_private",
+		"WHEN NOT src_is_private AND dst_is_private",
 		"THEN 'public_to_private_artifact'",
-		"AND protocol_lc = 'tcp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 8443",
-		"THEN 'private_server_192_168_1_20_8443_tcp_seen_as_src_artifact'",
-		"AND protocol_lc = 'udp'\n       AND src_ip = '10.4.0.230'\n       AND src_port = 53",
-		"THEN 'private_server_10_4_0_230_53_udp_seen_as_src_artifact'",
+		"src_ip = '192.168.1.20' AND src_port IN (8443)",
+		"THEN 'learned_endpoint_reversed'",
+		"protocol_lc = 'udp' AND src_port = 53 AND dst_port != 53",
+		"THEN 'udp_dns_response'",
 		"END AS swap_reason",
 	}, []string{
 		"AS swap_reason\nFROM decide",
 	})
 	sql := readSYNTrailFile(t, om, flowDirectionCorrectionSQLFilename)
-	assertSubstringOrder(t, sql, "THEN 'public_to_private_artifact'", "private_server_192_168_1_20_8443_tcp_seen_as_src_artifact")
-	assertSubstringOrder(t, sql, "private_server_192_168_1_20_8443_tcp_seen_as_src_artifact", "private_server_10_4_0_230_53_udp_seen_as_src_artifact")
+	assertSubstringOrder(t, sql, "THEN 'public_to_private_artifact'", "udp_dns_response")
+	assertSubstringOrder(t, sql, "udp_dns_response", "learned_endpoint_reversed")
 	finalSelectIdx := strings.LastIndex(sql, "\nSELECT\n")
 	if finalSelectIdx == -1 {
 		t.Fatalf("flow direction SQL missing final SELECT: %q", sql)
@@ -316,7 +317,7 @@ func TestWriteSYNTrailArtifactsFlowDirectionSQLDedupesDuplicatePrivateServerTupl
 	}
 
 	sql := readSYNTrailFile(t, om, flowDirectionCorrectionSQLFilename)
-	if got := strings.Count(sql, "private_server_10_4_0_230_53_udp_seen_as_src_artifact"); got != 1 {
+	if got := strings.Count(sql, "THEN 'udp_dns_response'"); got != 1 {
 		t.Fatalf("duplicate private server SQL rule count = %d, want 1", got)
 	}
 }
@@ -582,12 +583,12 @@ func TestWriteSYNTrailArtifactsFiltersPassiveFTPOnlyFromServerSummaries(t *testi
 		},
 	})
 	assertFlowDirectionCorrectionSQL(t, om, []string{
-		"AND protocol_lc = 'tcp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 21000",
-		"AND protocol_lc = 'udp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 17900",
+		"src_ip = '192.168.1.20' AND src_port IN (21000)",
 	}, []string{
-		"src_port = 17736",
-		"src_port = 17845",
-		"src_port = 40000",
+		"17900",
+		"17736",
+		"17845",
+		"40000",
 	})
 
 	assertSYNTrailFileContains(t, om, "fleet-to-public-trail.csv", "10.0.0.1,203.0.113.10,40000,tcp")
@@ -654,11 +655,11 @@ func TestWriteSYNTrailArtifactsExcludesUDPPortsOnlyFromServerSummaries(t *testin
 		},
 	})
 	assertFlowDirectionCorrectionSQL(t, om, []string{
-		"AND protocol_lc = 'udp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 33433",
-		"AND protocol_lc = 'udp'\n       AND src_ip = '192.168.1.20'\n       AND src_port = 33535",
+		"THEN 'udp_dns_response'",
 	}, []string{
-		"src_port = 33434",
-		"src_port = 33534",
+		"33433", "33535",
+		"33434",
+		"33534",
 	})
 
 	assertSYNTrailFileContains(t, om, "fleet-to-public-trail.csv", "10.0.0.1,203.0.113.10,33434,udp")
@@ -763,7 +764,7 @@ var expectedSYNTrailArtifacts = []expectedSYNTrailArtifact{
 	{
 		filename: flowDirectionCorrectionSQLFilename,
 		key:      flowDirectionCorrectionSQLKey,
-		header:   flowDirectionCorrectionSQL("net", nil),
+		header:   flowDirectionCorrectionSQLForDocument("net", direction.Document{}),
 	},
 }
 
@@ -826,7 +827,7 @@ func assertPrivateNonFleetEndpointsDocument(
 func assertFlowDirectionCorrectionSQL(t *testing.T, om *OutputManager, wantContains []string, wantAbsent []string) {
 	t.Helper()
 
-	got := readSYNTrailFile(t, om, flowDirectionCorrectionSQLFilename)
+	got := strings.Join(strings.Fields(readSYNTrailFile(t, om, flowDirectionCorrectionSQLFilename)), " ")
 	for _, want := range wantContains {
 		if !strings.Contains(got, want) {
 			t.Fatalf("%s = %q, want substring %q", flowDirectionCorrectionSQLFilename, got, want)

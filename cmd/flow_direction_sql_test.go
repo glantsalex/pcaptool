@@ -1,220 +1,226 @@
 package cmd
 
 import (
-	"fmt"
-	"net/netip"
+	"context"
+	"encoding/json"
+	"math/rand"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/aglants/pcaptool/internal/syntrail"
+	"github.com/aglants/pcaptool/internal/direction"
 )
 
-func TestFlowDirectionPrivateIPv4SQLUsesExactNetworkRanges(t *testing.T) {
-	predicate := flowDirectionPrivateIPv4SQL("candidate_ip")
-	wantPredicate := `COALESCE(
-      (
-        NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(candidate_ip), 8) = NET.IP_FROM_STRING('10.0.0.0')
-        OR NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(candidate_ip), 12) = NET.IP_FROM_STRING('172.16.0.0')
-        OR NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(candidate_ip), 16) = NET.IP_FROM_STRING('192.168.0.0')
-        OR NET.IP_TRUNC(NET.SAFE_IP_FROM_STRING(candidate_ip), 10) = NET.IP_FROM_STRING('100.64.0.0')
-      ),
-      FALSE
-    )`
-	if predicate != wantPredicate {
-		t.Fatalf("private IPv4 predicate = %q, want %q", predicate, wantPredicate)
+func directionFixture(t *testing.T, name string) direction.Document {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "flow_direction", name+".registry.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	prefixes := flowDirectionPrivatePrefixesFromSQL(t, predicate, "candidate_ip")
+	d, err := direction.Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = d.ValidateRegistry(d.AccountID, d.StreamID); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
 
-	wantPrefixes := map[netip.Prefix]struct{}{
-		netip.MustParsePrefix("10.0.0.0/8"):     {},
-		netip.MustParsePrefix("172.16.0.0/12"):  {},
-		netip.MustParsePrefix("192.168.0.0/16"): {},
-		netip.MustParsePrefix("100.64.0.0/10"):  {},
+func TestDirectionSQLSnapshotsAndIndependentBaseline(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal("python3 is required for independent SQL equivalence tests")
 	}
-	if len(prefixes) != len(wantPrefixes) {
-		t.Fatalf("private IPv4 prefix count = %d, want %d: %v", len(prefixes), len(wantPrefixes), prefixes)
-	}
-	for _, prefix := range prefixes {
-		if _, ok := wantPrefixes[prefix]; !ok {
-			t.Fatalf("unexpected private IPv4 prefix %s in generated SQL", prefix)
-		}
-		delete(wantPrefixes, prefix)
-	}
-	if len(wantPrefixes) != 0 {
-		t.Fatalf("generated SQL missing private IPv4 prefixes: %v", wantPrefixes)
-	}
-
-	tests := []struct {
-		address string
-		want    bool
-	}{
-		{address: "10.0.0.0", want: true},
-		{address: "10.0.0.1", want: true},
-		{address: "10.1.2.3", want: true},
-		{address: "10.255.255.255", want: true},
-		{address: "172.16.0.0", want: true},
-		{address: "172.16.0.1", want: true},
-		{address: "172.31.255.254", want: true},
-		{address: "172.31.255.255", want: true},
-		{address: "192.168.0.0", want: true},
-		{address: "192.168.1.1", want: true},
-		{address: "192.168.255.255", want: true},
-		{address: "100.64.0.0", want: true},
-		{address: "100.64.0.1", want: true},
-		{address: "100.65.1.1", want: true},
-		{address: "100.104.1.1", want: true},
-		{address: "100.127.255.254", want: true},
-		{address: "100.127.255.255", want: true},
-		{address: "172.15.255.254", want: false},
-		{address: "172.15.255.255", want: false},
-		{address: "172.32.0.0", want: false},
-		{address: "172.32.0.1", want: false},
-		{address: "100.63.255.254", want: false},
-		{address: "100.63.255.255", want: false},
-		{address: "100.128.0.0", want: false},
-		{address: "100.128.0.1", want: false},
-		{address: "8.8.8.8", want: false},
-		{address: "not-an-ip", want: false},
-		{address: "fd00::1", want: false},
-		{address: "::ffff:10.0.0.1", want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.address, func(t *testing.T) {
-			if got := testAddressMatchesPrivatePrefixes(tt.address, prefixes); got != tt.want {
-				t.Fatalf("generated private IPv4 predicate match for %q = %v, want %v", tt.address, got, tt.want)
+	for _, name := range []string{"empty", "single", "mixed", "404163-1"} {
+		t.Run(name, func(t *testing.T) {
+			d := directionFixture(t, name)
+			sql := flowDirectionCorrectionSQLForDocument(d.StreamID, d)
+			golden, err := os.ReadFile(filepath.Join("testdata", "flow_direction", name+".sql"))
+			if err != nil {
+				t.Fatal(err)
 			}
+			if sql != string(golden) {
+				t.Fatalf("generated SQL differs from reviewed snapshot %s.sql", name)
+			}
+			assertDirectionFormatting(t, sql)
+			path := filepath.Join(t.TempDir(), "generated.sql")
+			if err = os.WriteFile(path, []byte(sql), 0600); err != nil {
+				t.Fatal(err)
+			}
+			before := filepath.Join("testdata", "flow_direction", name+".before.sql")
+			output, err := exec.Command(python, filepath.Join("testdata", "flow_direction", "compare_sql.py"), before, path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("baseline equivalence: %v\n%s", err, output)
+			}
+			t.Log(strings.TrimSpace(string(output)))
 		})
 	}
 }
 
-func TestFlowDirectionCorrectionSQLCGNATFleetLearnedServerDirection(t *testing.T) {
-	tuple := syntrail.ServerTuple{
-		DstIP:    netip.MustParseAddr("192.168.1.20"),
-		DstPort:  80,
-		Protocol: syntrail.ProtocolTCP,
+func assertDirectionFormatting(t *testing.T, sql string) {
+	t.Helper()
+	if strings.Contains(sql, `\n`) {
+		t.Fatal("literal escaped newlines in SQL")
 	}
-	sql := flowDirectionCorrectionSQL("net", []syntrail.ServerTuple{tuple})
-
+	for i, line := range strings.Split(sql, "\n") {
+		if len(line) > directionSQLLineWidth {
+			t.Fatalf("line %d exceeds width: %d", i+1, len(line))
+		}
+		if strings.Contains(line, "WHEN ") && strings.Contains(line, "THEN ") {
+			t.Fatalf("single-line CASE branch: %s", line)
+		}
+		if strings.Contains(line, "THEN ") && !strings.HasPrefix(line, "        THEN ") {
+			t.Fatalf("THEN alignment: %s", line)
+		}
+	}
 	for _, want := range []string{
-		flowDirectionPrivateIPv4SQL("src_ip") + " AS src_is_private",
-		flowDirectionPrivateIPv4SQL("dst_ip") + " AS dst_is_private",
+		"WITH parsed AS (", "\nbase AS (", "\nlearned AS (", "\ndecide AS (",
+		"      WHEN NOT src_is_private\n        AND dst_is_private\n        THEN 'public_to_private_artifact'",
+		"      WHEN src_is_private AND dst_is_private\n        AND protocol_lc = 'udp'\n        AND src_port = 53\n        AND dst_port != 53\n        THEN 'udp_dns_response'",
 	} {
 		if !strings.Contains(sql, want) {
-			t.Fatalf("flow direction SQL missing %q:\n%s", want, sql)
+			t.Fatalf("format missing %q", want)
 		}
 	}
-	genericClause := "WHEN (NOT src_is_private) AND dst_is_private\n" +
-		"        THEN 'public_to_private_artifact'"
-	learnedClause := "WHEN src_is_private\n" +
-		"       AND dst_is_private\n" +
-		"       AND protocol_lc = 'tcp'\n" +
-		"       AND src_ip = '192.168.1.20'\n" +
-		"       AND src_port = 80\n" +
-		"        THEN 'private_server_192_168_1_20_80_tcp_seen_as_src_artifact'"
-	genericIndex := strings.Index(sql, genericClause)
-	if genericIndex == -1 {
-		t.Fatalf("flow direction SQL missing generic direction clause:\n%s", sql)
+	if strings.Contains(sql, "SELECT\n    *") || strings.Contains(sql, "SELECT *") {
+		t.Fatal("implicit projection")
 	}
-	learnedIndex := strings.Index(sql, learnedClause)
-	if learnedIndex == -1 {
-		t.Fatalf("flow direction SQL missing learned private-server clause:\n%s", sql)
+	if strings.Count(sql, "NET.SAFE_IP_FROM_STRING(src_ip)") != 1 || strings.Count(sql, "NET.SAFE_IP_FROM_STRING(dst_ip)") != 1 {
+		t.Fatal("IP parsing not named once")
 	}
-	if genericIndex >= learnedIndex {
-		t.Fatalf("generic clause index %d, want before learned clause index %d", genericIndex, learnedIndex)
-	}
+}
 
-	prefixes := flowDirectionPrivatePrefixesFromSQL(t, flowDirectionPrivateIPv4SQL("candidate_ip"), "candidate_ip")
-	tests := []struct {
-		name     string
-		srcIP    string
-		dstIP    string
-		srcPort  uint16
-		wantSwap string
-	}{
-		{
-			name:    "correct fleet to server direction is retained",
-			srcIP:   "100.65.1.1",
-			dstIP:   "192.168.1.20",
-			srcPort: 49152,
-		},
-		{
-			name:     "reversed server to fleet direction uses learned server tuple",
-			srcIP:    "192.168.1.20",
-			dstIP:    "100.65.1.1",
-			srcPort:  80,
-			wantSwap: "private_server_192_168_1_20_80_tcp_seen_as_src_artifact",
-		},
+func TestDirectionRuleMirrorsMatchActualBaseline(t *testing.T) {
+	d := directionFixture(t, "404163-1")
+	rules := directionRules(d)
+	before, err := os.ReadFile(filepath.Join("testdata", "flow_direction", "404163-1.before.sql"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := testFlowDirectionSwapReason(tt.srcIP, tt.dstIP, tt.srcPort, "tcp", prefixes, []syntrail.ServerTuple{tuple})
-			if got != tt.wantSwap {
-				t.Fatalf("swap reason = %q, want %q", got, tt.wantSwap)
+	re := regexp.MustCompile(`\(protocol_lc = '(tcp|udp)' AND (src_ip|dst_ip) = '([^']+)' AND (src_port|dst_port) = ([0-9]+)\)`)
+	split := strings.SplitN(string(before), " AND NOT (", 2)
+	if len(split) != 2 {
+		t.Fatal("baseline missing forward suppression")
+	}
+	reverse, forward := re.FindAllStringSubmatch(split[0], -1), re.FindAllStringSubmatch(split[1], -1)
+	if len(reverse) != 71 || len(forward) != 71 || len(rules) != 71 {
+		t.Fatal("reviewed fixture changed")
+	}
+	render := func(r directionRule) string {
+		return r.protocol + "/" + r.ipSide.column("ip") + "/" + r.ip + "/" + r.portSide.column("port") + "/" + fmtPort(r.port)
+	}
+	want := map[string]bool{}
+	wantForward := map[string]bool{}
+	for _, m := range reverse {
+		want[strings.Join(m[1:], "/")] = true
+	}
+	for _, m := range forward {
+		wantForward[strings.Join(m[1:], "/")] = true
+	}
+	if len(want) != 71 || len(wantForward) != 71 {
+		t.Fatal("baseline contains duplicates")
+	}
+	for _, r := range rules {
+		if !want[render(r)] || !wantForward[render(r.mirror())] {
+			t.Fatalf("lost rule or exact mirror: %+v", r)
+		}
+		if r.mirror().mirror() != r {
+			t.Fatal("mirror is not an involution")
+		}
+	}
+	if len(groupDirectionRules(rules)) != 38 {
+		t.Fatal("actual fixture grouping changed")
+	}
+}
+
+func TestDirectionGroupingAndDeterminism(t *testing.T) {
+	d := directionFixture(t, "mixed")
+	reference := flowDirectionCorrectionSQLForDocument(d.StreamID, d)
+	rules := directionRules(d)
+	groups := groupDirectionRules(rules)
+	want := map[directionRule]bool{}
+	for _, r := range rules {
+		want[r] = true
+	}
+	for _, g := range groups {
+		for _, port := range g.ports {
+			r := directionRule{g.key.protocol, g.key.ipSide, g.key.ip, g.key.portSide, port}
+			if !want[r] {
+				t.Fatalf("group introduced rule: %+v", r)
 			}
-		})
+			delete(want, r)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatal("group lost scalar rules")
+	}
+	// Independent selectors, protocol and IP all distinguish groups.
+	base := directionRule{"tcp", directionSource, "10.0.0.1", directionSource, 80}
+	variants := []directionRule{base, base.mirror(), {"tcp", directionDestination, "10.0.0.1", directionSource, 80}, {"udp", directionSource, "10.0.0.1", directionSource, 80}, {"tcp", directionSource, "10.0.0.2", directionSource, 80}}
+	if len(groupDirectionRules(variants)) != len(variants) {
+		t.Fatal("merged incompatible qualifiers")
+	}
+	rng := rand.New(rand.NewSource(1))
+	for i := 0; i < 20; i++ {
+		rng.Shuffle(len(d.Endpoints), func(i, j int) { d.Endpoints[i], d.Endpoints[j] = d.Endpoints[j], d.Endpoints[i] })
+		for j := range d.Endpoints {
+			e := &d.Endpoints[j]
+			rng.Shuffle(len(e.Server.Listeners), func(a, b int) {
+				e.Server.Listeners[a], e.Server.Listeners[b] = e.Server.Listeners[b], e.Server.Listeners[a]
+			})
+			rng.Shuffle(len(e.Probe.Targets), func(a, b int) { e.Probe.Targets[a], e.Probe.Targets[b] = e.Probe.Targets[b], e.Probe.Targets[a] })
+		}
+		if got := flowDirectionCorrectionSQLForDocument(d.StreamID, d); got != reference {
+			t.Fatal("input order changed SQL")
+		}
+	}
+	d.Endpoints = append(d.Endpoints, d.Endpoints...)
+	if got := flowDirectionCorrectionSQLForDocument(d.StreamID, d); got != reference {
+		t.Fatal("duplicate rule changed SQL")
+	}
+	if !strings.Contains(reference, "IN (\n") {
+		t.Fatal("long port list not wrapped")
 	}
 }
 
-func flowDirectionPrivatePrefixesFromSQL(t *testing.T, predicate, column string) []netip.Prefix {
-	t.Helper()
-	pattern := regexp.MustCompile(
-		`NET\.IP_TRUNC\(NET\.SAFE_IP_FROM_STRING\(` + regexp.QuoteMeta(column) + `\), ([0-9]+)\) = NET\.IP_FROM_STRING\('([^']+)'\)`,
-	)
-	matches := pattern.FindAllStringSubmatch(predicate, -1)
-	if len(matches) == 0 {
-		t.Fatalf("no private IPv4 network terms found in generated SQL predicate %q", predicate)
-	}
-
-	prefixes := make([]netip.Prefix, 0, len(matches))
-	for _, match := range matches {
-		bits, err := strconv.Atoi(match[1])
-		if err != nil {
-			t.Fatalf("parse prefix length %q: %v", match[1], err)
+func TestDirectionDNSGuardDependsOnLearnedUDP(t *testing.T) {
+	for _, name := range []string{"empty", "single", "404163-1", "mixed"} {
+		d := directionFixture(t, name)
+		sql := flowDirectionCorrectionSQLForDocument(d.StreamID, d)
+		if strings.Contains(sql, "AND (src_port = 53 OR dst_port = 53)") != (name == "mixed") {
+			t.Fatalf("wrong DNS guard for %s", name)
 		}
-		prefix, err := netip.ParsePrefix(fmt.Sprintf("%s/%d", match[2], bits))
-		if err != nil {
-			t.Fatalf("parse generated private IPv4 prefix %q/%d: %v", match[2], bits, err)
-		}
-		prefixes = append(prefixes, prefix)
 	}
-	return prefixes
+	d := directionFixture(t, "mixed")
+	before, _ := json.Marshal(d)
+	_ = flowDirectionCorrectionSQLForDocument(d.StreamID, d)
+	after, _ := json.Marshal(d)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("renderer mutated registry")
+	}
 }
 
-func testAddressMatchesPrivatePrefixes(address string, prefixes []netip.Prefix) bool {
-	addr, err := netip.ParseAddr(address)
-	if err != nil || !addr.Is4() || addr.Is4In6() {
-		return false
+func TestDirectionCLIAndDailyRenderingShareFormatting(t *testing.T) {
+	d := directionFixture(t, "mixed")
+	out := filepath.Join(t.TempDir(), "rendered.sql")
+	root := newRootCommand()
+	root.SetArgs([]string{"render-flow-direction-sql", "--net-id", d.StreamID, "--account", d.AccountID, "--registry", filepath.Join("testdata", "flow_direction", "mixed.registry.json"), "--output", out, "--no-banner"})
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	for _, prefix := range prefixes {
-		if prefix.Contains(addr) {
-			return true
-		}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return false
+	if string(data) != flowDirectionCorrectionSQLForDocument(d.StreamID, d) {
+		t.Fatal("CLI changed formatted SQL")
+	}
 }
 
-func testFlowDirectionSwapReason(
-	srcIP string,
-	dstIP string,
-	srcPort uint16,
-	protocol string,
-	prefixes []netip.Prefix,
-	tuples []syntrail.ServerTuple,
-) string {
-	srcPrivate := testAddressMatchesPrivatePrefixes(srcIP, prefixes)
-	dstPrivate := testAddressMatchesPrivatePrefixes(dstIP, prefixes)
-	if !srcPrivate && dstPrivate {
-		return "public_to_private_artifact"
-	}
-	for _, tuple := range tuples {
-		if srcPrivate && dstPrivate &&
-			strings.EqualFold(protocol, string(tuple.Protocol)) &&
-			srcIP == tuple.DstIP.String() &&
-			srcPort == tuple.DstPort {
-			return privateServerSwapReason(tuple)
-		}
-	}
-	return ""
-}
+func fmtPort(p uint16) string { return strconv.Itoa(int(p)) }

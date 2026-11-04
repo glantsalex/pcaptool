@@ -18,11 +18,12 @@ const (
 // Record represents observed TCP SYN attempt evidence or inferred UDP edge
 // evidence from captured traffic.
 type Record struct {
-	SrcIP     netip.Addr
-	DstIP     netip.Addr
-	DstPort   uint16
-	Protocol  Protocol
-	Timestamp time.Time
+	SrcIP           netip.Addr
+	DstIP           netip.Addr
+	DstPort         uint16
+	Protocol        Protocol
+	Timestamp       time.Time
+	SyslogQualified bool // Positive payload evidence or trusted registry seed for destination.
 }
 
 // Bucket identifies a SYN trail classification bucket.

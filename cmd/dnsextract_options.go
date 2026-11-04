@@ -16,6 +16,7 @@ type DNSExtractOptions struct {
 	EnforcePrivateAsSource       bool
 	ReadDir                      string
 	Fleet                        string
+	DirectionRegistry            string
 	FleetScanWorkers             int
 	Format                       string
 	ExportCSV                    string

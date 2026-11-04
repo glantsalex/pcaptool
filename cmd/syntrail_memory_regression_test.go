@@ -3,7 +3,9 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/aglants/pcaptool/internal/direction"
 	"io"
 	"net/netip"
 	"os"
@@ -212,7 +214,12 @@ func legacyFleetArtifactBytes(t *testing.T, buckets syntrail.BucketedRecords, op
 	write("public-servers-unique.csv", func(w io.Writer) error { return syntrail.WritePublicServersCSV(w, publicSummary) })
 	write(privateNonFleetEndpointsFilename, func(w io.Writer) error { return syntrail.WritePrivateNonFleetEndpointsJSON(w, privateSummary, probes) })
 	write(flowDirectionCorrectionSQLFilename, func(w io.Writer) error {
-		return writeFlowDirectionCorrectionSQLContent(w, netID, syntrail.PrivateServerTuples(privateSummary))
+		var d direction.Document
+		if err := json.Unmarshal(files[privateNonFleetEndpointsFilename], &d); err != nil {
+			return err
+		}
+		_, err := io.WriteString(w, flowDirectionCorrectionSQLForDocument(netID, d))
+		return err
 	})
 	if opt.Debug {
 		write("fleet-to-public-trail.csv", func(w io.Writer) error { return syntrail.WriteProtocolTrailCSV(w, public) })

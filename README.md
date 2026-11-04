@@ -820,3 +820,49 @@ Reasoning:
 ## License
 
 Apache-2.0
+
+
+## Cumulative direction registry integration
+
+Daily `private-nonfleet-endpoints.json` retains daily counts. Qualified UDP syslog
+listeners add `evidence: "syslog"`; packet headers are inspected in the existing
+trail scan, bounded to 128 bytes. A positive `(IP, UDP, port)` cache is shared
+across workers. Truncated bodies are supported when the header is complete.
+`--direction-registry /path/to/registry.json` seeds qualified listeners for later
+runs and is permitted with `--config` as a runtime input.
+
+Two offline commands implement the producer-owned schema and SQL contract:
+
+```bash
+pcaptool merge-direction-registry --account 301686 --net-id 301686-1 \
+  --discoveries /path/to/daily/private-nonfleet-endpoints.json \
+  --date 2026-10-10 --output /tmp/registry.json --no-banner
+# On later merges, add --registry /path/to/previous-registry.json.
+pcaptool render-flow-direction-sql --account 301686 --net-id 301686-1 \
+  --registry /tmp/registry.json --output /tmp/correction.sql --no-banner
+```
+
+Registry entries accumulate first/last PCAP data dates per IP/role/transport,
+without summing daily counts or expiring silent endpoints. Legacy TCP daily
+entries use the existing initial-SYN contract. Historical UDP entries lacking
+positive syslog evidence are not promoted. Registry identity/schema mismatch
+fails. PTI manages cloud persistence, placeholders, leasing and BigQuery jobs;
+these commands perform no cloud operations.
+
+Generated SQL now covers TCP probes as well as servers, qualified syslog UDP,
+and private/private UDP DNS (`src_port = 53 AND dst_port != 53`). Opposing learned
+roles preserve observed direction; unknown private traffic is unchanged. The
+existing public-to-private policy and paired field projection are retained.
+The daily SQL describes that day's evidence; PTI must use the cumulative renderer
+to retain previous days' knowledge.
+
+Optional operational sample validation (sample is not committed):
+
+```bash
+PCAP_SYSLOG_SAMPLE=/path/to/syslog-packets-sample.pcapng \
+  go test ./internal/syntrail -run TestOperationalSyslogSample -bench BenchmarkSyslog -benchmem
+```
+
+The supplied sample test expects the reviewed 24-packet capture. Normal tests use
+synthetic packets. The SQL behavior test uses Python 3's standard SQLite module;
+BigQuery DDL and IAM still require staging validation.

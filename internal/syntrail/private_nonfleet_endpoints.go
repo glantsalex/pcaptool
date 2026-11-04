@@ -39,6 +39,7 @@ type TransportBehavior struct {
 	Protocol          string `json:"protocol"`
 	Port              uint16 `json:"port"`
 	FleetDevicesCount int    `json:"fleet_devices_count"`
+	Evidence          string `json:"evidence,omitempty"`
 }
 
 type transportPortKey struct {
@@ -96,6 +97,22 @@ func buildPrivateNonFleetEndpointsDocument(serverRecords, probeRecords []Record)
 				Targets: transportBehaviors(accumulator.targets),
 			},
 		})
+	}
+	qualified := make(map[syslogEndpoint]bool)
+	for _, r := range serverRecords {
+		if r.Protocol == ProtocolUDP && r.SyslogQualified {
+			qualified[syslogEndpoint{r.DstIP, r.DstPort}] = true
+		}
+	}
+	for i := range document.Endpoints {
+		e := &document.Endpoints[i]
+		ip, _ := netip.ParseAddr(e.IP)
+		for j := range e.Server.Listeners {
+			b := &e.Server.Listeners[j]
+			if b.Protocol == "udp" && qualified[syslogEndpoint{ip, b.Port}] {
+				b.Evidence = "syslog"
+			}
+		}
 	}
 	return document
 }

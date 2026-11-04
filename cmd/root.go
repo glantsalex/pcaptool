@@ -100,5 +100,6 @@ func newRootCommandWithExecutor(executor dnsExtractExecutor) *cobra.Command {
 	}
 
 	cmd.AddCommand(newDNSExtractCommandWithExecutor(&opts, executor))
+	cmd.AddCommand(newDirectionRegistryCommand(&opts, true), newDirectionRegistryCommand(&opts, false))
 	return cmd
 }
