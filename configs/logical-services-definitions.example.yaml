@@ -1,0 +1,25 @@
+# Illustrative namespaces only; review against your own capture before use.
+schema_version: 1
+services:
+  - id: team_viewer
+    name: TeamViewer
+  - id: xenon_platform
+    name: XENON platform
+rules:
+  - id: team_viewer
+    priority: 100
+    service_id: team_viewer
+    match:
+      dns_suffix: [teamviewer.com]
+      transports:
+        - proto: tcp
+          ports: [80, 443, 5938]
+  - id: xenon_platform
+    priority: 100
+    service_id: xenon_platform
+    match:
+      dns_suffix: [gridx.ai, gridx.de]
+      dns_regex: ['^gridx-de-ds-[a-z0-9-]+\.s3\.[a-z0-9-]+\.amazonaws\.com$']
+      transports:
+        - proto: tcp
+          ports: [443]

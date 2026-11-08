@@ -36,6 +36,7 @@ func TestDNSExtractCLIFlagContract(t *testing.T) {
 		{name: "allow-private-dns-donation", defaultVal: "false", valueType: "bool"},
 		{name: "ignore-ntp", defaultVal: "true", valueType: "bool"},
 		{name: "dns-ip-file", defaultVal: "", valueType: "string"},
+		{name: "logical-services", defaultVal: "", valueType: "string"},
 		{name: "dns-normalization-rules", defaultVal: "", valueType: "string"},
 		{name: "exclude-ports", defaultVal: "53", valueType: "string"},
 		{name: "ftp-control-ports", defaultVal: "21,990", valueType: "string"},

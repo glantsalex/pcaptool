@@ -144,27 +144,16 @@ func boundedQuotedErrorValue(value string) string {
 	return strconv.QuoteToASCII(value)
 }
 
-type selectorKind uint8
-
-const (
-	selectorDNSExact selectorKind = iota + 1
-	selectorDNSSuffix
-	selectorDNSContains
-	selectorDNSRegex
-	selectorDstIPCIDR
-)
-
 type compiledRule struct {
-	id           string
-	serviceID    string
-	priority     uint32
-	kind         selectorKind
-	exact        map[string]struct{}
-	alternatives []string
-	regexes      []*regexp.Regexp
-	cidrs        []netip.Prefix
-	anyPort      bool
-	ports        map[uint16]struct{}
+	id        string
+	serviceID string
+	priority  uint32
+	exact     map[string]struct{}
+	suffixes  []string
+	contains  []string
+	regexes   []*regexp.Regexp
+	cidrs     []netip.Prefix
+	ports     map[uint16]struct{}
 }
 
 // Classifier is an immutable logical-service classifier. A Classifier is safe
@@ -211,15 +200,13 @@ func NewClassifier(catalog *Catalog, rules *Rules) (*Classifier, error) {
 				source.ServiceID,
 			)
 		}
-		compiled, err := compileClassifierRule(source)
-		if err != nil {
-			return nil, fmt.Errorf("new logical-service classifier: rule %q: %w", source.ID, err)
+		for _, transport := range source.Match.Transports {
+			compiled, err := compileClassifierRule(source, transport)
+			if err != nil {
+				return nil, fmt.Errorf("new logical-service classifier: rule %q: %w", source.ID, err)
+			}
+			byProtocol[transport.Proto] = append(byProtocol[transport.Proto], compiled)
 		}
-		protocol := source.Match.Protocol
-		if protocol != "tcp" && protocol != "udp" {
-			return nil, fmt.Errorf("new logical-service classifier: validated rule %q has unsupported protocol %q", source.ID, protocol)
-		}
-		byProtocol[protocol] = append(byProtocol[protocol], compiled)
 	}
 
 	for protocol := range byProtocol {
@@ -236,51 +223,25 @@ func NewClassifier(catalog *Catalog, rules *Rules) (*Classifier, error) {
 	return &Classifier{rulesByProtocol: byProtocol}, nil
 }
 
-func compileClassifierRule(source *Rule) (compiledRule, error) {
-	match := source.Match
-	compiled := compiledRule{
-		id:        source.ID,
-		serviceID: source.ServiceID,
-		priority:  *source.Priority,
-		anyPort:   match.AnyPort != nil && *match.AnyPort,
+func compileClassifierRule(source *Rule, transport Transport) (compiledRule, error) {
+	m := source.Match
+	if transport.Proto != "tcp" && transport.Proto != "udp" {
+		return compiledRule{}, fmt.Errorf("unsupported protocol %q", transport.Proto)
 	}
-	if !compiled.anyPort {
-		compiled.ports = make(map[uint16]struct{}, len(match.Ports))
-		for _, port := range match.Ports {
-			compiled.ports[port] = struct{}{}
-		}
+	if len(m.compiledRegexes) != len(m.DNSRegex) || len(m.compiledCIDRs) != len(m.DstIPCIDRs) {
+		return compiledRule{}, fmt.Errorf("compiled selector state is incomplete")
 	}
-
-	switch {
-	case len(match.DNSExact) > 0:
-		compiled.kind = selectorDNSExact
-		compiled.exact = make(map[string]struct{}, len(match.DNSExact))
-		for _, value := range match.DNSExact {
-			compiled.exact[value] = struct{}{}
-		}
-	case len(match.DNSSuffix) > 0:
-		compiled.kind = selectorDNSSuffix
-		compiled.alternatives = append([]string(nil), match.DNSSuffix...)
-	case len(match.DNSContains) > 0:
-		compiled.kind = selectorDNSContains
-		compiled.alternatives = append([]string(nil), match.DNSContains...)
-	case len(match.DNSRegex) > 0:
-		if len(match.compiledRegexes) != len(match.DNSRegex) {
-			return compiledRule{}, fmt.Errorf("compiled regex state is incomplete")
-		}
-		compiled.kind = selectorDNSRegex
-		compiled.regexes = append([]*regexp.Regexp(nil), match.compiledRegexes...)
-	case len(match.DstIPCIDRs) > 0:
-		if len(match.compiledCIDRs) != len(match.DstIPCIDRs) {
-			return compiledRule{}, fmt.Errorf("compiled CIDR state is incomplete")
-		}
-		compiled.kind = selectorDstIPCIDR
-		compiled.cidrs = append([]netip.Prefix(nil), match.compiledCIDRs...)
-	default:
-		return compiledRule{}, fmt.Errorf("endpoint selector is missing")
+	r := compiledRule{id: source.ID, serviceID: source.ServiceID, priority: *source.Priority,
+		exact: make(map[string]struct{}, len(m.DNSExact)), suffixes: append([]string(nil), m.DNSSuffix...),
+		contains: append([]string(nil), m.DNSContains...), regexes: append([]*regexp.Regexp(nil), m.compiledRegexes...),
+		cidrs: append([]netip.Prefix(nil), m.compiledCIDRs...), ports: make(map[uint16]struct{}, len(transport.Ports))}
+	for _, v := range m.DNSExact {
+		r.exact[v] = struct{}{}
 	}
-
-	return compiled, nil
+	for _, port := range transport.Ports {
+		r.ports[port] = struct{}{}
+	}
+	return r, nil
 }
 
 type preparedEndpoint struct {
@@ -451,49 +412,30 @@ func (c *Classifier) classifyEndpoint(
 }
 
 func (r compiledRule) matches(endpoint preparedEndpoint) bool {
-	if !r.anyPort {
-		if _, ok := r.ports[endpoint.original.DstPort]; !ok {
-			return false
-		}
+	if _, ok := r.ports[endpoint.original.DstPort]; !ok {
+		return false
 	}
-	switch r.kind {
-	case selectorDNSExact:
-		if endpoint.dns == "" {
-			return false
+	if endpoint.dns != "" {
+		if _, ok := r.exact[endpoint.dns]; ok {
+			return true
 		}
-		_, ok := r.exact[endpoint.dns]
-		return ok
-	case selectorDNSSuffix:
-		if endpoint.dns == "" {
-			return false
-		}
-		for _, suffix := range r.alternatives {
+		for _, suffix := range r.suffixes {
 			if endpoint.dns == suffix || strings.HasSuffix(endpoint.dns, "."+suffix) {
 				return true
 			}
 		}
-	case selectorDNSContains:
-		if endpoint.dns == "" {
-			return false
-		}
-		for _, value := range r.alternatives {
+		for _, value := range r.contains {
 			if strings.Contains(endpoint.dns, value) {
 				return true
 			}
-		}
-	case selectorDNSRegex:
-		if endpoint.dns == "" {
-			return false
 		}
 		for _, re := range r.regexes {
 			if re.MatchString(endpoint.dns) {
 				return true
 			}
 		}
-	case selectorDstIPCIDR:
-		if !endpoint.hasIP || !endpoint.ip.Is4() {
-			return false
-		}
+	}
+	if endpoint.hasIP && endpoint.ip.Is4() {
 		for _, prefix := range r.cidrs {
 			if prefix.Contains(endpoint.ip) {
 				return true

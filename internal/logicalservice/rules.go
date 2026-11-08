@@ -18,7 +18,7 @@ type Rules struct {
 	validated bool
 }
 
-// Rule maps one endpoint selector, protocol, and port policy to a service ID.
+// Rule maps alternative endpoint selectors and bound transports to a service ID.
 // Priority zero and equal priorities are valid configuration. Lower numeric
 // priority wins during classification. More than one matching rule at the
 // lowest matching priority is a fatal classification conflict, whether those
@@ -31,21 +31,25 @@ type Rule struct {
 	Match     *RuleMatch `yaml:"match"`
 }
 
-// RuleMatch defines one endpoint selector plus a protocol and port policy.
+// RuleMatch combines endpoint selectors with OR, then ANDs them with a transport.
 // Selector and port fields are lists only; scalar-or-list YAML is unsupported.
 type RuleMatch struct {
-	DNSExact    []string `yaml:"dns_exact"`
-	DNSSuffix   []string `yaml:"dns_suffix"`
-	DNSRegex    []string `yaml:"dns_regex"`
-	DNSContains []string `yaml:"dns_contains"`
-	DstIPCIDRs  []string `yaml:"dst_ip_cidrs"`
+	DNSExact    []string `yaml:"dns_exact,omitempty"`
+	DNSSuffix   []string `yaml:"dns_suffix,omitempty"`
+	DNSRegex    []string `yaml:"dns_regex,omitempty"`
+	DNSContains []string `yaml:"dns_contains,omitempty"`
+	DstIPCIDRs  []string `yaml:"dst_ip_cidrs,omitempty"`
 
-	Protocol string   `yaml:"protocol"`
-	Ports    []uint16 `yaml:"ports"`
-	AnyPort  *bool    `yaml:"any_port"`
+	Transports []Transport `yaml:"transports"`
 
 	compiledRegexes []*regexp.Regexp
 	compiledCIDRs   []netip.Prefix
+}
+
+// Transport binds one protocol to its explicit destination ports.
+type Transport struct {
+	Proto string   `yaml:"proto"`
+	Ports []uint16 `yaml:"ports"`
 }
 
 // LoadRules reads and strictly validates a logical-service rules YAML file

@@ -28,6 +28,7 @@ type DNSExtractOptions struct {
 	IgnoreNTP                    bool
 	DNSIPFile                    string
 	DNSNormalizationRules        string
+	LogicalServices              string
 	ExcludePorts                 string
 	FTPControlPorts              string
 	FTPPassiveMinPort            string

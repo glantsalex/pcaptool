@@ -4,6 +4,8 @@ Act as a world-class network-traffic analyst, DNS naming expert, and determinist
 
 Your task is to convert observed network endpoint tuples into proposed logical-service catalog entries and matching rules.
 
+Follow the [current NTM-to-LSM guide](../../doc/logical-services-mapping-guidelines.md): prefer flat, coarse platform groupings, retain observed members for drill-down, and leave unsupported ownership claims unresolved. The [runtime contract](../architecture/lsm-implementation.md) defines the executable schema.
+
 You will receive one or more 3-tuples in this form:
 
 ```text
@@ -160,10 +162,9 @@ rules:
       dns_exact:
         - endpoint.example.com
 
-      protocol: tcp
-
-      ports:
-        - 443
+      transports:
+        - proto: tcp
+          ports: [443]
 ```
 
 Every rule must contain:
@@ -178,9 +179,9 @@ match
 Every match must contain:
 
 ```text
-exactly one DNS selector
-exactly one protocol
-exactly one port policy
+one or more DNS selector alternatives
+a nonempty transports list with unique protocols
+a nonempty explicit ports list per transport
 ```
 
 Since the supplied input contains DNS, port, and protocol only, use only these selectors:
@@ -198,7 +199,7 @@ Do not create `dst_ip_cidrs` rules because destination-IP evidence was not suppl
 
 # DNS selector guidance
 
-Use the narrowest rule that still captures the intended stable logical service.
+Use the broadest defensible namespace that captures the intended coarse platform without crossing ownership boundaries.
 
 ## `dns_exact`
 
@@ -311,53 +312,24 @@ tcp
 udp
 ```
 
-Use one protocol per rule.
-
-If the same service is observed over both TCP and UDP, create separate rules.
-
-Example:
+Use explicit transport alternatives within one rule:
 
 ```yaml
-- id: google_software_update_tcp
+- id: google_api_gateway
   priority: 100
-  service_id: google_software_update
-
+  service_id: google_api_gateway
   match:
-    dns_exact:
-      - update.googleapis.com
-    protocol: tcp
-    ports:
-      - 443
-
-- id: google_software_update_udp
-  priority: 100
-  service_id: google_software_update
-
-  match:
-    dns_exact:
-      - update.googleapis.com
-    protocol: udp
-    ports:
-      - 443
+    dns_suffix: [googleapis.com]
+    transports:
+      - proto: tcp
+        ports: [80, 443]
+      - proto: udp
+        ports: [443]
 ```
 
-Use `ports` when specific observed ports are meaningful:
-
-```yaml
-ports:
-  - 443
-  - 8443
-```
-
-Use:
-
-```yaml
-any_port: true
-```
-
-only when the service identity is intentionally independent of destination port and the supplied evidence supports that abstraction.
-
-Do not infer `any_port: true` from one observed port alone.
+This permits TCP/80, TCP/443, and UDP/443, never UDP/80.
+Use only justified ports. Wildcard ports and the `any_port` field are
+unsupported. Each protocol appears at most once per rule.
 
 Multiple DNS names and multiple ports in one rule create a cross-product.
 
@@ -368,9 +340,9 @@ dns_exact:
   - a.example.com
   - b.example.com
 
-ports:
-  - 443
-  - 8443
+transports:
+  - proto: tcp
+    ports: [443, 8443]
 ```
 
 matches:
@@ -428,7 +400,7 @@ Good reasons to group:
 numbered DNS shards of the same backend
 regional replicas of the same service
 several ports belonging to the same explicitly identifiable service
-TCP and UDP variants of the same service, represented by separate rules but one catalog entry
+TCP and UDP variants of the same service, represented by explicit transport alternatives in one rule
 legacy and current hostnames clearly serving the same purpose
 multiple backend endpoints that are intentionally irrelevant as separate identities
 ```
@@ -545,36 +517,26 @@ Confidence is review metadata only. Do not put it into YAML.
 
 ## 3. Proposed `logical-services.yaml`
 
-Return one complete valid YAML document:
+Return one complete definitions YAML document suitable for `--logical-services`:
 
 ```yaml
 schema_version: 1
-
 services:
   ...
-```
-
-Sort services by `id`.
-
-## 4. Proposed `logical-services-rules.yaml`
-
-Return one complete valid YAML document:
-
-```yaml
-schema_version: 1
-
 rules:
   ...
 ```
+
+Sort services by `id`. Keep rationale and confidence outside the runtime YAML.
 
 Rules must:
 
 ```text
 reference valid proposed service IDs
 use unique rule IDs
-use exactly one selector
-use exactly one protocol
-use exactly one port policy
+use one or more selector alternatives (OR)
+use explicit transport alternatives
+use one nonempty ports list per protocol
 avoid same-priority overlap
 be deterministically ordered by service ID, priority, and rule ID
 ```
@@ -616,9 +578,9 @@ All IDs match ^[a-z][a-z0-9_]*$.
 Service IDs are unique.
 Rule IDs are unique.
 Every rule references an existing service.
-Every rule has exactly one DNS selector.
-Every rule has exactly one protocol.
-Every rule has exactly one port policy.
+Every rule has at least one DNS selector; alternatives are ORed.
+Every rule has a nonempty transports list with unique protocols.
+Every transport has an explicit nonempty ports list.
 Ports are between 1 and 65535.
 No scalar ports: 443 syntax is used.
 No wildcard is used in dns_exact or dns_suffix.

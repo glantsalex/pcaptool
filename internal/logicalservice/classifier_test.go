@@ -28,25 +28,25 @@ func TestNewClassifierCompilesImmutableState(t *testing.T) {
 		"regex_rule",
 		"300",
 		"example_service",
-		"dns_regex: ['api\\.example\\.com']\n      protocol: tcp\n      ports: [443]",
+		"dns_regex: ['api\\.example\\.com']\n      transports:\n        - proto: tcp\n          ports: [443]",
 	) +
 		ruleBody(
 			"cidr_rule",
 			"200",
 			"example_service",
-			"dst_ip_cidrs: [192.0.2.0/24]\n      protocol: udp\n      any_port: true",
+			"dst_ip_cidrs: [192.0.2.0/24]\n      transports:\n        - proto: udp\n          ports: [443, 65535]",
 		) +
 		ruleBody(
 			"exact_later_id",
 			"100",
 			"example_service",
-			"dns_exact: [later.example.com]\n      protocol: tcp\n      ports: [443, 8443]",
+			"dns_exact: [later.example.com]\n      transports:\n        - proto: tcp\n          ports: [443, 8443]",
 		) +
 		ruleBody(
 			"exact_earlier_id",
 			"100",
 			"example_service",
-			"dns_exact: [earlier.example.com]\n      protocol: tcp\n      ports: [443]",
+			"dns_exact: [earlier.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 		)
 	catalog, rules := loadClassifierModels(t, validCatalogYAML, rulesYAML)
 	controlCatalog, controlRules := loadClassifierModels(t, validCatalogYAML, rulesYAML)
@@ -86,7 +86,7 @@ func TestNewClassifierRejectsInvalidConstruction(t *testing.T) {
 			"example_rule",
 			"1",
 			"example_service",
-			"dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+			"dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 		),
 	)
 	tests := []struct {
@@ -112,7 +112,7 @@ func TestNewClassifierRejectsInvalidConstruction(t *testing.T) {
 func TestClassifierDNSExact(t *testing.T) {
 	classifier := classifierForMatch(
 		t,
-		"dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+		"dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 	)
 	tests := []struct {
 		name string
@@ -139,7 +139,7 @@ func TestClassifierDNSExact(t *testing.T) {
 func TestClassifierDNSSuffixUsesLabelBoundary(t *testing.T) {
 	classifier := classifierForMatch(
 		t,
-		"dns_suffix: [tnsi.eu.com]\n      protocol: tcp\n      ports: [443]",
+		"dns_suffix: [tnsi.eu.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 	)
 	tests := []struct {
 		name string
@@ -166,7 +166,7 @@ func TestClassifierDNSSuffixUsesLabelBoundary(t *testing.T) {
 func TestClassifierDNSContains(t *testing.T) {
 	classifier := classifierForMatch(
 		t,
-		"dns_contains: [ocpp]\n      protocol: tcp\n      ports: [443]",
+		"dns_contains: [ocpp]\n      transports:\n        - proto: tcp\n          ports: [443]",
 	)
 	tests := []struct {
 		name string
@@ -196,7 +196,7 @@ func TestClassifierDNSRegexIsFullCanonicalHostname(t *testing.T) {
 			"example_rule",
 			"1",
 			"example_service",
-			"dns_regex: ['api\\.example\\.com']\n      protocol: tcp\n      ports: [443]",
+			"dns_regex: ['api\\.example\\.com']\n      transports:\n        - proto: tcp\n          ports: [443]",
 		),
 	)
 	source := rules.Rules[0].Match.DNSRegex[0]
@@ -236,36 +236,36 @@ func TestClassifierIPv4CIDR(t *testing.T) {
 	}{
 		{
 			name:     "host prefix",
-			selector: "dst_ip_cidrs: [192.0.2.17/32]\n      protocol: tcp\n      ports: [443]",
+			selector: "dst_ip_cidrs: [192.0.2.17/32]\n      transports:\n        - proto: tcp\n          ports: [443]",
 			endpoint: Endpoint{DstIP: "192.0.2.17", Protocol: "tcp", DstPort: 443},
 			want:     true,
 		},
 		{
 			name:     "range lower boundary",
-			selector: "dst_ip_cidrs: [192.0.2.0/24]\n      protocol: tcp\n      ports: [443]",
+			selector: "dst_ip_cidrs: [192.0.2.0/24]\n      transports:\n        - proto: tcp\n          ports: [443]",
 			endpoint: Endpoint{DstIP: "192.0.2.0", Protocol: "tcp", DstPort: 443},
 			want:     true,
 		},
 		{
 			name:     "range upper boundary",
-			selector: "dst_ip_cidrs: [192.0.2.0/24]\n      protocol: tcp\n      ports: [443]",
+			selector: "dst_ip_cidrs: [192.0.2.0/24]\n      transports:\n        - proto: tcp\n          ports: [443]",
 			endpoint: Endpoint{DstIP: "192.0.2.255", Protocol: "tcp", DstPort: 443},
 			want:     true,
 		},
 		{
 			name:     "outside range",
-			selector: "dst_ip_cidrs: [192.0.2.0/24]\n      protocol: tcp\n      ports: [443]",
+			selector: "dst_ip_cidrs: [192.0.2.0/24]\n      transports:\n        - proto: tcp\n          ports: [443]",
 			endpoint: Endpoint{DstIP: "192.0.3.0", Protocol: "tcp", DstPort: 443},
 		},
 		{
 			name:     "DNS does not disable IP match",
-			selector: "dst_ip_cidrs: [192.0.2.0/24]\n      protocol: tcp\n      ports: [443]",
+			selector: "dst_ip_cidrs: [192.0.2.0/24]\n      transports:\n        - proto: tcp\n          ports: [443]",
 			endpoint: Endpoint{DNS: "api.example.com", DstIP: "192.0.2.17", Protocol: "tcp", DstPort: 443},
 			want:     true,
 		},
 		{
 			name:     "IPv6 does not match IPv4 CIDR",
-			selector: "dst_ip_cidrs: [192.0.2.0/24]\n      protocol: tcp\n      ports: [443]",
+			selector: "dst_ip_cidrs: [192.0.2.0/24]\n      transports:\n        - proto: tcp\n          ports: [443]",
 			endpoint: Endpoint{DstIP: "2001:db8::1", Protocol: "tcp", DstPort: 443},
 		},
 	}
@@ -288,41 +288,41 @@ func TestClassifierProtocolAndPortPolicies(t *testing.T) {
 	}{
 		{
 			name:     "TCP",
-			match:    "dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+			match:    "dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 			endpoint: Endpoint{DNS: "api.example.com", Protocol: "tcp", DstPort: 443},
 			want:     true,
 		},
 		{
 			name:     "UDP",
-			match:    "dns_exact: [api.example.com]\n      protocol: udp\n      ports: [53]",
+			match:    "dns_exact: [api.example.com]\n      transports:\n        - proto: udp\n          ports: [53]",
 			endpoint: Endpoint{DNS: "api.example.com", Protocol: "udp", DstPort: 53},
 			want:     true,
 		},
 		{
 			name:     "protocol canonicalization",
-			match:    "dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+			match:    "dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 			endpoint: Endpoint{DNS: "api.example.com", Protocol: " TCP ", DstPort: 443},
 			want:     true,
 		},
 		{
 			name:     "protocol mismatch",
-			match:    "dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+			match:    "dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 			endpoint: Endpoint{DNS: "api.example.com", Protocol: "udp", DstPort: 443},
 		},
 		{
 			name:     "configured port",
-			match:    "dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443, 8443]",
+			match:    "dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443, 8443]",
 			endpoint: Endpoint{DNS: "api.example.com", Protocol: "tcp", DstPort: 8443},
 			want:     true,
 		},
 		{
 			name:     "port mismatch",
-			match:    "dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+			match:    "dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 			endpoint: Endpoint{DNS: "api.example.com", Protocol: "tcp", DstPort: 8443},
 		},
 		{
-			name:     "any port",
-			match:    "dns_exact: [api.example.com]\n      protocol: tcp\n      any_port: true",
+			name:     "maximum port",
+			match:    "dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443, 65535]",
 			endpoint: Endpoint{DNS: "api.example.com", Protocol: "tcp", DstPort: 65535},
 			want:     true,
 		},
@@ -340,7 +340,7 @@ func TestClassifierProtocolAndPortPolicies(t *testing.T) {
 func TestClassifierEndpointValidation(t *testing.T) {
 	classifier := classifierForMatch(
 		t,
-		"dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+		"dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 	)
 	tests := []struct {
 		name      string
@@ -388,7 +388,7 @@ func TestClassifierEndpointValidation(t *testing.T) {
 func TestClassifierAllowsDNSOnlyAndIPv6DNSMatch(t *testing.T) {
 	classifier := classifierForMatch(
 		t,
-		"dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+		"dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 	)
 	tests := []struct {
 		name  string
@@ -643,7 +643,7 @@ func TestConflictErrorStringIsBoundedButDetailsAreComplete(t *testing.T) {
 func TestClassifierBatchOrderAndInputImmutability(t *testing.T) {
 	classifier := classifierForMatch(
 		t,
-		"dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+		"dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 	)
 	endpoints := []Endpoint{
 		{SubjectID: "matched", DNS: " API.Example.COM. ", Protocol: " TCP ", DstPort: 443},
@@ -672,7 +672,7 @@ func TestClassifierBatchOrderAndInputImmutability(t *testing.T) {
 func TestClassifierEmptyBatch(t *testing.T) {
 	result, err := classifierForMatch(
 		t,
-		"dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+		"dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 	).Classify(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("Classify() error = %v", err)
@@ -685,7 +685,7 @@ func TestClassifierEmptyBatch(t *testing.T) {
 func TestClassifierCancellationReturnsNoPartialResult(t *testing.T) {
 	classifier := classifierForMatch(
 		t,
-		"dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+		"dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 	)
 	endpoints := make([]Endpoint, 100)
 	for i := range endpoints {
@@ -705,7 +705,7 @@ func TestClassifierCancellationReturnsNoPartialResult(t *testing.T) {
 func TestClassifierAlreadyCancelledContext(t *testing.T) {
 	classifier := classifierForMatch(
 		t,
-		"dns_exact: [api.example.com]\n      protocol: tcp\n      ports: [443]",
+		"dns_exact: [api.example.com]\n      transports:\n        - proto: tcp\n          ports: [443]",
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -791,15 +791,15 @@ func compiledRuleIDs(rules []compiledRule) []string {
 }
 
 func exactMatch(dns string) string {
-	return "dns_exact: [" + dns + "]\n      protocol: tcp\n      ports: [443]"
+	return "dns_exact: [" + dns + "]\n      transports:\n        - proto: tcp\n          ports: [443]"
 }
 
 func suffixMatch(dns string) string {
-	return "dns_suffix: [" + dns + "]\n      protocol: tcp\n      ports: [443]"
+	return "dns_suffix: [" + dns + "]\n      transports:\n        - proto: tcp\n          ports: [443]"
 }
 
 func containsMatch(dns string) string {
-	return "dns_contains: [" + dns + "]\n      protocol: tcp\n      ports: [443]"
+	return "dns_contains: [" + dns + "]\n      transports:\n        - proto: tcp\n          ports: [443]"
 }
 
 type cancelAfterErrChecksContext struct {

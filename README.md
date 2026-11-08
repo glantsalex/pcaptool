@@ -307,6 +307,41 @@ Useful as a higher-level service inventory view with:
 
 ### Optional / conditional outputs
 
+#### Logical services maps (LSM)
+
+Enable the final LSM stage with:
+
+```bash
+pcaptool dnsextract -r ./captures --net-id my-stream \
+  --logical-services ./configs/logical-services-definitions.example.yaml
+```
+
+Or set `dnsextract.logical_services` to a definitions path in YAML configuration.
+Review the example's services and rules for your capture before using it.
+Definitions combine `schema_version: 1`, a flat `services` catalog, and `rules`.
+Rules support mixed DNS selectors (OR) and explicit `transports` alternatives.
+For example, TCP ports `[80,443]` plus UDP ports `[443]` does not permit UDP/80.
+`match.transports` is the initial supported format. Each transport requires
+`proto` and an explicit `ports` list; wildcard ports are not supported.
+
+When neither the CLI nor YAML specifies a definitions file, LSM is disabled and
+the existing artifacts are generated normally. A configured file that is missing,
+unreadable, or invalid fails the run before capture processing.
+
+LSM consumes finalized NTM and includes only public destination IPs. It preserves
+unmatched public observations and does not modify NTM. The run directory receives
+capture-date-prefixed definitions, full/compact/short maps, and a count summary:
+`<stream-id>-<YYYYMMDD>-device-services.full.json`, `.compact.json`, `.short.json`,
+`<stream-id>-<YYYYMMDD>-logical-services.yaml`, and
+`<stream-id>-<YYYYMMDD>-logical-services-summary.json`.
+They are registered in `_run-artifacts.json` before post-hooks execute.
+
+The compact map uses zero-based dictionary references; the short map contains
+only issuer IDs and observed service/name/protocol/port combinations.
+See the [rule creation guide](doc/logical-services-mapping-guidelines.md) and
+[runtime contract](docs/architecture/lsm-implementation.md) for matching,
+public-address scope, output schemas, and failure behavior.
+
 #### `dns-unresolved-dns.txt`
 
 Packet-observed complete DNS names that remain unresolved after final topology attribution, including optional active matrix completion and DNS donation.

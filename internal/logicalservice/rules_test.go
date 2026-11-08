@@ -14,12 +14,12 @@ func TestLoadRulesValidSelectorsAndPolicies(t *testing.T) {
 		name  string
 		match string
 	}{
-		{name: "dns exact", match: "dns_exact: [api.example.invalid]\n      protocol: tcp\n      ports: [443]"},
-		{name: "dns suffix any port", match: "dns_suffix: [example.invalid]\n      protocol: TCP\n      any_port: true"},
-		{name: "dns contains", match: "dns_contains: [gateway]\n      protocol: udp\n      ports: [53]"},
-		{name: "dns regex", match: "dns_regex: ['[a-z]+\\.example\\.invalid']\n      protocol: tcp\n      ports: [443]"},
-		{name: "IPv4 CIDR", match: "dst_ip_cidrs: [192.0.2.0/24]\n      protocol: tcp\n      ports: [443, 8443]"},
-		{name: "IPv4 host prefix", match: "dst_ip_cidrs: [203.0.113.17/32]\n      protocol: tcp\n      ports: [443]"},
+		{name: "dns exact", match: "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          ports: [443]"},
+		{name: "dns suffix", match: "dns_suffix: [example.invalid]\n      transports:\n        - proto: TCP\n          ports: [443]"},
+		{name: "dns contains", match: "dns_contains: [gateway]\n      transports:\n        - proto: udp\n          ports: [53]"},
+		{name: "dns regex", match: "dns_regex: ['[a-z]+\\.example\\.invalid']\n      transports:\n        - proto: tcp\n          ports: [443]"},
+		{name: "IPv4 CIDR", match: "dst_ip_cidrs: [192.0.2.0/24]\n      transports:\n        - proto: tcp\n          ports: [443, 8443]"},
+		{name: "IPv4 host prefix", match: "dst_ip_cidrs: [203.0.113.17/32]\n      transports:\n        - proto: tcp\n          ports: [443]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -27,15 +27,15 @@ func TestLoadRulesValidSelectorsAndPolicies(t *testing.T) {
 			if len(rules.Rules) != 1 || rules.Rules[0].Priority == nil || *rules.Rules[0].Priority != 0 {
 				t.Fatalf("LoadRules() = %#v", rules)
 			}
-			if rules.Rules[0].Match.Protocol != "tcp" && rules.Rules[0].Match.Protocol != "udp" {
-				t.Fatalf("protocol not canonicalized: %q", rules.Rules[0].Match.Protocol)
+			if rules.Rules[0].Match.Transports[0].Proto != "tcp" && rules.Rules[0].Match.Transports[0].Proto != "udp" {
+				t.Fatalf("protocol not canonicalized: %q", rules.Rules[0].Match.Transports[0].Proto)
 			}
 		})
 	}
 }
 
 func TestLoadRulesValidation(t *testing.T) {
-	validMatch := "dns_exact: [api.example.invalid]\n      protocol: tcp\n      ports: [443]"
+	validMatch := "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          ports: [443]"
 	tests := []struct {
 		name    string
 		yaml    string
@@ -52,29 +52,28 @@ func TestLoadRulesValidation(t *testing.T) {
 		{name: "missing service id", yaml: ruleYAML("example_rule", "1", "", validMatch), wantErr: "service_id is required"},
 		{name: "unknown service", yaml: ruleYAML("example_rule", "1", "missing_service", validMatch), wantErr: "not present in the catalog"},
 		{name: "missing match", yaml: ruleYAML("example_rule", "1", "example_service", ""), wantErr: "match block is required"},
-		{name: "missing selector", yaml: ruleYAML("example_rule", "1", "example_service", "protocol: tcp\n      ports: [443]"), wantErr: "exactly one endpoint selector is required"},
-		{name: "multiple selectors", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      dns_suffix: [example.invalid]\n      protocol: tcp\n      ports: [443]"), wantErr: "exactly one endpoint selector is allowed"},
-		{name: "empty selector", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: []\n      protocol: tcp\n      ports: [443]"), wantErr: "selector must not be empty"},
+		{name: "missing selector", yaml: ruleYAML("example_rule", "1", "example_service", "transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "at least one endpoint selector is required"},
+		{name: "empty selector", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: []\n      transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "selector must not be empty"},
 		{name: "unknown field", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protcol: tcp\n      ports: [443]"), wantErr: "field protcol not found"},
-		{name: "unsupported protocol", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protocol: icmp\n      ports: [443]"), wantErr: "use tcp or udp"},
-		{name: "missing port policy", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protocol: tcp"), wantErr: "exactly one port policy"},
-		{name: "ports plus any port", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protocol: tcp\n      ports: [443]\n      any_port: true"), wantErr: "cannot both be set"},
-		{name: "any port false", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protocol: tcp\n      any_port: false"), wantErr: "false is invalid"},
-		{name: "empty ports", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protocol: tcp\n      ports: []"), wantErr: "list must not be empty"},
-		{name: "zero port", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protocol: tcp\n      ports: [0]"), wantErr: "valid range 1-65535"},
-		{name: "overflow port", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protocol: tcp\n      ports: [65536]"), wantErr: "cannot unmarshal"},
-		{name: "negative port", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protocol: tcp\n      ports: [-1]"), wantErr: "cannot unmarshal"},
-		{name: "duplicate port", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protocol: tcp\n      ports: [443, 443]"), wantErr: "duplicate value 443"},
-		{name: "invalid regex", yaml: ruleYAML("example_rule", "1", "example_service", "dns_regex: ['[unterminated']\n      protocol: tcp\n      ports: [443]"), wantErr: "invalid RE2 expression"},
-		{name: "unsupported regex", yaml: ruleYAML("example_rule", "1", "example_service", "dns_regex: ['foo(?=bar)']\n      protocol: tcp\n      ports: [443]"), wantErr: "invalid RE2 expression"},
-		{name: "duplicate regex", yaml: ruleYAML("example_rule", "1", "example_service", "dns_regex: ['foo', ' foo ']\n      protocol: tcp\n      ports: [443]"), wantErr: "duplicate expression"},
-		{name: "invalid CIDR", yaml: ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: [not-a-prefix]\n      protocol: tcp\n      ports: [443]"), wantErr: "invalid CIDR"},
-		{name: "host bits", yaml: ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: [203.0.113.17/24]\n      protocol: tcp\n      ports: [443]"), wantErr: "use \"203.0.113.0/24\""},
-		{name: "duplicate CIDR", yaml: ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: [192.0.2.0/24, ' 192.0.2.0/24 ']\n      protocol: tcp\n      ports: [443]"), wantErr: "duplicate canonical prefix"},
-		{name: "IPv6", yaml: ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: ['2001:db8::/32']\n      protocol: tcp\n      ports: [443]"), wantErr: "IPv6 CIDRs are not supported by logical-service schema version 1"},
-		{name: "mapped IPv6", yaml: ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: ['::ffff:192.0.2.0/120']\n      protocol: tcp\n      ports: [443]"), wantErr: "IPv4-mapped IPv6 CIDRs are not supported"},
-		{name: "scalar selector", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: api.example.invalid\n      protocol: tcp\n      ports: [443]"), wantErr: "cannot unmarshal"},
-		{name: "scalar ports", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      protocol: tcp\n      ports: 443"), wantErr: "cannot unmarshal"},
+		{name: "unsupported protocol", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      transports:\n        - proto: icmp\n          ports: [443]"), wantErr: "use tcp or udp"},
+		{name: "missing port policy", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp"), wantErr: "list must not be empty"},
+		{name: "ports plus any port", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          ports: [443]\n          any_port: true"), wantErr: "field any_port not found"},
+		{name: "any port false", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          any_port: false"), wantErr: "field any_port not found"},
+		{name: "empty ports", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          ports: []"), wantErr: "list must not be empty"},
+		{name: "zero port", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          ports: [0]"), wantErr: "valid range 1-65535"},
+		{name: "overflow port", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          ports: [65536]"), wantErr: "cannot unmarshal"},
+		{name: "negative port", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          ports: [-1]"), wantErr: "cannot unmarshal"},
+		{name: "duplicate port", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          ports: [443, 443]"), wantErr: "duplicate value 443"},
+		{name: "invalid regex", yaml: ruleYAML("example_rule", "1", "example_service", "dns_regex: ['[unterminated']\n      transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "invalid RE2 expression"},
+		{name: "unsupported regex", yaml: ruleYAML("example_rule", "1", "example_service", "dns_regex: ['foo(?=bar)']\n      transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "invalid RE2 expression"},
+		{name: "duplicate regex", yaml: ruleYAML("example_rule", "1", "example_service", "dns_regex: ['foo', ' foo ']\n      transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "duplicate expression"},
+		{name: "invalid CIDR", yaml: ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: [not-a-prefix]\n      transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "invalid CIDR"},
+		{name: "host bits", yaml: ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: [203.0.113.17/24]\n      transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "use \"203.0.113.0/24\""},
+		{name: "duplicate CIDR", yaml: ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: [192.0.2.0/24, ' 192.0.2.0/24 ']\n      transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "duplicate canonical prefix"},
+		{name: "IPv6", yaml: ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: ['2001:db8::/32']\n      transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "IPv6 CIDRs are not supported by logical-service schema version 1"},
+		{name: "mapped IPv6", yaml: ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: ['::ffff:192.0.2.0/120']\n      transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "IPv4-mapped IPv6 CIDRs are not supported"},
+		{name: "scalar selector", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: api.example.invalid\n      transports:\n        - proto: tcp\n          ports: [443]"), wantErr: "cannot unmarshal"},
+		{name: "scalar ports", yaml: ruleYAML("example_rule", "1", "example_service", "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          ports: 443"), wantErr: "cannot unmarshal"},
 		{name: "multiple documents", yaml: ruleYAML("example_rule", "1", "example_service", validMatch) + "---\nschema_version: 1\nrules: []\n", wantErr: "multiple YAML documents"},
 	}
 
@@ -106,7 +105,7 @@ func TestLoadRulesDNSExactAccepted(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			selector := "dns_exact: ['" + tt.value + "']"
-			rules := loadRulesYAML(t, ruleYAML("example_rule", "1", "example_service", selector+"\n      protocol: tcp\n      ports: [443]"))
+			rules := loadRulesYAML(t, ruleYAML("example_rule", "1", "example_service", selector+"\n      transports:\n        - proto: tcp\n          ports: [443]"))
 			got := rules.Rules[0].Match.DNSExact[0]
 			if got != tt.want {
 				t.Fatalf("canonical selector = %q, want %q", got, tt.want)
@@ -136,7 +135,7 @@ func TestLoadRulesDNSExactRejected(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			match := tt.selector + "\n      protocol: tcp\n      ports: [443]"
+			match := tt.selector + "\n      transports:\n        - proto: tcp\n          ports: [443]"
 			catalog := loadCatalogYAML(t, validCatalogYAML)
 			path := writeTestFile(t, "rules.yaml", ruleYAML("example_rule", "1", "example_service", match))
 			_, err := LoadRules(path, catalog)
@@ -163,7 +162,7 @@ func TestLoadRulesDNSSuffixAccepted(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			selector := "dns_suffix: ['" + tt.value + "']"
-			rules := loadRulesYAML(t, ruleYAML("example_rule", "1", "example_service", selector+"\n      protocol: tcp\n      ports: [443]"))
+			rules := loadRulesYAML(t, ruleYAML("example_rule", "1", "example_service", selector+"\n      transports:\n        - proto: tcp\n          ports: [443]"))
 			got := rules.Rules[0].Match.DNSSuffix[0]
 			if got != tt.want {
 				t.Fatalf("canonical selector = %q, want %q", got, tt.want)
@@ -193,7 +192,7 @@ func TestLoadRulesDNSSuffixRejected(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			match := tt.selector + "\n      protocol: tcp\n      ports: [443]"
+			match := tt.selector + "\n      transports:\n        - proto: tcp\n          ports: [443]"
 			catalog := loadCatalogYAML(t, validCatalogYAML)
 			path := writeTestFile(t, "rules.yaml", ruleYAML("example_rule", "1", "example_service", match))
 			_, err := LoadRules(path, catalog)
@@ -216,7 +215,7 @@ func TestLoadRulesDNSContainsValidationAndCanonicalization(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			match := tt.selector + "\n      protocol: tcp\n      ports: [443]"
+			match := tt.selector + "\n      transports:\n        - proto: tcp\n          ports: [443]"
 			catalog := loadCatalogYAML(t, validCatalogYAML)
 			path := writeTestFile(t, "rules.yaml", ruleYAML("example_rule", "1", "example_service", match))
 			rules, err := LoadRules(path, catalog)
@@ -235,7 +234,7 @@ func TestLoadRulesDNSContainsValidationAndCanonicalization(t *testing.T) {
 }
 
 func TestLoadRulesAllowsEqualPriorities(t *testing.T) {
-	match := "dns_exact: [api.example.invalid]\n      protocol: tcp\n      ports: [443]"
+	match := "dns_exact: [api.example.invalid]\n      transports:\n        - proto: tcp\n          ports: [443]"
 	yaml := ruleYAML("first_rule", "0", "example_service", match) +
 		ruleBody("second_rule", "0", "example_service", match)
 
@@ -251,7 +250,7 @@ func TestLoadRulesAllowsEqualPriorities(t *testing.T) {
 }
 
 func TestLoadRulesCompilesRegexWithoutRewritingSource(t *testing.T) {
-	rules := loadRulesYAML(t, ruleYAML("example_rule", "1", "example_service", "dns_regex: ['  API\\.Example\\.Invalid  ']\n      protocol: tcp\n      ports: [443]"))
+	rules := loadRulesYAML(t, ruleYAML("example_rule", "1", "example_service", "dns_regex: ['  API\\.Example\\.Invalid  ']\n      transports:\n        - proto: tcp\n          ports: [443]"))
 	match := rules.Rules[0].Match
 	if got := match.DNSRegex[0]; got != `API\.Example\.Invalid` {
 		t.Fatalf("regex source = %q", got)
@@ -265,7 +264,7 @@ func TestLoadRulesCompilesRegexWithoutRewritingSource(t *testing.T) {
 }
 
 func TestLoadRulesCompilesIPv4CIDRsOnce(t *testing.T) {
-	rules := loadRulesYAML(t, ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: [192.0.2.0/24]\n      protocol: tcp\n      ports: [443]"))
+	rules := loadRulesYAML(t, ruleYAML("example_rule", "1", "example_service", "dst_ip_cidrs: [192.0.2.0/24]\n      transports:\n        - proto: tcp\n          ports: [443]"))
 	match := rules.Rules[0].Match
 	if len(match.compiledCIDRs) != 1 || match.compiledCIDRs[0].String() != "192.0.2.0/24" {
 		t.Fatalf("compiled CIDRs = %#v", match.compiledCIDRs)

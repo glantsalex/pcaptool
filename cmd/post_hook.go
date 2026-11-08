@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/aglants/pcaptool/internal/dns"
+	"github.com/aglants/pcaptool/internal/lsm"
 	"github.com/aglants/pcaptool/progress"
 )
 
 type RunArtifactsManifest struct {
+	LogicalServices     *lsm.Stats        `json:"logical_services,omitempty"`
 	RunID               string            `json:"run_id"`
 	NetID               string            `json:"net_id"`
 	RunDir              string            `json:"run_dir"`
@@ -39,6 +41,7 @@ func writeRunArtifactsManifest(
 	first dns.FirstPacketInfo,
 	mainOutputFormat string,
 	files map[string]string,
+	stats *lsm.Stats,
 ) (string, error) {
 	path := absolutePathOrClean(om.Path("_run-artifacts.json"))
 
@@ -63,6 +66,7 @@ func writeRunArtifactsManifest(
 	}
 
 	manifest := RunArtifactsManifest{
+		LogicalServices:     stats,
 		RunID:               om.RunID(),
 		NetID:               om.NetID(),
 		RunDir:              absolutePathOrClean(om.RunDir()),

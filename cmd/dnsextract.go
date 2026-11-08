@@ -23,6 +23,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/aglants/pcaptool/internal/dns"
+	"github.com/aglants/pcaptool/internal/logicalservice"
+	"github.com/aglants/pcaptool/internal/lsm"
 	"github.com/aglants/pcaptool/internal/pcap"
 	"github.com/aglants/pcaptool/internal/radius"
 	"github.com/aglants/pcaptool/internal/syntrail"
@@ -53,6 +55,7 @@ func newDNSExtractCommandWithExecutor(opts *DNSExtractOptions, executor dnsExtra
 		},
 	}
 
+	cmd.Flags().StringVar(&opts.LogicalServices, "logical-services", defaults.LogicalServices, "Optional logical-service definitions YAML; generate public-destination full, compact and short LSM artifacts.")
 	cmd.Flags().StringVarP(&opts.ReadDir, "read-dir", "r", defaults.ReadDir, "Directory containing .pcap files")
 	cmd.Flags().StringVar(
 		&opts.Fleet,
@@ -228,6 +231,15 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	ftpPassiveMinPort := validated.ftpPassiveMinPort
 	serverSummaryExcludeUDPPorts := validated.serverSummaryExcludeUDPPorts
 
+	var serviceDefinitions *logicalservice.Definitions
+	if strings.TrimSpace(opts.LogicalServices) != "" {
+		logInputAccess(os.Stderr, "logical-services", opts.LogicalServices, false, false)
+		serviceDefinitions, err = logicalservice.LoadDefinitions(opts.LogicalServices)
+		logInputLoad(os.Stderr, "logical-services", opts.LogicalServices, err)
+		if err != nil {
+			return fmt.Errorf("load --logical-services: %w", err)
+		}
+	}
 	progress.SetStage("Discovering PCAP files...")
 	files, err := pcap.DiscoverPCAPFiles(opts.ReadDir)
 	status := "discovered"
@@ -911,7 +923,20 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	for key, path := range synTrailArtifacts {
 		filesMap[key] = path
 	}
-	manifestPath, err := writeRunArtifactsManifest(om, runStartedAt, opts.ReadDir, len(files), firstPktInfo, opts.Format, filesMap)
+	var serviceStats *lsm.Stats
+	if serviceDefinitions != nil {
+		progress.SetStage("Building public logical services maps...")
+		artifacts, stats, err := writeLSMArtifacts(ctx, om, topo, serviceDefinitions)
+		if err != nil {
+			return fmt.Errorf("generate LSM: %w", err)
+		}
+		for key, path := range artifacts {
+			filesMap[key] = path
+		}
+		serviceStats = &stats
+		progress.SetStage(fmt.Sprintf("LSM: %d/%d public observations classified; %d non-public excluded; %d issuers, %d services", stats.Classified, stats.Public, stats.Excluded, stats.Issuers, stats.Services))
+	}
+	manifestPath, err := writeRunArtifactsManifest(om, runStartedAt, opts.ReadDir, len(files), firstPktInfo, opts.Format, filesMap, serviceStats)
 	if err != nil {
 		return fmt.Errorf("write run artifacts manifest: %w", err)
 	}

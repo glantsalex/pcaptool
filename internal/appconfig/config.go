@@ -51,6 +51,7 @@ type DNSExtractConfig struct {
 	DisableSNI                   *bool     `yaml:"disable_sni"`
 	DNSIPFile                    *string   `yaml:"dns_ip_file"`
 	DNSNormalizationRules        *string   `yaml:"dns_normalization_rules"`
+	LogicalServices              *string   `yaml:"logical_services"`
 	ExcludePorts                 *string   `yaml:"exclude_ports"`
 	FTPControlPorts              *string   `yaml:"ftp_control_ports"`
 	FTPPassiveMinPort            *string   `yaml:"ftp_passive_min_port"`

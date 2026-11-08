@@ -241,6 +241,7 @@ dnsextract:
   fleet: ./fleet.txt
   dns_ip_file: ~/dns.csv
   dns_normalization_rules: $PCAPTOOL_RULES/rules.yaml
+  logical_services: ./services.yaml
   output_root: ./output/../runs
   export_csv: relative-export.csv
   manifest_out: relative-manifest.json
@@ -268,6 +269,7 @@ dnsextract:
 		"fleet":                   {got.Fleet, filepath.Join(configDir, "fleet.txt")},
 		"dns_ip_file":             {got.DNSIPFile, filepath.Join(configDir, "~", "dns.csv")},
 		"dns_normalization_rules": {got.DNSNormalizationRules, filepath.Join(configDir, "$PCAPTOOL_RULES", "rules.yaml")},
+		"logical_services":        {got.LogicalServices, filepath.Join(configDir, "services.yaml")},
 		"output_root":             {got.OutputRoot, filepath.Join(configDir, "runs")},
 		"export_csv":              {got.ExportCSV, "relative-export.csv"},
 		"manifest_out":            {got.ManifestOut, "relative-manifest.json"},

@@ -145,57 +145,68 @@ func validateMatch(match *RuleMatch) error {
 		}
 	}
 	if selected == 0 {
-		return fmt.Errorf("match: exactly one endpoint selector is required")
+		return fmt.Errorf("match: at least one endpoint selector is required")
 	}
-	if selected > 1 {
-		return fmt.Errorf("match: exactly one endpoint selector is allowed")
-	}
-
 	var err error
-	switch {
-	case len(match.DNSExact) > 0:
+	if len(match.DNSExact) > 0 {
 		match.DNSExact, err = validateCanonicalDNSValues("dns_exact", match.DNSExact, validateDNSExact)
-	case len(match.DNSSuffix) > 0:
-		match.DNSSuffix, err = validateCanonicalDNSValues("dns_suffix", match.DNSSuffix, validateDNSSuffix)
-	case len(match.DNSContains) > 0:
-		match.DNSContains, err = validateCanonicalDNSValues("dns_contains", match.DNSContains, validateDNSContains)
-	case len(match.DNSRegex) > 0:
-		match.DNSRegex, match.compiledRegexes, err = compileRegexes(match.DNSRegex)
-	case len(match.DstIPCIDRs) > 0:
-		match.DstIPCIDRs, match.compiledCIDRs, err = compileIPv4CIDRs(match.DstIPCIDRs)
+		if err != nil {
+			return err
+		}
 	}
-	if err != nil {
-		return err
+	if len(match.DNSSuffix) > 0 {
+		match.DNSSuffix, err = validateCanonicalDNSValues("dns_suffix", match.DNSSuffix, validateDNSSuffix)
+		if err != nil {
+			return err
+		}
+	}
+	if len(match.DNSContains) > 0 {
+		match.DNSContains, err = validateCanonicalDNSValues("dns_contains", match.DNSContains, validateDNSContains)
+		if err != nil {
+			return err
+		}
+	}
+	if len(match.DNSRegex) > 0 {
+		match.DNSRegex, match.compiledRegexes, err = compileRegexes(match.DNSRegex)
+		if err != nil {
+			return err
+		}
+	}
+	if len(match.DstIPCIDRs) > 0 {
+		match.DstIPCIDRs, match.compiledCIDRs, err = compileIPv4CIDRs(match.DstIPCIDRs)
+		if err != nil {
+			return err
+		}
+	}
+	if len(match.Transports) == 0 {
+		return fmt.Errorf("match.transports: non-empty list is required")
+	}
+	seen := map[string]bool{}
+	for i := range match.Transports {
+		t := &match.Transports[i]
+		t.Proto = strings.ToLower(strings.TrimSpace(t.Proto))
+		if t.Proto != "tcp" && t.Proto != "udp" {
+			return fmt.Errorf("match.transports[%d].proto: use tcp or udp", i)
+		}
+		if seen[t.Proto] {
+			return fmt.Errorf("match.transports: duplicate protocol %q", t.Proto)
+		}
+		seen[t.Proto] = true
+		if len(t.Ports) == 0 {
+			return fmt.Errorf("match.transports[%d].ports: list must not be empty", i)
+		}
+		ports := map[uint16]bool{}
+		for _, port := range t.Ports {
+			if port == 0 {
+				return fmt.Errorf("match.transports[%d].ports: valid range 1-65535", i)
+			}
+			if ports[port] {
+				return fmt.Errorf("match.transports[%d].ports: duplicate value %d", i, port)
+			}
+			ports[port] = true
+		}
 	}
 
-	match.Protocol = strings.ToLower(strings.TrimSpace(match.Protocol))
-	if match.Protocol != "tcp" && match.Protocol != "udp" {
-		return fmt.Errorf("match.protocol: unsupported value %q; use tcp or udp", match.Protocol)
-	}
-	if match.Ports != nil && len(match.Ports) == 0 {
-		return fmt.Errorf("match.ports: list must not be empty")
-	}
-	if match.AnyPort != nil && !*match.AnyPort {
-		return fmt.Errorf("match.any_port: false is invalid; omit the field or set it to true")
-	}
-	hasPorts := len(match.Ports) > 0
-	hasAnyPort := match.AnyPort != nil && *match.AnyPort
-	if hasPorts && hasAnyPort {
-		return fmt.Errorf("match: ports and any_port cannot both be set")
-	}
-	if !hasPorts && !hasAnyPort {
-		return fmt.Errorf("match: exactly one port policy is required: non-empty ports or any_port: true")
-	}
-	seenPorts := make(map[uint16]struct{}, len(match.Ports))
-	for _, port := range match.Ports {
-		if port == 0 {
-			return fmt.Errorf("match.ports: value 0 is outside the valid range 1-65535")
-		}
-		if _, exists := seenPorts[port]; exists {
-			return fmt.Errorf("match.ports: duplicate value %d", port)
-		}
-		seenPorts[port] = struct{}{}
-	}
 	return nil
 }
 

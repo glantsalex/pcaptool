@@ -52,7 +52,7 @@ func loadBenchmarkClassifier(b *testing.B, ruleCount int) *Classifier {
 	for i := 0; i < ruleCount; i++ {
 		fmt.Fprintf(
 			&rules,
-			"  - id: rule_%04d\n    priority: %d\n    service_id: example_service\n    match:\n      dns_exact: [rule-%04d.example.invalid]\n      protocol: tcp\n      any_port: true\n",
+			"  - id: rule_%04d\n    priority: %d\n    service_id: example_service\n    match:\n      dns_exact: [rule-%04d.example.invalid]\n      transports:\n        - proto: tcp\n          ports: [443, 65535]\n",
 			i,
 			i,
 			i,

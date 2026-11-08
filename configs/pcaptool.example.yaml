@@ -26,6 +26,7 @@ dnsextract:
 
   dns_ip_file: ""
   dns_normalization_rules: ""
+  logical_services: "" # Optional combined services/rules YAML; enables public LSM artifacts.
 
   exclude_ports: "53"
   ftp_control_ports: "21,990"

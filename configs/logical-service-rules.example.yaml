@@ -9,8 +9,9 @@ rules:
     match:
       dns_suffix:
         - example.invalid
-      protocol: tcp
-      any_port: true
+      transports:
+        - proto: tcp
+          ports: [80, 443]
 
   - id: example_api_tcp
     priority: 100
@@ -18,17 +19,19 @@ rules:
     match:
       dns_exact:
         - terminal-api.example.com
-      protocol: tcp
-      ports:
-        - 443
-        - 8443
+      transports:
+        - proto: tcp
+          ports:
+            - 443
+            - 8443
 
   - id: example_documentation_network_tcp
     priority: 200
     service_id: example_terminal_service
     match:
       dst_ip_cidrs:
-        - 192.0.2.0/24
-      protocol: tcp
-      ports:
-        - 443
+            - 192.0.2.0/24
+      transports:
+        - proto: tcp
+          ports:
+            - 443

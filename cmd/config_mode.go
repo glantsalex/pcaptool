@@ -229,6 +229,7 @@ func dnsExtractOptionsFromConfig(config *appconfig.Config, readDir string) (DNSE
 	setConfigValue(&opts.DisableSNI, values.DisableSNI)
 	setConfigValue(&opts.DNSIPFile, values.DNSIPFile)
 	setConfigValue(&opts.DNSNormalizationRules, values.DNSNormalizationRules)
+	setConfigValue(&opts.LogicalServices, values.LogicalServices)
 	setConfigValue(&opts.ExcludePorts, values.ExcludePorts)
 	setConfigValue(&opts.FTPControlPorts, values.FTPControlPorts)
 	setConfigValue(&opts.FTPPassiveMinPort, values.FTPPassiveMinPort)
@@ -249,6 +250,7 @@ func dnsExtractOptionsFromConfig(config *appconfig.Config, readDir string) (DNSE
 	opts.Fleet = resolveConfigRelativePath(configDir, opts.Fleet)
 	opts.DNSIPFile = resolveConfigRelativePath(configDir, opts.DNSIPFile)
 	opts.DNSNormalizationRules = resolveConfigRelativePath(configDir, opts.DNSNormalizationRules)
+	opts.LogicalServices = resolveConfigRelativePath(configDir, opts.LogicalServices)
 	opts.OutputRoot = resolveConfigRelativePath(configDir, opts.OutputRoot)
 
 	if _, err := validateDNSExtractOptions(opts); err != nil {

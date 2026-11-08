@@ -42,6 +42,7 @@ func TestWriteRunArtifactsManifest(t *testing.T) {
 			"service_endpoints": filepath.Join(runDir, "service-endpoints.txt"),
 			"main_output":       filepath.Join(runDir, "dns-table.txt"),
 		},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("writeRunArtifactsManifest: %v", err)
