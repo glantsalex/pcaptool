@@ -1,0 +1,17 @@
+schema_version: 1
+command: dnsextract
+
+dnsextract:
+  net_id: 404163-1
+
+  fleet: ./data/fleet-404163-1.txt
+  dns_ip_file: ./data/dns-ip.csv
+  dns_normalization_rules: ./data/pcaptool.rules.yaml
+
+  exclude_ports: "53,123"
+  enforce_private_as_source: true
+  ftp_control_ports: "21,990,21000"
+  ftp_passive_min_port: "10000"
+  server_summary_exclude_udp_ports: "33434-33534"
+  allow_private_dns_donation: true
+  disable_sni: true
