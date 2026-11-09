@@ -1,5 +1,15 @@
 # Opt-in memory diagnostics
 
+## Current validation status
+
+The allocation fix and optional diagnostics are committed and pushed as
+`f1e4d630692f06df35de9ecf5ca1b07e7c26f921` on
+`diagnostics/fleet-artifact-memory`. Budgeted local tests, a single-day Batch run,
+and the seven-day Batch backfill passed. See "Cloud validation completed" below.
+Earlier sections record historical checkpoints, including the failed memory
+headroom gate without a budget. Normal release rollout and permanent deployment
+configuration for the memory settings remain outstanding.
+
 ## Purpose and scope
 
 Investigate memory growth in `dnsextract`, particularly the interval reported as
@@ -331,7 +341,8 @@ Validation evidence and exact invocations are in
 `bin/pcaptool-memory-optimized`, SHA256
 `b96b9ffd81d655257f09f91b637798e91b1927b96744e306444b968e6c1125be`.
 The original `pcaptool` and `bin/pcaptool-diagnostic` executables and unrelated local
-changes remain untouched. Changes are uncommitted and unpushed; PTI is unchanged.
+changes remained untouched. At this checkpoint the changes were uncommitted
+and unpushed, and PTI was unchanged; see the current status above.
 
 
 ### Budgeted local validation — 2026-11-09
@@ -367,10 +378,102 @@ managed outside Go. Setting it in the Batch environment also affects PTI, whose
 pcaptool subprocess inherits the environment; each process has its own budget.
 See the [Go GC guide](https://go.dev/doc/gc-guide#Memory_limit).
 
-Local budgeted validation passed. The next gate is one monitored Batch run for
+Local budgeted validation passed. At that checkpoint the next gate was one
+monitored Batch run for
 401240-1 / 2026-11-02 on the existing VM, using a candidate image containing the
 verified optimization and explicit memory/concurrency settings. Verify the image
 revision, effective settings, artifact completion, and whole-VM memory headroom.
 No candidate cloud run or deployment has been performed at this checkpoint.
 The deployment renderer does not currently forward GOMEMLIMIT/GOMAXPROCS from
 env files; an isolated job must set them explicitly in its environment.
+
+
+### Cloud validation completed — 2026-11-09
+
+Both runs used project `pulse-wl`, region `europe-west2`, the existing
+`pulse-topology-batch-v1` template, and machine type `n2-highcpu-32`. The Batch
+request remained 32000 cpuMilli / 30000 memoryMib. The container environment set
+`GOMEMLIMIT=24GiB` and `GOMAXPROCS=32`; pcaptool diagnostics were disabled, SNI was
+disabled, and the Ops Agent was installed for whole-VM memory monitoring.
+These settings apply independently to each inheriting Go process, including PTI.
+
+Verified release metadata:
+
+- PTI: `746f4bbaa7209dd60a0421dddfd32b4fe11840c2` on
+  `test/pcaptool-memory-cloud`; adds a build-only candidate pipeline.
+- pcaptool: `f1e4d630692f06df35de9ecf5ca1b07e7c26f921`.
+- Image:
+  `shieldiot/pulse-topology-ingest@sha256:b4639877d622b22f42e13c4c7624c007c19ffebc2629199a804d85156fd29230`.
+- Container contract validation: passed, as recorded in release metadata.
+- The metadata field `pcaptool_branch` says `main` because PTI's metadata script
+  hardcodes it. The recorded commit matches the candidate branch. Fixing that
+  misleading label is a separate metadata follow-up.
+
+Single-day job:
+`projects/pulse-wl/locations/europe-west2/jobs/job-1d1c7a0a-94f9-49ab-8465-24de95791dd5`.
+It processed 401240-1 / 2026-11-02: 1437 PCAPs staged, pcaptool completed in
+7m 21s, 20 artifact files published, and direction SQL applied. The user reported
+Batch success; the application summary confirms one successful stream and zero
+failed/skipped streams or cleanup failures. Batch agent logs confirm the candidate
+image and both memory/concurrency variables in the container invocation.
+
+Backfill job:
+`projects/pulse-wl/locations/europe-west2/jobs/pti-memory-backfill-20261109-185544`.
+Backfill ID: `401240-1-nov02-nov08-memory-f1e4d63`.
+VM instance ID: `6903053839828494756` in `europe-west2-b`.
+This separate production-mode job processed November 2 through November 8
+sequentially, including reprocessing November 2. It used its own checkpoints and
+published real artifacts and BigQuery changes.
+
+| Data day | Staged PCAPs | Published files | Direction SQL | Inserted topology rows |
+| --- | ---: | ---: | --- | ---: |
+| 2026-11-02 | 1437 | 20 | unchanged | 0 |
+| 2026-11-03 | 1437 | 20 | applied | 6 |
+| 2026-11-04 | 1437 | 20 | applied | 0 |
+| 2026-11-05 | 1437 | 20 | unchanged | 2 |
+| 2026-11-06 | 1436 | 20 | applied | 95 |
+| 2026-11-07 | 1437 | 20 | applied | 1037 |
+| 2026-11-08 | 1437 | 20 | unchanged | 0 |
+
+The exported log contains 1184 entries and ends with `COMPLETED 7/7` and
+`FINISHED days=7` at 2026-11-09T20:11:52Z. All seven daily summaries report zero
+staging failures, failed/skipped streams, and cleanup failures. Each day has a
+successful pcaptool completion and publication to
+`gs://pulse-wl-data/topology/401240/401240-1/YYYYMMDD/`. There are no ERROR entries;
+the sole WARNING is setup-time `apt-key` deprecation. Batch success was reported
+by the operator. Log-based publication verification is not an independent GCS
+content comparison or a BigQuery result comparison against an unoptimized run.
+
+For November 7, the quiet interval lasted about 13m 44s between preparing the
+BigQuery post-hook input and starting the unresolved-row upload. pcaptool had
+already exited. Processing subsequently completed; the logs do not identify the
+specific internal operation responsible for the delay.
+
+The supplied instance-filtered, unaggregated memory charts show repeated drops
+in whole-VM used memory to roughly 1–2 GiB between days and visible peaks around
+25–27 GiB. They show no obvious accumulation across days. These are visual,
+sampled whole-VM readings, not exact process RSS peaks, and may miss brief spikes.
+Success on these inputs does not guarantee that every stream/day fits this VM.
+No direct OOM evidence from the original failed run was recovered.
+
+Evidence retained locally (not checked into Git):
+
+- `/home/alex/tmp/release.json` and `/home/alex/tmp/image-uri`.
+- `/home/alex/Downloads/downloaded-logs-20261109-205308.json` (single day).
+- `/home/alex/tmp/pti-memory-cloud/backfill-final-logs.json` (all seven days).
+- `/home/alex/tmp/pti-memory-cloud/candidate-job.json` and
+  `candidate-backfill-job.json` (submitted configurations).
+
+Cloud functional/memory validation passed for the candidate on these inputs.
+The candidate was published and run directly through Batch; the normal deployed
+workflow was not refreshed by these tests. The normal PTI renderer still needs
+explicit support for forwarding the memory settings from deployment env files.
+Merge/release rollout, scheduler-state verification, and deliberate per-environment
+memory-budget selection remain separate steps. Do not deploy the allocation
+refactor alone as equivalent to this budgeted validation.
+
+Evidence SHA256 (`downloaded-logs-20261109-205308.json`):
+`91a7c056903a2fcfa4e0238a15a7809de9b28d16362aff3baf181bf200ad01a4`.
+
+Evidence SHA256 (`backfill-final-logs.json`):
+`21b7d70bcfaa3243c3d2edd266e83a2df8e29ac7471db55064a6003a8801d543`.
