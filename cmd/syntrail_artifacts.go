@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/aglants/pcaptool/internal/connectivity"
+	"github.com/aglants/pcaptool/internal/diagnostics"
 	"github.com/aglants/pcaptool/internal/syntrail"
 )
 
 type synTrailArtifactOptions struct {
+	Diagnostics                  *diagnostics.Session
 	DirectionRegistry            string
 	FTPControlPorts              map[uint16]struct{}
 	FTPPassiveMinPort            uint16
@@ -45,6 +47,7 @@ func runSYNTrailSidecar(
 	if err != nil {
 		return nil, err
 	}
+	opt.Diagnostics.Checkpoint("fleet_sidecar_scan", map[string]int{"capture_files": len(files), "workers": opt.ScanOptions.Workers}, false)
 	records, err := scanSYNTrailFilesWithOptions(ctx, files, opt.ScanOptions)
 	if err != nil {
 		return nil, fmt.Errorf("scan SYN trail packet captures: %w", err)
@@ -66,7 +69,17 @@ func writeSYNTrailArtifactsFromRecords(
 	fleet syntrail.FleetSet,
 	opt synTrailArtifactOptions,
 ) (map[string]string, error) {
-	return writeSYNTrailArtifacts(om, syntrail.ClassifyRecords(records, fleet), opt)
+	opt.Diagnostics.Checkpoint("fleet_classify", recordCounts(opt.Diagnostics, records), true)
+	buckets := syntrail.ClassifyRecords(records, fleet)
+	if opt.Diagnostics != nil {
+		counts := make(map[string]int, 2*len(buckets))
+		for name, items := range buckets {
+			counts[string(name)+"_len"] = len(items)
+			counts[string(name)+"_cap"] = cap(items)
+		}
+		opt.Diagnostics.Checkpoint("fleet_classified", counts, true)
+	}
+	return writeSYNTrailArtifacts(om, buckets, opt)
 }
 
 func writeSYNTrailArtifacts(
@@ -75,36 +88,43 @@ func writeSYNTrailArtifacts(
 	opt synTrailArtifactOptions,
 ) (map[string]string, error) {
 	artifacts := make(map[string]string, len(synTrailArtifactSpecs)+2)
-	_, privateServerRecords := syntrail.SplitFleetToNonFleetByDestinationLocality(
-		bucketRecords(buckets, syntrail.BucketFleetToNonFleet),
+	opt.Diagnostics.Checkpoint("fleet_private_select", nil, false)
+	privateServerRecords := syntrail.SelectFleetToNonFleetByDestinationLocality(
+		bucketRecords(buckets, syntrail.BucketFleetToNonFleet), true,
 	)
-	privateServerRecords = filterPassiveFTPServerSummaryRecords(privateServerRecords, opt)
-	privateServerRecords = filterUDPServerSummaryRecords(privateServerRecords, opt.ServerSummaryExcludeUDPPorts)
+	privateServerRecords = filterOwnedPassiveFTPServerSummaryRecords(privateServerRecords, opt)
+	privateServerRecords = filterOwnedUDPServerSummaryRecords(privateServerRecords, opt.ServerSummaryExcludeUDPPorts)
 	privateProbeRecords := tcpSYNTrailRecords(bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet))
 
+	opt.Diagnostics.Checkpoint("fleet_private_selected", recordCounts(opt.Diagnostics, privateServerRecords), true)
 	for _, spec := range synTrailArtifactSpecs {
 		if spec.debugOnly && !opt.Debug {
 			continue
 		}
+		opt.Diagnostics.Checkpoint("fleet_select_"+spec.key, nil, false)
 		records := spec.records(buckets)
 		switch spec.key {
 		case "public_servers_unique":
-			records = filterPassiveFTPServerSummaryRecords(records, opt)
-			records = filterUDPServerSummaryRecords(records, opt.ServerSummaryExcludeUDPPorts)
+			records = filterOwnedPassiveFTPServerSummaryRecords(records, opt)
+			records = filterOwnedUDPServerSummaryRecords(records, opt.ServerSummaryExcludeUDPPorts)
 		}
+		opt.Diagnostics.Checkpoint("fleet_write_"+spec.key, recordCounts(opt.Diagnostics, records), true)
 		path, err := writeSYNTrailArtifact(om, spec.filename, records, spec.writer)
 		if err != nil {
 			return nil, err
 		}
+		opt.Diagnostics.Checkpoint("fleet_written_"+spec.key, nil, true)
 		artifacts[spec.key] = path
 	}
 
+	opt.Diagnostics.Checkpoint("fleet_write_private_endpoints", map[string]int{"server_records": len(privateServerRecords), "probe_records": len(privateProbeRecords)}, true)
 	path, err := writePrivateNonFleetEndpointsArtifact(om, privateServerRecords, privateProbeRecords, opt.FirstFilePacketTimestamp)
 	if err != nil {
 		return nil, err
 	}
 	artifacts[privateNonFleetEndpointsKey] = path
 
+	opt.Diagnostics.Checkpoint("fleet_direction_sql", nil, true)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -128,6 +148,7 @@ func writeSYNTrailArtifacts(
 		return nil, err
 	}
 	artifacts[flowDirectionCorrectionSQLKey] = path
+	opt.Diagnostics.Checkpoint("fleet_artifacts_complete", nil, true)
 
 	return artifacts, nil
 }
@@ -136,8 +157,10 @@ type synTrailArtifactSpec struct {
 	filename  string
 	key       string
 	debugOnly bool
-	records   func(syntrail.BucketedRecords) []syntrail.Record
-	writer    func(io.Writer, []syntrail.Record) error
+	// Public-server summaries compact records before writing; sorting writers
+	// also require owned storage. Only read-only paths may borrow a bucket.
+	records func(syntrail.BucketedRecords) []syntrail.Record
+	writer  func(io.Writer, []syntrail.Record) error
 }
 
 var synTrailArtifactSpecs = []synTrailArtifactSpec{
@@ -146,8 +169,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		key:       "fleet_to_public_trail",
 		debugOnly: true,
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			public, _ := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
-			return public
+			return syntrail.SelectFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet), false)
 		},
 		writer: syntrail.WriteProtocolTrailCSV,
 	},
@@ -156,7 +178,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		key:       "fleet_to_private_nonfleet_trail",
 		debugOnly: true,
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			_, privateNonFleet := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
+			privateNonFleet := syntrail.SelectFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet), true)
 			return privateNonFleet
 		},
 		writer: syntrail.WriteProtocolTrailCSV,
@@ -166,8 +188,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		key:       "fleet_to_public_unique",
 		debugOnly: true,
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			public, _ := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
-			return public
+			return syntrail.SelectFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet), false)
 		},
 		writer: syntrail.WriteProtocolUniqueCSV,
 	},
@@ -175,8 +196,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		filename: "public-servers-unique.csv",
 		key:      "public_servers_unique",
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			public, _ := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
-			return public
+			return syntrail.SelectFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet), false)
 		},
 		writer: syntrail.WritePublicServersCSV,
 	},
@@ -185,7 +205,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 		key:       "fleet_to_private_nonfleet_syn_unique",
 		debugOnly: true,
 		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			_, privateNonFleet := syntrail.SplitFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet))
+			privateNonFleet := syntrail.SelectFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet), true)
 			return tcpSYNTrailRecords(privateNonFleet)
 		},
 		writer: syntrail.WriteTCPUniqueCSV,
@@ -235,13 +255,20 @@ const (
 
 func bucketRecords(buckets syntrail.BucketedRecords, bucket syntrail.Bucket) []syntrail.Record {
 	// Borrow a read-only view. Selectors that feed an in-place sorting writer
-	// must first produce owned storage (for example, tcpSYNTrailRecords).
+	// or compacting summary filter must first produce owned storage (for example,
+	// tcpSYNTrailRecords or SelectFleetToNonFleetByDestinationLocality).
 	// Locality splitting and the other writers do not mutate this view.
 	return buckets[bucket]
 }
 
 func tcpSYNTrailRecords(records []syntrail.Record) []syntrail.Record {
-	filtered := make([]syntrail.Record, 0, len(records))
+	count := 0
+	for _, record := range records {
+		if isTCPSYNTrailRecord(record) {
+			count++
+		}
+	}
+	filtered := make([]syntrail.Record, 0, count)
 	for _, record := range records {
 		if record.Protocol != "" && record.Protocol != syntrail.ProtocolTCP {
 			continue
@@ -256,7 +283,16 @@ type synTrailPair struct {
 	dstIP netip.Addr
 }
 
-func filterPassiveFTPServerSummaryRecords(
+// filterPassiveFTPServerSummaryRecords accepts borrowed input.
+func filterPassiveFTPServerSummaryRecords(records []syntrail.Record, opt synTrailArtifactOptions) []syntrail.Record {
+	owned := make([]syntrail.Record, len(records))
+	copy(owned, records)
+	return filterOwnedPassiveFTPServerSummaryRecords(owned, opt)
+}
+
+// filterOwnedPassiveFTPServerSummaryRecords compacts exclusively owned storage.
+// Collect all control evidence first, including controls later than data records.
+func filterOwnedPassiveFTPServerSummaryRecords(
 	records []syntrail.Record,
 	opt synTrailArtifactOptions,
 ) []syntrail.Record {
@@ -273,13 +309,14 @@ func filterPassiveFTPServerSummaryRecords(
 		controlSeen[synTrailPair{srcIP: record.SrcIP, dstIP: record.DstIP}] = struct{}{}
 	}
 
-	filtered := make([]syntrail.Record, 0, len(records))
+	filtered := records[:0]
 	for _, record := range records {
 		if shouldSuppressPassiveFTPRecord(record, opt, controlSeen) {
 			continue
 		}
 		filtered = append(filtered, record)
 	}
+	clear(records[len(filtered):])
 	return filtered
 }
 
@@ -313,7 +350,18 @@ func isTCPSYNTrailRecord(record syntrail.Record) bool {
 	return record.Protocol == "" || record.Protocol == syntrail.ProtocolTCP
 }
 
-func filterUDPServerSummaryRecords(
+// filterUDPServerSummaryRecords accepts borrowed input.
+func filterUDPServerSummaryRecords(records []syntrail.Record, excludedPorts map[uint16]struct{}) []syntrail.Record {
+	if len(excludedPorts) == 0 {
+		return records
+	}
+	owned := make([]syntrail.Record, len(records))
+	copy(owned, records)
+	return filterOwnedUDPServerSummaryRecords(owned, excludedPorts)
+}
+
+// filterOwnedUDPServerSummaryRecords compacts exclusively owned storage.
+func filterOwnedUDPServerSummaryRecords(
 	records []syntrail.Record,
 	excludedPorts map[uint16]struct{},
 ) []syntrail.Record {
@@ -321,7 +369,7 @@ func filterUDPServerSummaryRecords(
 		return records
 	}
 
-	filtered := make([]syntrail.Record, 0, len(records))
+	filtered := records[:0]
 	for _, record := range records {
 		if record.Protocol == syntrail.ProtocolUDP {
 			if _, excluded := excludedPorts[record.DstPort]; excluded {
@@ -330,6 +378,7 @@ func filterUDPServerSummaryRecords(
 		}
 		filtered = append(filtered, record)
 	}
+	clear(records[len(filtered):])
 	return filtered
 }
 
@@ -408,4 +457,12 @@ func directionScanOptions(fleet *syntrail.FleetSet, registry, netID string, scan
 		}
 	}
 	return scanOpt, nil
+}
+
+// recordCounts measures owned slice dimensions without retaining or rescanning it.
+func recordCounts(d *diagnostics.Session, records []syntrail.Record) map[string]int {
+	if d == nil {
+		return nil
+	}
+	return map[string]int{"records_len": len(records), "records_cap": cap(records)}
 }

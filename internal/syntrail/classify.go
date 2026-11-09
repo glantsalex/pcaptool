@@ -26,7 +26,18 @@ func Classify(r Record, fleet FleetSet) (Bucket, bool) {
 
 // ClassifyRecords groups records into SYN trail buckets, discarding unclassified records.
 func ClassifyRecords(records []Record, fleet FleetSet) BucketedRecords {
-	bucketed := make(BucketedRecords)
+	// Count first to avoid repeated large append reallocations. Classify is pure;
+	// the second pass preserves the original record order within every bucket.
+	counts := make(map[Bucket]int)
+	for _, record := range records {
+		if bucket, ok := Classify(record, fleet); ok {
+			counts[bucket]++
+		}
+	}
+	bucketed := make(BucketedRecords, len(counts))
+	for bucket, count := range counts {
+		bucketed[bucket] = make([]Record, 0, count)
+	}
 	for _, record := range records {
 		bucket, ok := Classify(record, fleet)
 		if !ok {

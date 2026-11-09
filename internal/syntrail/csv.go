@@ -361,18 +361,20 @@ func uniqueProtocolRows(records []Record) []protocolUniqueRow {
 // PrivateServerTuples returns normalized, deduplicated destination server
 // tuples in the same deterministic order used by server summary CSV output.
 func PrivateServerTuples(records []Record) []ServerTuple {
-	seen := make(map[ServerTuple]struct{}, len(records))
-	rows := make([]ServerTuple, 0, len(records))
+	// Reserve by distinct endpoints as they arrive, not by raw observation count.
+	seen := make(map[ServerTuple]struct{})
 	for _, record := range records {
 		row := ServerTuple{
 			DstIP:    record.DstIP,
 			DstPort:  record.DstPort,
 			Protocol: normalizedProtocol(record.Protocol),
 		}
-		if _, ok := seen[row]; ok {
-			continue
-		}
 		seen[row] = struct{}{}
+	}
+	// Allocate the result once, after its true cardinality is known. Sorting below
+	// fully orders every key, so map iteration cannot change output ordering.
+	rows := make([]ServerTuple, 0, len(seen))
+	for row := range seen {
 		rows = append(rows, row)
 	}
 

@@ -24,3 +24,23 @@ func SplitFleetToNonFleetByDestinationLocality(records []Record) (public []Recor
 
 	return public, privateNonFleet
 }
+
+// SelectFleetToNonFleetByDestinationLocality returns only the requested partition
+// (private=true for local destinations). The result has independent, exact-sized
+// storage, preserves input order, and is non-nil even when empty. Callers may
+// compact or sort it without changing the source records or another artifact.
+func SelectFleetToNonFleetByDestinationLocality(records []Record, private bool) []Record {
+	count := 0
+	for _, record := range records {
+		if isLocalIPv4(record.DstIP) == private {
+			count++
+		}
+	}
+	selected := make([]Record, 0, count)
+	for _, record := range records {
+		if isLocalIPv4(record.DstIP) == private {
+			selected = append(selected, record)
+		}
+	}
+	return selected
+}

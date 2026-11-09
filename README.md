@@ -28,6 +28,8 @@ Commands currently exposed by the binary:
 
 In practice, `dnsextract` is the main processing command.
 
+For memory investigations, see [Opt-in memory diagnostics](docs/memory-diagnostics.md).
+
 ## Installation
 
 ### Build locally

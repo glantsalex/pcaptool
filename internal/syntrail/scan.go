@@ -289,6 +289,13 @@ func (a *Accumulator) Add(records []Record) {
 // TakeRecords returns the accumulated records and transfers ownership of the
 // returned slice to the caller. The accumulator must not be used afterward.
 func (a *Accumulator) TakeRecords() []Record {
+	// Reuse TCP storage when possible. Otherwise size the one required combined
+	// buffer exactly, rather than growing it geometrically while appending UDP.
+	if len(a.udpOrder) > cap(a.tcpRecords)-len(a.tcpRecords) {
+		combined := make([]Record, len(a.tcpRecords), len(a.tcpRecords)+len(a.udpOrder))
+		copy(combined, a.tcpRecords)
+		a.tcpRecords = combined
+	}
 	for _, key := range a.udpOrder {
 		a.tcpRecords = append(a.tcpRecords, a.udpRecords[key])
 	}

@@ -419,7 +419,8 @@ func writeFleetMemoryFixture(t *testing.T, dir string, fileCount, repetitions in
 }
 
 // Freeze pre-change artifact selection independently of the production
-// selectors. Output writers themselves are unchanged by this optimization.
+// selectors. Writer contracts, including summary deduplication and ordering,
+// are checked independently in internal/syntrail regression tests.
 func legacyFleetArtifactBytes(t *testing.T, buckets syntrail.BucketedRecords, opt synTrailArtifactOptions, netID string) map[string][]byte {
 	t.Helper()
 	clone := func(bucket syntrail.Bucket) []syntrail.Record {

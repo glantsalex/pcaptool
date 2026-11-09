@@ -28,3 +28,9 @@ Access checks add one open/stat/close per configured input, with no extra PCAP
 content pass. They are diagnostic only: existing validation and failure policy
 remain unchanged. Normal extraction stages can load some inputs later in the run,
 so an early readable record is separate from a later successful-load record.
+
+## Optional memory investigation
+
+See [Memory diagnostics](memory-diagnostics.md) for opt-in stage samples and Go heap
+profiles. These are separate from the always-on invocation/input logs and do not
+change the topology configuration or artifact schema.

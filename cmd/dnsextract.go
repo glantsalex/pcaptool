@@ -10,6 +10,7 @@ package cmd
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/aglants/pcaptool/internal/diagnostics"
 	"github.com/aglants/pcaptool/internal/dns"
 	"github.com/aglants/pcaptool/internal/logicalservice"
 	"github.com/aglants/pcaptool/internal/lsm"
@@ -219,7 +221,23 @@ func runDNSExtractWithExecutor(cmd *cobra.Command, _ []string, opts DNSExtractOp
 	return executor(ctx, opts)
 }
 
-func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
+func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr error) {
+	diagnostic, err := diagnostics.Start(os.Getenv(diagnostics.Environment))
+	if err != nil {
+		return fmt.Errorf("start diagnostics: %w", err)
+	}
+	if diagnostic != nil {
+		fmt.Fprintf(os.Stderr, "[diagnostics] memory samples and heap profiles: %s\n", diagnostic.Directory())
+		defer func() {
+			stage := "run_completed"
+			if runErr != nil {
+				stage = "run_failed"
+			}
+			diagnostic.Checkpoint(stage, nil, false)
+			runErr = errors.Join(runErr, diagnostic.Close())
+		}()
+	}
+
 	runStartedAt := time.Now().UTC()
 	logDNSExtractInputs(os.Stderr, opts)
 
@@ -288,6 +306,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	// --------------------------------------------------------------------
 	// Pass 2: DNS + TLS SNI in one corpus scan (extractors)
 	// --------------------------------------------------------------------
+	diagnostic.Checkpoint("dns_scan", map[string]int{"capture_files": len(files)}, false)
 	if opts.DisableSNI {
 		progress.SetStage("Pass 2: scanning DNS (SNI disabled)...")
 	} else {
@@ -303,6 +322,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	if err != nil {
 		return err
 	}
+	diagnostic.Checkpoint("dns_scan_complete", map[string]int{"transactions": len(txs), "truncated_dns_packets": len(truncatedDNSPackets)}, true)
 	if opts.IgnoreNTP {
 		progress.SetStage("Pass 2.1: preserving DNS evidence; NTP transport suppression is applied during connection correlation...")
 	}
@@ -388,6 +408,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 			}
 		}
 	}
+	diagnostic.Checkpoint("connection_scan", nil, false)
 	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		ctx,
 		files,
@@ -404,6 +425,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	if err != nil {
 		return err
 	}
+	diagnostic.Checkpoint("connection_scan_complete", map[string]int{"transactions": len(txs), "edges": len(edges)}, true)
 	if count := fleetCompatibilityRereads.Load(); count > 0 {
 		progress.SetStage(fmt.Sprintf("Fleet evidence compatibility rereads: %d file(s).", count))
 	}
@@ -421,6 +443,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 	if fleet != nil {
 		synTrailStartedAt := time.Now()
 		artifactOpt := synTrailArtifactOptions{
+			Diagnostics:                  diagnostic,
 			DirectionRegistry:            opts.DirectionRegistry,
 			FTPControlPorts:              ftpControlPorts,
 			FTPPassiveMinPort:            ftpPassiveMinPort,
@@ -443,6 +466,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 			progress.SetStage(fmt.Sprintf("Fleet trail sidecar complete (elapsed %s).", synTrailElapsed))
 		} else {
 			progress.SetStage("Writing fleet trail artifacts...")
+			diagnostic.Checkpoint("fleet_accumulator_take", nil, true)
 			records := sharedFleetAccumulator.TakeRecords()
 			syntrail.ApplySyslogQualifications(records, sharedFleetOptions.SyslogCache)
 			synTrailArtifacts, err = writeSYNTrailArtifactsFromRecords(
@@ -482,6 +506,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 		}
 	}
 
+	diagnostic.Checkpoint("topology_output", nil, true)
 	progress.SetStage("Preparing records for output...")
 
 	// All DNS transactions (with & without connections)
@@ -936,6 +961,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) error {
 		serviceStats = &stats
 		progress.SetStage(fmt.Sprintf("LSM: %d/%d public observations classified; %d non-public excluded; %d issuers, %d services", stats.Classified, stats.Public, stats.Excluded, stats.Issuers, stats.Services))
 	}
+	diagnostic.Checkpoint("manifest_output", nil, true)
 	manifestPath, err := writeRunArtifactsManifest(om, runStartedAt, opts.ReadDir, len(files), firstPktInfo, opts.Format, filesMap, serviceStats)
 	if err != nil {
 		return fmt.Errorf("write run artifacts manifest: %w", err)
