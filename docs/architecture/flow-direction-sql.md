@@ -105,3 +105,13 @@ Release the compatible PTI and pcaptool changes together. Structural query text
 changes can cause one replacement/refresh even with unchanged registry evidence.
 Settle pending jobs before rollback; older PTI versions require the old one-line
 CREATE header and may reject application state saved with the new layout.
+
+## RADIUS/subnet producer inputs (2026-11-15)
+
+The producer can derive fleet membership from device-pool CIDRs and count observed
+devices by timed IMSI. These changes select/describe evidence; SQL generation still
+uses qualified endpoint IP/protocol/port and the same swap/conflict rules. The
+registry decoder intentionally ignores daily counts and the additive identity-basis
+and unresolved-coverage fields. Reverting binaries does not undo accumulated
+evidence or applied view definitions; rollout must preserve registry/application
+state and follow PTI's recovery contract.

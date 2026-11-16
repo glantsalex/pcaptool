@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aglants/pcaptool/internal/syntrail"
 	"gopkg.in/yaml.v3"
 )
 
@@ -32,6 +33,7 @@ type Config struct {
 // fields preserve the distinction between an omitted value and an explicit
 // zero value so the command layer can apply its shared defaults.
 type DNSExtractConfig struct {
+	FleetSubnets                 *[]string `yaml:"fleet_subnets"`
 	NetID                        *string   `yaml:"net_id"`
 	Fleet                        *string   `yaml:"fleet"`
 	FleetScanWorkers             *int      `yaml:"fleet_scan_workers"`
@@ -120,6 +122,19 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse application config %q: multiple YAML documents are not supported", absPath)
 	}
 
+	// Explicit null must not silently disable a requested membership constraint.
+	if config.DNSExtract != nil && config.DNSExtract.FleetSubnets == nil {
+		var raw struct {
+			DNSExtract map[string]any `yaml:"dnsextract"`
+		}
+		if err := yaml.Unmarshal(data, &raw); err != nil {
+			return nil, err
+		}
+		if _, present := raw.DNSExtract["fleet_subnets"]; present {
+			return nil, fmt.Errorf("fleet_subnets must be a nonempty IPv4 CIDR list")
+		}
+	}
+
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("validate application config %q: %w", absPath, err)
 	}
@@ -142,6 +157,15 @@ func (c *Config) validate() error {
 	if c.DNSExtract == nil {
 		return fmt.Errorf("dnsextract: block is required for command %q", c.Command)
 	}
+	if c.DNSExtract.FleetSubnets != nil {
+		if c.DNSExtract.Fleet != nil && *c.DNSExtract.Fleet != "" {
+			return fmt.Errorf("fleet and fleet_subnets are mutually exclusive")
+		}
+		if _, err := syntrail.ParseFleetSubnets(*c.DNSExtract.FleetSubnets); err != nil {
+			return err
+		}
+	}
+
 	if c.DNSExtract.NetID == nil || strings.TrimSpace(*c.DNSExtract.NetID) == "" {
 		return fmt.Errorf("dnsextract.net_id: field is required")
 	}

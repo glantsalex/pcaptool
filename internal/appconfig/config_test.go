@@ -162,3 +162,22 @@ func writeConfig(t *testing.T, content string) string {
 	}
 	return path
 }
+
+func TestFleetSubnetsConfiguration(t *testing.T) {
+	for _, tt := range []struct {
+		yaml  string
+		valid bool
+	}{
+		{"  fleet_subnets: [10.181.0.0/16, 10.52.192.0/18]\n", true},
+		{"  fleet_subnets: []\n", false},
+		{"  fleet_subnets: null\n", false},
+		{"  fleet_subnets: [bad]\n", false},
+		{"  fleet_subnets: ['::/0']\n", false},
+		{"  fleet_subnets: [10.0.0.0/8]\n  fleet: fleet.txt\n", false},
+	} {
+		_, err := Load(writeConfig(t, minimalConfig+tt.yaml))
+		if (err == nil) != tt.valid {
+			t.Fatalf("%s: %v", tt.yaml, err)
+		}
+	}
+}

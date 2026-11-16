@@ -76,6 +76,10 @@ type PacketFileObserverFactory func(fileIndex int, path string) PacketFileObserv
 // PacketScanOptions controls packet admission and optional observation for
 // PCAP processing. Nil fields preserve the historical connection-scan path.
 type PacketScanOptions struct {
+	// IssuerIdentity partitions connection observations before bounded pruning.
+	// The resolver must be immutable/concurrency safe; nil retains legacy behavior.
+	IssuerIdentity func(string, time.Time) string
+
 	PacketAdmission pcaputil.PacketAdmission
 
 	// NewFileObserver receives admitted packets before topology or DNS
@@ -482,6 +486,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 
 		// One collector per file (no locks); merged after file completes.
 		opt := connectivity.DefaultOptions()
+		opt.IssuerIdentity = scanOpt.IssuerIdentity
 		opt.ExcludedDstPorts = excludePorts
 		opt.EnforcePrivateAsSource = enforcePrivateAsSource
 		opt.FTPControlPorts = ftpControlPorts
@@ -681,6 +686,20 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 						srcIPStr, tx.DNSName, dstIPStr, dt, maxConnDelay)
 				}
 				continue
+			}
+
+			// A previous lease owner's DNS/SNI is not evidence for this device.
+			// RequestTime and IssuerIP are immutable during parallel correlation.
+			if resolve := scanOpt.IssuerIdentity; resolve != nil {
+				identityAt := func(at time.Time) string {
+					if identity := resolve(srcIPStr, at); identity != "" {
+						return identity
+					}
+					return srcIPStr
+				}
+				if identityAt(tx.RequestTime) != identityAt(ts) {
+					continue
+				}
 			}
 
 			// Actually-used dst IPv4 (for synack marking + optional backfill).

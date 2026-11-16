@@ -96,7 +96,7 @@ func logDNSExtractInputs(w io.Writer, opts DNSExtractOptions) {
 	if strings.TrimSpace(opts.DNSIPFile) != "" {
 		logInputAccess(w, "dns-topology-overlay", filepath.Join(filepath.Dir(opts.DNSIPFile), "topology-"+opts.NetID+".csv"), false, true)
 	}
-	if opts.DirectionRegistry != "" && opts.Fleet == "" {
+	if opts.DirectionRegistry != "" && opts.Fleet == "" && opts.FleetSubnets == nil {
 		infoDiagnostic(w, "input_access", inputPathFields("direction-registry", opts.DirectionRegistry, "unused_without_fleet"))
 	} else {
 		logInputAccess(w, "direction-registry", opts.DirectionRegistry, false, false)

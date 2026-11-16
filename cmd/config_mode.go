@@ -212,6 +212,7 @@ func dnsExtractOptionsFromConfig(config *appconfig.Config, readDir string) (DNSE
 	setConfigValue(&opts.NetID, values.NetID)
 	opts.ReadDir = readDir
 	setConfigValue(&opts.Fleet, values.Fleet)
+	setConfigValue(&opts.FleetSubnets, values.FleetSubnets)
 	setConfigValue(&opts.FleetScanWorkers, values.FleetScanWorkers)
 	setConfigValue(&opts.OutputRoot, values.OutputRoot)
 	setConfigValue(&opts.Format, values.Format)

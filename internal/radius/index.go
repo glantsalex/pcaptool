@@ -11,89 +11,73 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"sync"
 	"time"
 
-	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/aglants/pcaptool/progress"
 )
 
-// IMSIIndex maps IP -> []SessionWindow (sorted, coalesced).
+// IMSIIndex maps IP -> []SessionWindow sorted by start time.
 // Lookup(ip, t) returns the IMSI that owned this IP at time t, if any.
 type IMSIIndex struct {
-	mu   sync.RWMutex
-	byIP map[string][]SessionWindow
-}
-
-// ScanOptions controls packet admission while building a RADIUS index.
-type ScanOptions struct {
-	PacketAdmission pcaputil.PacketAdmission
+	byIP map[netip.Addr][]SessionWindow
 }
 
 // NewIMSIIndex creates an empty index.
 func NewIMSIIndex() *IMSIIndex {
 	return &IMSIIndex{
-		byIP: make(map[string][]SessionWindow),
+		byIP: make(map[netip.Addr][]SessionWindow),
 	}
 }
 
 // Lookup returns the IMSI that owned the given IP at time t, if any.
 // Times are matched against [StartMs, EndMs] in SessionWindow.
 func (idx *IMSIIndex) Lookup(ip net.IP, t time.Time) (string, bool) {
-	if ip == nil {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
 		return "", false
 	}
-	ipStr := ip.String()
-	if ipStr == "" {
-		return "", false
-	}
+	return idx.LookupAddr(addr.Unmap(), t)
+}
 
+// LookupAddr resolves a packet address without allocating a string. The index
+// is immutable after construction and safe for concurrent readers. Conflicting
+// IMSIs at the observation time produce an unresolved identity.
+func (idx *IMSIIndex) LookupAddr(ip netip.Addr, t time.Time) (string, bool) {
+	if idx == nil {
+		return "", false
+	}
 	tsMs := t.UTC().UnixMilli()
-
-	idx.mu.RLock()
-	wins := idx.byIP[ipStr]
-	idx.mu.RUnlock()
-
-	if len(wins) == 0 {
-		return "", false
-	}
-
-	// windows are sorted by StartMs and coalesced for (IMSI,IP,SessionID).
-	// Small linear scan is fine for our expected cardinalities.
-	for _, w := range wins {
-		if tsMs < w.StartMs {
+	imsi := ""
+	for _, w := range idx.byIP[ip.Unmap()] {
+		if w.StartMs > tsMs {
+			break
+		}
+		if tsMs > w.EndMs {
 			continue
 		}
-		if w.EndMs > 0 && tsMs > w.EndMs {
-			continue
+		if imsi != "" && imsi != w.IMSI {
+			return "", false
 		}
-		return w.IMSI, true
+		imsi = w.IMSI
 	}
-	return "", false
+	return imsi, imsi != ""
 }
 
 // BuildIMSIIndexFromPCAPs builds an IP→IMSI session index from the given
 // RADIUS Accounting PCAP files.
 //
-// It reuses the same ingestion pipeline as the Suricata parser project:
-//   - processRadiusFile -> radMsg (tsMs, imsi, ip, sid, status, sessTimeSec)
-//   - sessionBuilder.ingest -> SessionWindow
-//   - closedCoalesced + coalesceSameRunForIndex -> coalesced windows per IP
-//
-// Differences from the Suricata project:
-//   - no streamId / taskId
-//   - no Redis (we do a single self-contained pass over the PCAPs)
-//   - files[] comes directly from dnsextract's discovered PCAP list.
+// All accounting packets are scanned independently of fleet admission. Records
+// are sorted before deduplication and session construction, so worker/file order
+// cannot choose an IP owner. A read failure never returns a partial index.
 func BuildIMSIIndexFromPCAPs(ctx context.Context, files []string) (*IMSIIndex, error) {
-	return BuildIMSIIndexFromPCAPsWithOptions(ctx, files, ScanOptions{})
-}
-
-// BuildIMSIIndexFromPCAPsWithOptions builds an index after applying optional
-// packet admission before any RADIUS parsing or deduplication.
-func BuildIMSIIndexFromPCAPsWithOptions(ctx context.Context, files []string, opt ScanOptions) (*IMSIIndex, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	idx := NewIMSIIndex()
 
 	if len(files) == 0 {
@@ -101,7 +85,6 @@ func BuildIMSIIndexFromPCAPsWithOptions(ctx context.Context, files []string, opt
 	}
 
 	collector := NewRadiusCollector(16_384)
-	dedup := newDeduper(2*time.Hour, 64)
 
 	type fileResult struct {
 		path string
@@ -111,7 +94,7 @@ func BuildIMSIIndexFromPCAPsWithOptions(ctx context.Context, files []string, opt
 	fileCh := make(chan string)
 	resCh := make(chan fileResult)
 
-	workers := runtime.GOMAXPROCS(0)
+	workers := min(runtime.GOMAXPROCS(0), len(files))
 	if workers < 1 {
 		workers = 1
 	}
@@ -124,7 +107,7 @@ func BuildIMSIIndexFromPCAPsWithOptions(ctx context.Context, files []string, opt
 		go func() {
 			defer wg.Done()
 			for path := range fileCh {
-				err := processRadiusFile(ctx, path, collector, dedup, opt.PacketAdmission)
+				err := processRadiusFile(ctx, path, collector)
 				resCh <- fileResult{path: path, err: err}
 			}
 		}()
@@ -157,6 +140,9 @@ func BuildIMSIIndexFromPCAPsWithOptions(ctx context.Context, files []string, opt
 		progress.UpdateBar(doneFiles, totalFiles, "RADIUS "+filepath.Base(res.path))
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if firstErr != nil {
 		return nil, firstErr
 	}
@@ -182,54 +168,39 @@ func BuildIMSIIndexFromPCAPsWithOptions(ctx context.Context, files []string, opt
 		if msgs[i].sid != msgs[j].sid {
 			return msgs[i].sid < msgs[j].sid
 		}
-		return msgs[i].status < msgs[j].status // Start < Interim < Stop
+		if msgs[i].status != msgs[j].status {
+			return msgs[i].status < msgs[j].status
+		}
+		if msgs[i].sessTimeSec != msgs[j].sessTimeSec {
+			return msgs[i].sessTimeSec < msgs[j].sessTimeSec
+		}
+		if msgs[i].hasSessionTime != msgs[j].hasSessionTime {
+			return !msgs[i].hasSessionTime
+		}
+		return msgs[i].dedupKey < msgs[j].dedupKey
 	})
 
-	// Build session windows with the same logic as your existing code:
-	// sessionBuilder.ingest(tsMs, status, imsi, ip, sid, sessTimeSec)
-	// handles:
-	//   - Start/Interim/Stop
-	//   - synthetic opens from Interim / Stop (middle-session pickup)
-	//   - backdating from Acct-Session-Time
-	//   - "close on new Start" for same IMSI+IP, different SID.
-	builder := newSessionBuilder()
+	dedup := newDeduper(2*time.Hour, 64)
+	retained := msgs[:0]
 	for _, m := range msgs {
-		builder.ingest(m.tsMs, m.status, m.imsi, m.ip, m.sid, m.sessTimeSec)
+		if !dedup.Seen(m.dedupKey, time.UnixMilli(m.tsMs)) {
+			retained = append(retained, m)
+		}
 	}
-
-	// Close provisional and stale windows in a self-contained way.
-	// Same parameters as your replay finalizer (tailMs=0 => lastSeenMs).
-	builder.finalizeForReplay(0, 6*time.Hour, false)
-
-	// Collect closed windows for this pass.
-	closed := builder.closedCoalesced()
-	if len(closed) == 0 {
-		return idx, nil
-	}
-
-	// Build IP -> []SessionWindow index, coalesced, as in buildRadiusResolutionIndexInternal.
-	byIP := make(map[string][]SessionWindow, 100_000)
-
-	for _, w := range closed {
-		if w.IP == "" || w.IMSI == "" {
+	windows := buildSessionWindows(retained, collector.captureEnd.UTC().UnixMilli())
+	for _, w := range windows {
+		ip, err := netip.ParseAddr(w.IP)
+		if err != nil {
 			continue
 		}
-		byIP[w.IP] = append(byIP[w.IP], w)
+		idx.byIP[ip.Unmap()] = append(idx.byIP[ip.Unmap()], w)
 	}
-
-	for ip, wins := range byIP {
-		// Ensure StartMs sort for determinism before coalescing.
-		sort.Slice(wins, func(i, j int) bool { return wins[i].StartMs < wins[j].StartMs })
-		wins = coalesceSameRunForIndex(wins)
-		byIP[ip] = wins
-	}
-
-	idx.mu.Lock()
-	idx.byIP = byIP
-	idx.mu.Unlock()
 
 	// Final bar to 100% with a generic label.
 	progress.UpdateBar(totalFiles, totalFiles, "RADIUS scan complete")
 
 	return idx, nil
 }
+
+// AddressCount reports index coverage without exposing subscriber identifiers.
+func (idx *IMSIIndex) AddressCount() int { return len(idx.byIP) }

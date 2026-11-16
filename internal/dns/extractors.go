@@ -793,15 +793,16 @@ type sniExtractor struct {
 	earliest time.Time
 	first    bool
 
-	// Per-file dedup (retransmits) by issuer+dstIP+port+sni
+	// Deduplicate identical timed observations; retain later retransmissions.
 	seen map[sniKey]struct{}
 }
 
 type sniKey struct {
-	issuer string
-	dstIP  string
-	port   uint16
-	sni    string
+	observedAt time.Time
+	issuer     string
+	dstIP      string
+	port       uint16
+	sni        string
 }
 
 func newSNIExtractor() *sniExtractor {
@@ -875,10 +876,11 @@ func (e *sniExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 	}
 
 	k := sniKey{
-		issuer: srcIP.String(),
-		dstIP:  dstIP.String(),
-		port:   port,
-		sni:    sni,
+		observedAt: ts.UTC(),
+		issuer:     srcIP.String(),
+		dstIP:      dstIP.String(),
+		port:       port,
+		sni:        sni,
 	}
 	if _, exists := e.seen[k]; exists {
 		return

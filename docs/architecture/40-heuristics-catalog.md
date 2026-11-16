@@ -2,6 +2,18 @@
 
 Scope: active-path heuristics in `pcaptool dnsextract` only. Legacy helpers such as `internal/pcap.Event`, `dns.BuildTransactionsFromEvents`, and `dns.AttachConnections` are intentionally excluded except where ambiguity matters.
 
+## Timed identity boundary (2026-11-16)
+
+SNI copies deduplicate by full capture time plus raw IP/name/endpoint; extraction
+never consults IMSI. RADIUS-mode connection observations are partitioned by timed
+identity before bounded pruning. Direct DNS/SNI cannot cross that identity boundary;
+unknowns keep IP fallback. The best-name/window rules and final device/service
+summary remain in place. More retained observations may change the selected name
+or time and expose previously hidden unknown intervals. No accounting-window
+extension or unknown-to-device counting is allowed. Regression anchors:
+`internal/dns/sni_identity_test.go`, `internal/connectivity/collector_identity_test.go`,
+`cmd/sni_identity_test.go` and the paired synthetic VLAN fixture.
+
 ## Direct Parsing Behavior
 
 ### 1. Truncated DNS salvage
@@ -275,3 +287,12 @@ Scope: active-path heuristics in `pcaptool dnsextract` only. Legacy helpers such
 - `internal/dns/from_tls.go` overlaps with the active `sniExtractor` path and initializes SNI transactions differently.
 - `internal/dns/name_ip_evidence_index.go` appears unused on the current hot path.
 - RADIUS identity logic appears active and important, but dedicated tests were not obvious in this onboarding pass.
+
+## RADIUS session inference (2026-11-15)
+
+See [the runtime contract](../../README.md#radius-and-subnet-membership-contract-2026-11-15).
+Unclosed assignments continuing to capture end are an explicit inference, not an
+observed Stop. Duration reconstructs a missing start; absent duration does not.
+Reassignment limits only an unsupported tail. Overlapping positive evidence for
+different IMSIs remains ambiguous. Pool membership admits traffic independently
+of successful identity resolution; unresolved observations never inflate IMSI counts.

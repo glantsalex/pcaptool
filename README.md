@@ -425,7 +425,7 @@ If `--manifest-out` is set, a copy of `_run-artifacts.json` is written to the re
 
 #### Fleet-constrained processing and TCP SYN trail artifacts
 
-Produced only when `--fleet <path>` is set.
+Produced when an exact-IP `fleet` or YAML `fleet_subnets` membership source is set.
 
 `--fleet` points to a fleet IPv4 list:
 
@@ -436,9 +436,9 @@ Produced only when `--fleet <path>` is set.
 - IPv6 entries are errors
 
 The SYN trail is packet-level initiator evidence from raw IPv4 TCP SYN packets.
-Supplying `--fleet` also constrains every packet-derived analysis pass to IPv4
+Supplying `--fleet` or YAML `fleet_subnets` constrains packet-derived analysis after the optional RADIUS pass to IPv4
 packets whose source or destination is in that fleet. Non-IPv4 packets and
-packets with two non-fleet endpoints do not seed DNS, SNI, RADIUS, connection,
+packets with two non-fleet endpoints do not seed DNS, SNI, connection,
 topology, unresolved, service-endpoint, audit, debug, or sidecar evidence.
 Capture-date and first-packet metadata use the earliest admitted packet, or the
 existing unknown/empty representation when no packet matches.
@@ -469,7 +469,7 @@ With `--debug`, the sidecar additionally writes these detailed artifacts:
 - `private-nonfleet-to-fleet-trail.csv`
 - `private-nonfleet-to-fleet-tcp-syn-unique.csv`
 
-`private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses observed for that exact role/protocol/port behavior. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Probe targets retain the existing TCP-only qualification.
+`private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses without RADIUS, or resolved IMSIs with RADIUS, for that exact role/protocol/port behavior. RADIUS output declares `fleet_identity_basis: imsi` and reports unresolved addresses separately. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Probe targets retain the existing TCP-only qualification.
 
 The top-level `snapshot_time` is an integer Unix timestamp in milliseconds,
 aligned to 00:00:00 UTC on the date of the first packet in the first capture
@@ -495,7 +495,7 @@ Bucket meanings:
   - `private-nonfleet-endpoints.json` merges server and probe behavior by private non-fleet IPv4 address
   - server listeners come from the fleet-to-private-nonfleet split; TCP rows and non-excluded UDP rows are retained
   - probe targets come from the private-nonfleet-to-fleet TCP evidence path
-  - repeated observations from the same fleet IPv4 address contribute one device to that behavior's `fleet_devices_count`
+  - repeated observations of the same counted identity (IPv4 without RADIUS; IMSI with RADIUS) contribute one device to that behavior's `fleet_devices_count`
   - TCP passive FTP data ports are suppressed only when a matching control connection is observed
   - configured UDP destination ports are suppressed only from server summary artifacts
   - manifest key: `private_nonfleet_endpoints`
@@ -547,7 +547,7 @@ The command is a multi-pass offline pipeline.
 
 ### Fleet constraint and optional TCP SYN trail sidecar
 
-If `--fleet` is set, all packet-processing passes admit only IPv4 packets whose source or destination belongs to the supplied fleet. Packet-level IPv4 TCP SYN evidence and UDP edge evidence are collected independently of connection-correlation filters. The public-server summary, private-nonfleet endpoint summary, and `flow-direction-correction.sql` are always written; detailed trail and unique evidence artifacts require `--debug`. Debug selection changes only artifact writing and does not rescan the corpus. By default, `--fleet-scan-workers 0` collects fleet evidence during connection correlation for PCAP/PCAPNG captures, using its bounded file workers; with RADIUS disabled and no reader compatibility errors, this reduces the pipeline to two full capture scans (DNS/SNI, then connections/fleet evidence). Capture format is checked from file headers, not filename extensions. A recoverable libpcap read error triggers one strict compatibility reread of the affected file for fleet evidence; malformed captures still fail, and correlation retains its historical reader/retry behavior. Other capture formats retain the full separate scan with automatic worker selection (`min(GOMAXPROCS, file_count)`, minimum `1`). Explicit positive values also retain the separate fleet scan: `1` is sequential, and values greater than `1` use that many concurrent file scanners, capped by the file count. The generated BigQuery script creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
+If a fleet or subnet list is set, packet-processing passes after the optional unfiltered RADIUS pass admit only IPv4 packets whose source or destination belongs to the supplied membership set. Packet-level IPv4 TCP SYN evidence and UDP edge evidence are collected independently of connection-correlation filters. The public-server summary, private-nonfleet endpoint summary, and `flow-direction-correction.sql` are always written; detailed trail and unique evidence artifacts require `--debug`. Debug selection changes only artifact writing and does not rescan the corpus. By default, `--fleet-scan-workers 0` collects fleet evidence during connection correlation for PCAP/PCAPNG captures, using its bounded file workers; with RADIUS disabled and no reader compatibility errors, this reduces the pipeline to two full capture scans (DNS/SNI, then connections/fleet evidence). Capture format is checked from file headers, not filename extensions. A recoverable libpcap read error triggers one strict compatibility reread of the affected file for fleet evidence; malformed captures still fail, and correlation retains its historical reader/retry behavior. Other capture formats retain the full separate scan with automatic worker selection (`min(GOMAXPROCS, file_count)`, minimum `1`). Explicit positive values also retain the separate fleet scan: `1` is sequential, and values greater than `1` use that many concurrent file scanners, capped by the file count. The generated BigQuery script creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
 
 Fleet classification and artifact writing remain independent and do not feed DNS attribution, connection inference, topology generation, or service endpoint generation. Sharing packet reads does not share their filtering policies.
 The SQL script is not executed by pcaptool.
@@ -560,6 +560,12 @@ This does not change packet correlation itself.
 It changes issuer labeling in the final outputs.
 
 ### Pass 2: DNS scan and optional TLS SNI scan
+
+Transport selection happens after link-layer decoding, so untagged, 802.1Q, and
+QinQ frames reach the same DNS/SNI extractors and fleet/subnet admission. A plain
+libpcap `udp port 53 or tcp` filter must not be used here: it discarded Stone's
+VLAN 2511 DNS and ClientHello traffic before the extractors ran. UDP/53 and optional
+TCP selection are otherwise unchanged. The paired PTI fixture includes VLAN tagging.
 
 The tool scans the corpus and builds `DNSTransaction` objects from:
 
@@ -914,3 +920,118 @@ PCAP_SYSLOG_SAMPLE=/path/to/syslog-packets-sample.pcapng \
 The supplied sample test expects the reviewed 24-packet capture. Normal tests use
 synthetic packets. The SQL behavior test uses Python 3's standard SQLite module;
 BigQuery DDL and IAM still require staging validation.
+
+## RADIUS and subnet membership contract (2026-11-15)
+
+PTI owns the stream's DB configuration and passes a run-specific YAML snapshot.
+`dnsextract.fleet_subnets` is an optional nonempty IPv4 CIDR list, mutually exclusive
+with `fleet`. CIDRs are parsed/masked once and matched with `netip.Prefix.Contains`;
+addresses are never expanded into a roster. Empty, null, invalid or IPv6 lists fail.
+There is no additional CLI flag: standalone users can use YAML configuration.
+
+With `radius_imsi: true`, Pass 1 scans **all valid RADIUS Accounting-Request records**
+in the selected captures, before DNS/SNI or connection analysis. Neither outer
+NAS/server addresses nor the extracted Framed-IP-Address are subnet-filtered.
+IMSI comes from the 3GPP attribute or User-Name. Every successful file flushes its
+last partial batch; capture read errors/cancellation fail the index build. Records
+are sorted before deduplication so file/worker order cannot select an IP owner.
+The completed index is immutable during the later parallel scans.
+
+Session times use capture UTC milliseconds and Accounting-Session-Time. Start/Stop
+bounds are inclusive. Start-only and Interim-only assignments extend to capture
+end (latest packet of any kind, not latest RADIUS packet), unless supported later
+ownership shortens their inferred tail. Interim/Stop without Start reconstruct
+start from a supplied duration. Missing duration does not invent earlier ownership;
+a Stop without duration contributes only at its observed timestamp. A delayed Start
+does not erase earlier accounting evidence for the same assignment. Missing and
+explicitly zero durations remain distinct in parsed evidence. Contradictory
+cross-IMSI overlaps resolve to unknown, never the first stored window. State is
+limited to this input corpus; no cross-run session persistence is introduced.
+
+After index construction in RADIUS mode, recognized RADIUS control packets are
+excluded **before** fleet/subnet lookup in every later scan. Recognition checks
+UDP ports 1812/1813/1645/1646, supported RADIUS codes and valid message/attribute
+lengths; it does not exclude every UDP packet on those ports. Requests and responses
+are excluded even when the NAS belongs to a device pool. Ordinary traffic from
+that same address still follows membership policy; there is no NAS IP blacklist.
+
+All remaining packet-derived analysis (DNS/SNI, connections, internal topology
+and direction evidence) uses the same admission rule: either IPv4 endpoint belongs
+to the configured fleet/pools. Neither matching means exclusion;
+both matching means fleet-to-fleet. Existing TCP SYN, UDP syslog, FTP/port exclusions,
+private/public classification and SQL qualification rules remain authoritative.
+Subnets are device address pools, not a list of all internal infrastructure.
+
+When RADIUS is enabled, identity is resolved at packet time **before** fleet UDP
+aggregation. `private-nonfleet-endpoints.json` retains schema_version 1 and adds
+`fleet_identity_basis: imsi`. `fleet_devices_count` is distinct resolved IMSIs per
+endpoint/role/protocol/port. `unresolved_fleet_ips_count`, when nonzero, counts
+addresses with unresolved observations separately (an address may also have known
+observations); it is not a device count. An unresolved-only behavior is retained
+with zero known devices. Without RADIUS, the historical IPv4 counts/output remain;
+absence of `fleet_identity_basis` means the historical IPv4 basis. IP-bearing
+endpoint/trail fields remain IPs. General topology labels retain their existing IP
+fallback; that fallback is never counted as an IMSI.
+
+Direction registry/SQL ignore daily counts and consume qualified IP/transport/port
+evidence as before. No subnet predicates are added to correction SQL. Existing
+RADIUS runs with an exact-IP fleet also receive the unfiltered first pass and
+corrected IMSI counts; this is an intentional compatibility change. Empty identity
+coverage remains a degraded result, visible through `radius_index_ready` INFO
+(`mapped_addresses: 0`) and unresolved artifact counts, not fabricated identities.
+
+Regression fixtures cover partial batches, orphan accounting records, capture-end
+coverage, reassignment/conflict, all admission combinations, host-prefix equivalence,
+SNI, shared/separate scans and IMSI counts. `cmd/testdata/radius-subnets.pcap` is
+synthetic and reproducible with its adjacent Python generator. Production-volume
+Arqia coverage/memory and downstream rollout remain separate operator checks.
+
+Local validation on November 15: full Go tests/build and targeted race checks passed.
+The PTI paired-binary validator passed on the host and in a cached runtime container
+with networking disabled. These are synthetic/local results, not an Arqia deployment
+or production-volume replay. Native prefix membership measured about 13 ns/op and
+zero allocations on the development workstation; representative-corpus memory and
+throughput remain rollout checks.
+
+A subsequent Stone replay verified the VLAN fix on 50 local captures (4.95 GB):
+47,558 SNI-backed topology rows across 14 names; 61.74 seconds and 5.59 GiB peak
+RSS with GOMAXPROCS=8/GOMEMLIMIT=16GiB. Private endpoint JSON and direction SQL
+were unchanged. This is one local capture subset, not full-day or cloud validation.
+No customer packets are checked in; regression fixtures are synthetic.
+
+## Timed SNI and topology identity (2026-11-16)
+
+The active combined DNS/SNI scan deduplicates SNI by raw issuer IP, destination
+IP, destination port, name and **full capture timestamp** (UTC, no truncation).
+IMSI is deliberately absent from this extraction key. Identical timed copies
+collapse within/across files; global duplicates keep the lexicographically
+smallest capture basename. Later ClientHellos/retransmissions survive for timed
+identity lookup. Equal-time name observations use stable ordering.
+
+With RADIUS enabled, the connection collector resolves each admitted edge
+observation against the completed immutable index **before** timestamp pruning.
+Per-file and global grouping retain raw IP/endpoint plus resolved IMSI (or raw-IP
+fallback for unknown identity). The existing earliest-plus-latest-127 bound now
+applies within each group. Thus later traffic from device C cannot evict all
+observations of device B when an IP is reassigned A → B → C. Direct DNS/SNI
+correlation and topology joins require the same timed identity at the name and
+connection observations; an unknown interval never borrows a neighboring IMSI.
+
+Final topology still summarizes a device/service rather than exporting every
+packet: its uniqueness key is issuer label, destination, name, protocol and port.
+The existing best-name/window rules run per identity group. Repeated evidence for
+one IMSI/service may collapse, including across IPs; equal-rank duplicate rows
+retain the earlier selected observation. The 128-time cap can still discard
+intermediate observations **within** one identity group. This is not a change to
+TCP/UDP admission, passive-FTP heuristics, accounting windows, fleet counts, SQL
+qualification, schema, PTI config ownership or the global SNI default. With RADIUS
+disabled, connection grouping remains IP based; timed SNI preservation still applies
+when SNI is enabled. More transactions, identity groups and unknown-IP rows can
+increase memory/output size; an IP fallback is not a counted device.
+
+Tests cover timestamp precision, exact copies across files, worker/file order,
+three owners with >128 later observations, unknown intervals, same-IMSI summaries,
+and cross-owner correlation rejection. The shared synthetic fixture also gates
+PTI's generated/downloaded policies and the offline paired runtime container.
+Local corpus evidence and outstanding rollout gates are recorded in the companion
+PTI `docs/prompts/handoff.md`; no customer captures are checked in.

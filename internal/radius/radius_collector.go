@@ -7,7 +7,10 @@
 
 package radius
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 type radStatus uint32
 
@@ -18,17 +21,20 @@ const (
 )
 
 type radMsg struct {
-	tsMs        int64
-	imsi        string
-	ip          string
-	sid         string
-	sessTimeSec uint32
-	status      radStatus
+	tsMs           int64
+	imsi           string
+	ip             string
+	sid            string
+	sessTimeSec    uint32
+	hasSessionTime bool
+	dedupKey       string
+	status         radStatus
 }
 
 type radiusCollector struct {
-	mu   sync.Mutex
-	msgs []radMsg
+	mu         sync.Mutex
+	msgs       []radMsg
+	captureEnd time.Time
 }
 
 func NewRadiusCollector(capHint int) *radiusCollector {
@@ -63,4 +69,13 @@ func (c *radiusCollector) Drain() []radMsg {
 	c.msgs = nil
 	c.mu.Unlock()
 	return out
+}
+
+// ObserveCaptureEnd records the latest packet timestamp, including non-RADIUS traffic.
+func (c *radiusCollector) ObserveCaptureEnd(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if t.After(c.captureEnd) {
+		c.captureEnd = t
+	}
 }

@@ -14,7 +14,8 @@ const privateNonFleetEndpointsSchemaVersion = 1
 
 // PrivateNonFleetEndpointsDocument is the versioned private non-fleet endpoint artifact.
 type PrivateNonFleetEndpointsDocument struct {
-	SchemaVersion int `json:"schema_version"`
+	SchemaVersion      int    `json:"schema_version"`
+	FleetIdentityBasis string `json:"fleet_identity_basis,omitempty"`
 	// SnapshotTime is midnight UTC in Unix milliseconds, or 0 if unknown.
 	SnapshotTime int64                     `json:"snapshot_time"`
 	Endpoints    []PrivateNonFleetEndpoint `json:"endpoints"`
@@ -37,12 +38,14 @@ type ProbeBehavior struct {
 	Targets []TransportBehavior `json:"targets"`
 }
 
-// TransportBehavior describes one protocol/port behavior and its distinct fleet IPv4 cardinality.
+// TransportBehavior describes one protocol/port behavior and its distinct fleet
+// device cardinality (IPv4 by default, IMSI when FleetIdentityBasis is "imsi").
 type TransportBehavior struct {
-	Protocol          string `json:"protocol"`
-	Port              uint16 `json:"port"`
-	FleetDevicesCount int    `json:"fleet_devices_count"`
-	Evidence          string `json:"evidence,omitempty"`
+	Protocol                string `json:"protocol"`
+	Port                    uint16 `json:"port"`
+	FleetDevicesCount       int    `json:"fleet_devices_count"`
+	Evidence                string `json:"evidence,omitempty"`
+	UnresolvedFleetIPsCount int    `json:"unresolved_fleet_ips_count,omitempty"`
 }
 
 type transportPortKey struct {
@@ -50,9 +53,15 @@ type transportPortKey struct {
 	port     uint16
 }
 
+type fleetDeviceSet struct {
+	ips        map[netip.Addr]struct{}
+	imsis      map[string]struct{}
+	unresolved map[netip.Addr]struct{}
+}
+
 type endpointAccumulator struct {
-	listeners map[transportPortKey]map[netip.Addr]struct{}
-	targets   map[transportPortKey]map[netip.Addr]struct{}
+	listeners map[transportPortKey]*fleetDeviceSet
+	targets   map[transportPortKey]*fleetDeviceSet
 }
 
 // WritePrivateNonFleetEndpointsJSON writes schema v1 endpoint behavior JSON.
@@ -62,7 +71,13 @@ type endpointAccumulator struct {
 // before admission filtering. Its UTC calendar day is encoded as Unix milliseconds;
 // a zero timestamp produces snapshot_time 0 (unknown).
 func WritePrivateNonFleetEndpointsJSON(w io.Writer, serverRecords, probeRecords []Record, firstPacket time.Time) error {
-	document := buildPrivateNonFleetEndpointsDocument(serverRecords, probeRecords)
+	return WritePrivateNonFleetEndpointsJSONWithIMSI(w, serverRecords, probeRecords, firstPacket, false)
+}
+
+// WritePrivateNonFleetEndpointsJSONWithIMSI counts resolved IMSIs when enabled.
+// Unresolved fleet IPs are reported separately and do not count as devices.
+func WritePrivateNonFleetEndpointsJSONWithIMSI(w io.Writer, serverRecords, probeRecords []Record, firstPacket time.Time, countIMSI bool) error {
+	document := buildPrivateNonFleetEndpointsDocumentWithIMSI(serverRecords, probeRecords, countIMSI)
 	if !firstPacket.IsZero() {
 		utc := firstPacket.UTC()
 		document.SnapshotTime = time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
@@ -76,12 +91,16 @@ func WritePrivateNonFleetEndpointsJSON(w io.Writer, serverRecords, probeRecords 
 }
 
 func buildPrivateNonFleetEndpointsDocument(serverRecords, probeRecords []Record) PrivateNonFleetEndpointsDocument {
+	return buildPrivateNonFleetEndpointsDocumentWithIMSI(serverRecords, probeRecords, false)
+}
+
+func buildPrivateNonFleetEndpointsDocumentWithIMSI(serverRecords, probeRecords []Record, countIMSI bool) PrivateNonFleetEndpointsDocument {
 	byIP := make(map[netip.Addr]*endpointAccumulator)
 	for _, record := range serverRecords {
-		addEndpointEvidence(byIP, record.DstIP, record.SrcIP, record.Protocol, record.DstPort, true)
+		addEndpointEvidence(byIP, record.DstIP, record.SrcIP, record.Protocol, record.DstPort, true, record.FleetIdentity, countIMSI)
 	}
 	for _, record := range probeRecords {
-		addEndpointEvidence(byIP, record.SrcIP, record.DstIP, record.Protocol, record.DstPort, false)
+		addEndpointEvidence(byIP, record.SrcIP, record.DstIP, record.Protocol, record.DstPort, false, record.FleetIdentity, countIMSI)
 	}
 
 	addresses := make([]netip.Addr, 0, len(byIP))
@@ -95,6 +114,9 @@ func buildPrivateNonFleetEndpointsDocument(serverRecords, probeRecords []Record)
 	document := PrivateNonFleetEndpointsDocument{
 		SchemaVersion: privateNonFleetEndpointsSchemaVersion,
 		Endpoints:     make([]PrivateNonFleetEndpoint, 0, len(addresses)),
+	}
+	if countIMSI {
+		document.FleetIdentityBasis = "imsi"
 	}
 	for _, addr := range addresses {
 		accumulator := byIP[addr]
@@ -134,6 +156,8 @@ func addEndpointEvidence(
 	protocol Protocol,
 	port uint16,
 	server bool,
+	identity string,
+	countIMSI bool,
 ) {
 	if !endpointIP.Is4() || !fleetIP.Is4() {
 		return
@@ -143,8 +167,8 @@ func addEndpointEvidence(
 	accumulator := byIP[endpointIP]
 	if accumulator == nil {
 		accumulator = &endpointAccumulator{
-			listeners: make(map[transportPortKey]map[netip.Addr]struct{}),
-			targets:   make(map[transportPortKey]map[netip.Addr]struct{}),
+			listeners: make(map[transportPortKey]*fleetDeviceSet),
+			targets:   make(map[transportPortKey]*fleetDeviceSet),
 		}
 		byIP[endpointIP] = accumulator
 	}
@@ -157,24 +181,37 @@ func addEndpointEvidence(
 	if server {
 		behaviors = accumulator.listeners
 	}
-	fleetDevices := behaviors[key]
-	if fleetDevices == nil {
-		fleetDevices = make(map[netip.Addr]struct{})
-		behaviors[key] = fleetDevices
+	devices := behaviors[key]
+	if devices == nil {
+		devices = &fleetDeviceSet{}
+		behaviors[key] = devices
 	}
-	fleetDevices[fleetIP] = struct{}{}
+	if !countIMSI {
+		if devices.ips == nil {
+			devices.ips = make(map[netip.Addr]struct{})
+		}
+		devices.ips[fleetIP] = struct{}{}
+	} else if identity != "" {
+		if devices.imsis == nil {
+			devices.imsis = make(map[string]struct{})
+		}
+		devices.imsis[identity] = struct{}{}
+	} else {
+		if devices.unresolved == nil {
+			devices.unresolved = make(map[netip.Addr]struct{})
+		}
+		devices.unresolved[fleetIP] = struct{}{}
+	}
 }
 
-func transportBehaviors(sets map[transportPortKey]map[netip.Addr]struct{}) []TransportBehavior {
+func transportBehaviors(sets map[transportPortKey]*fleetDeviceSet) []TransportBehavior {
 	behaviors := make([]TransportBehavior, 0, len(sets))
 	for key, fleetDevices := range sets {
-		if len(fleetDevices) == 0 {
-			continue
-		}
 		behaviors = append(behaviors, TransportBehavior{
-			Protocol:          key.protocol,
-			Port:              key.port,
-			FleetDevicesCount: len(fleetDevices),
+			Protocol:                key.protocol,
+			Port:                    key.port,
+			FleetDevicesCount:       len(fleetDevices.ips) + len(fleetDevices.imsis),
+			UnresolvedFleetIPsCount: len(fleetDevices.unresolved),
 		})
 	}
 	sort.Slice(behaviors, func(i, j int) bool {

@@ -5,6 +5,9 @@ dnsextract:
   net_id: andel-1
 
   fleet: ./fleet.txt
+  # Alternative device pool membership: remove fleet, then enable fleet_subnets.
+  # fleet_subnets: [10.181.0.0/16, 10.52.192.0/18, 10.81.160.0/19]
+  # RADIUS streams also set radius_imsi: true below. Pass 1 is never pool-filtered.
   fleet_scan_workers: 0
 
   output_root: ./pcaptool_output

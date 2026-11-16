@@ -9,10 +9,11 @@ import (
 )
 
 type edgeAggregationKey struct {
-	issuer string
-	dst    string
-	proto  connectivity.L4Proto
-	port   uint16
+	identity string
+	issuer   string
+	dst      string
+	proto    connectivity.L4Proto
+	port     uint16
 }
 
 // edgeAccumulator incrementally applies the legacy file-order edge merge. It
@@ -30,10 +31,11 @@ func newEdgeAccumulator() *edgeAccumulator {
 func (a *edgeAccumulator) merge(batch []connectivity.Edge) {
 	for _, e := range batch {
 		key := edgeAggregationKey{
-			issuer: e.IssuerIP,
-			dst:    e.DstIP,
-			proto:  e.Protocol,
-			port:   e.Port,
+			identity: e.IssuerIdentity,
+			issuer:   e.IssuerIP,
+			dst:      e.DstIP,
+			proto:    e.Protocol,
+			port:     e.Port,
 		}
 		if idx, ok := a.seen[key]; ok {
 			times := e.ObservedTimes

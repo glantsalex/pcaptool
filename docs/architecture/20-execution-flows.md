@@ -2,6 +2,34 @@
 
 Scope: this document refines the current `pcaptool dnsextract` runtime into three concrete flows. It is grounded in the active code path, not the older event-based helpers under `internal/pcap` and `internal/dns/correlate.go`.
 
+## Current RADIUS/subnet ordering
+
+The 2026-11-15 contract in [README](../../README.md#radius-and-subnet-membership-contract-2026-11-15)
+is authoritative: validate/discover -> optional unfiltered RADIUS index -> admitted
+DNS/SNI -> admitted connections and fleet evidence -> identity-aware artifacts.
+In RADIUS mode, later admission first rejects recognized RADIUS control packets,
+then evaluates fleet/subnet membership for ordinary traffic. This also covers
+requests/responses from a NAS inside the pool. Pass 1 remains unfiltered, and the
+NAS IP itself is not excluded from ordinary traffic analysis.
+
+As of 2026-11-16, the active SNI extractor and global merge preserve full capture
+timestamps in the raw-IP/name/endpoint key; IMSI is resolved downstream. Exact
+copies use stable basename provenance. In RADIUS mode, each connection observation
+receives its timed identity before the per-file/global 128-time cap. Both merges
+include identity (IMSI or explicit raw-IP fallback); the cap remains earliest plus
+latest 127 within a group. Topology joins name evidence using raw IP, destination
+and the name observation's timed identity, so an older owner's SNI cannot label a
+new/unknown owner. Correlation also rejects cross-owner candidate updates.
+Final uniqueness remains device/destination/name/protocol/port. Equal-rank duplicate
+rows keep the earlier selected observation, not necessarily the first packet ever
+seen. Legacy edges with no identity scope retain the previous selected-time lookup.
+Fleet device counts keep their separate per-packet resolution before aggregation.
+The happy-path stage table below describes the non-RADIUS baseline. In RADIUS
+mode index construction precedes extraction; later identity enrichment only queries
+that completed immutable index. Shared and separate fleet scans receive the same
+membership predicate and packet-time identity resolver. UDP aggregation keys retain
+resolved IMSI so reuse of an IP cannot collapse device cardinality.
+
 ## 1. Happy Path
 
 ### Ordered stages
@@ -10,7 +38,7 @@ Scope: this document refines the current `pcaptool dnsextract` runtime into thre
 | --- | --- | --- | --- |
 | 1. CLI dispatch and fail-fast validation | `main.main` -> `cmd.Execute` -> `cmd.runDNSExtract` | raw args, `cmd.OutputManager` | Validates `--format` and `--topology-dns-window`, then creates the run directory. |
 | 2. Input discovery | `cmd.NewOutputManager`, `pcap.DiscoverPCAPFiles` | `cmd.OutputManager`, `[]string` PCAP paths | Canonical per-run layout is fixed before packet processing starts. |
-| 3. Corpus extraction | `dns.BuildTransactionsWithSNIFromPCAPs` | `[]*dns.DNSTransaction`, internal `dns.TxKey` buckets | One scan extracts DNS transactions plus synthetic SNI-backed transactions when SNI is enabled. |
+| 3. Corpus extraction | `dns.BuildTransactionsWithSNIFromPCAPs` | `[]*dns.DNSTransaction`, internal `dns.TxKey` buckets | One scan extracts DNS transactions plus synthetic SNI-backed transactions when SNI is enabled. Transport selection follows link decoding (including 802.1Q/QinQ); a VLAN-blind transport BPF must not precede decoding. |
 | 4. Optional light filtering | `dns.FilterOutNTPDNSTransactions` | `[]*dns.DNSTransaction` | Default path drops obvious NTP/time-sync names before correlation. |
 | 5. Connection correlation | `dns.AttachConnectionsAndCollectEdgesFromPCAPs` | `[]*dns.DNSTransaction`, `[]connectivity.Edge`, `dns.FirstPacketInfo` | Second corpus scan attaches best connection candidates and emits observed connectivity edges. |
 | 6. Issuer labeling and record prep | `runDNSExtract`, `dns.ToOutputRecords`, `dns.FilterAndDedupRecords`, `dns.SortOutputRecords` | mutated `DNSTransaction`, `[]dns.OutputRecord` | Default issuer label is the issuer IP. Records with no matched destination port are dropped from the main table output. |
@@ -42,7 +70,7 @@ Scope: this document refines the current `pcaptool dnsextract` runtime into thre
 | 3. Fallback-map load branch | `dns.LoadIPToDNSFromFile` | `map[string][]string` IP->DNS map | Makes CSV fallback available to both correlation guards and topology attribution. |
 | 4. Safe connection backfill | `dns.AttachConnectionsAndCollectEdgesFromPCAPs` | mutated `DNSTransaction`, `dns.ConnCandidate`, `dns.FirstPacketInfo`, `[]connectivity.Edge` | Direct `(issuer,dst)` matches win. If no match exists, TCP-only issuer fallback may infer a match, but UDP fallback is explicitly disabled. |
 | 5. CSV guard on inferred matches | `allowConnectionInferredDNSBackfill` | candidate `DNSTransaction`, CSV map | Even when TCP fallback finds a candidate transaction, CSV can veto the inferred binding if the IP conflicts with a known single-name mapping. |
-| 6. Identity enrichment branch | `radius.BuildIMSIIndexFromPCAPs`, `IMSIIndex.Lookup`, `runDNSExtract` issuer loop | `radius.SessionWindow`, `radius.IMSIIndex`, mutated `DNSTransaction` | Optional path that replaces issuer IP labels with IMSI labels in both table and topology views. |
+| 6. Identity enrichment branch | `IMSIIndex.Lookup`, `runDNSExtract` issuer loop (index already built before extraction) | `radius.SessionWindow`, `radius.IMSIIndex`, mutated `DNSTransaction` | Optional path that replaces issuer IP labels with IMSI labels in both table and topology views. |
 | 7. Learned fallback-map update | `dns.StrongObservedIPDNSPairsFromTransactions`, `dns.MergeIPToDNSMaps`, `dns.AppendIPDNSPairsToFile` | `[]dns.IPDNSPair`, optional `[]dns.IPDNSAppendAuditRecord` | Strong `dns+synack` observations can be persisted back into the CSV fallback map for future runs. |
 | 8. Final topology attribution | `dns.BuildNetworkTopologyMatrixEntriesWithOptions` | `[]dns.TopologyEntry`, `dns.TopologyBuildOptions` | Best-match lookup, CSV `mid-session` / `csv+conn`, strong-DNS-over-CSV suppression, peer completion, unresolved retention, and optional short squashing all happen here. |
 
@@ -101,6 +129,6 @@ Scope: this document refines the current `pcaptool dnsextract` runtime into thre
 
 - `internal/pcap.Event`, `dns.BuildTransactionsFromEvents`, and `dns.AttachConnections` still look like an older event-based flow rather than part of `dnsextract`.
 - `internal/dns/from_tls.go` builds synthetic SNI-backed `DNSTransaction` values too, but the active path uses `sniExtractor` inside `BuildTransactionsWithSNIFromPCAPs`.
-- Those two SNI paths do not initialize `DNSTransaction` identically: `from_tls.go` sets `NameEvidence: EvSNI`, while `sniExtractor` currently builds the transaction without that field populated.
+- Both SNI paths set `NameEvidence: EvSNI`; the active combined scan is guarded by tagged/untagged packet regression tests and the paired VLAN fixture.
 - `internal/dns/name_ip_evidence_index.go` defines evidence-index helpers that appear unused on the current hot path.
 - Two separate `L4Proto` types exist in `internal/dns` and `internal/connectivity` with the same logical values but different ownership.

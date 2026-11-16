@@ -18,6 +18,8 @@ const (
 // Record represents observed TCP SYN attempt evidence or inferred UDP edge
 // evidence from captured traffic.
 type Record struct {
+	// FleetIdentity is resolved at packet time, before UDP aggregation.
+	FleetIdentity   string
 	SrcIP           netip.Addr
 	DstIP           netip.Addr
 	DstPort         uint16

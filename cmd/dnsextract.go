@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -288,19 +289,42 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 		packetAdmission = pcap.IPv4EndpointAdmission(loadedFleet.Contains)
 	}
 
+	if opts.FleetSubnets != nil {
+		loadedFleet, err := syntrail.ParseFleetSubnets(opts.FleetSubnets)
+		if err != nil {
+			return err
+		}
+		fleet = &loadedFleet
+		packetAdmission = pcap.IPv4EndpointAdmission(loadedFleet.Contains)
+	}
+
 	// --------------------------------------------------------------------
 	// Pass 1: RADIUS index (if required )
 	// --------------------------------------------------------------------
 	var imsiIndex *radius.IMSIIndex // adjust type name to your actual exported type
 	if opts.RadiusIMSI {
 		progress.SetStage("Pass 1: building RADIUS IP→IMSI index...")
-		idx, err := radius.BuildIMSIIndexFromPCAPsWithOptions(ctx, files, radius.ScanOptions{
-			PacketAdmission: packetAdmission,
-		})
+		idx, err := radius.BuildIMSIIndexFromPCAPs(ctx, files)
 		if err != nil {
 			return err
 		}
 		imsiIndex = idx
+		infoDiagnostic(os.Stderr, "radius_index_ready", map[string]any{"mapped_addresses": idx.AddressCount(), "packet_admission": "unfiltered"})
+		// RADIUS control traffic is not device traffic, even when a NAS address
+		// falls inside the configured fleet. Reject it before membership lookup.
+		packetAdmission = radius.ExcludePackets(packetAdmission)
+	}
+
+	var fleetIdentity func(syntrail.Record) string
+	if opts.RadiusIMSI && fleet != nil {
+		fleetIdentity = func(record syntrail.Record) string {
+			ip := record.SrcIP
+			if !fleet.Contains(ip) {
+				ip = record.DstIP
+			}
+			identity, _ := imsiIndex.LookupAddr(ip, record.Timestamp)
+			return identity
+		}
 	}
 
 	// --------------------------------------------------------------------
@@ -366,11 +390,25 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	}
 	useSharedFleetScan := fleet != nil && opts.FleetScanWorkers == 0 && canUseSharedFleetScan(files)
 	connectionScanOpt := dns.PacketScanOptions{PacketAdmission: packetAdmission}
+	if opts.RadiusIMSI {
+		// The completed Pass 1 index is immutable. Resolve identity before
+		// either per-file or global edge timestamp limits can discard an owner.
+		connectionScanOpt.IssuerIdentity = func(ip string, ts time.Time) string {
+			if imsiIndex != nil {
+				if addr, err := netip.ParseAddr(ip); err == nil {
+					if imsi, ok := imsiIndex.LookupAddr(addr.Unmap(), ts); ok {
+						return imsi
+					}
+				}
+			}
+			return ip
+		}
+	}
 	var sharedFleetAccumulator *syntrail.Accumulator
 	var sharedFleetOptions syntrail.ScanOptions
 	var fleetCompatibilityRereads atomic.Int64
 	if useSharedFleetScan {
-		sharedFleetOptions, err = directionScanOptions(fleet, opts.DirectionRegistry, opts.NetID, syntrail.ScanOptions{PacketAdmission: packetAdmission})
+		sharedFleetOptions, err = directionScanOptions(fleet, opts.DirectionRegistry, opts.NetID, syntrail.ScanOptions{PacketAdmission: packetAdmission, FleetIdentity: fleetIdentity})
 		if err != nil {
 			return err
 		}
@@ -443,6 +481,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	if fleet != nil {
 		synTrailStartedAt := time.Now()
 		artifactOpt := synTrailArtifactOptions{
+			CountIMSI:                    opts.RadiusIMSI,
 			Diagnostics:                  diagnostic,
 			DirectionRegistry:            opts.DirectionRegistry,
 			FTPControlPorts:              ftpControlPorts,
@@ -455,6 +494,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 			progress.SetStage("Running fleet trail sidecar...")
 			artifactOpt.ScanOptions = syntrail.ScanOptions{
 				Workers:         effectiveFleetScanWorkers(opts.FleetScanWorkers, len(files)),
+				FleetIdentity:   fleetIdentity,
 				Progress:        fleetTrailScanProgress(progress.UpdateBar),
 				PacketAdmission: packetAdmission,
 			}
@@ -576,12 +616,8 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	// ---------------------------
 	issuerFn := func(ip string, ts time.Time) string {
 		// Default: use IP
-		if !opts.RadiusIMSI || imsiIndex == nil {
-			return ip
-		}
-		// Conservative mapping: use time-aware lookup
-		if imsi, ok := imsiIndex.Lookup(net.ParseIP(ip), ts); ok && imsi != "" {
-			return imsi
+		if connectionScanOpt.IssuerIdentity != nil {
+			return connectionScanOpt.IssuerIdentity(ip, ts)
 		}
 		return ip
 	}

@@ -16,6 +16,7 @@ import (
 )
 
 type synTrailArtifactOptions struct {
+	CountIMSI                    bool
 	Diagnostics                  *diagnostics.Session
 	DirectionRegistry            string
 	FTPControlPorts              map[uint16]struct{}
@@ -118,7 +119,7 @@ func writeSYNTrailArtifacts(
 	}
 
 	opt.Diagnostics.Checkpoint("fleet_write_private_endpoints", map[string]int{"server_records": len(privateServerRecords), "probe_records": len(privateProbeRecords)}, true)
-	path, err := writePrivateNonFleetEndpointsArtifact(om, privateServerRecords, privateProbeRecords, opt.FirstFilePacketTimestamp)
+	path, err := writePrivateNonFleetEndpointsArtifact(om, privateServerRecords, privateProbeRecords, opt.FirstFilePacketTimestamp, opt.CountIMSI)
 	if err != nil {
 		return nil, err
 	}
@@ -406,6 +407,7 @@ func writePrivateNonFleetEndpointsArtifact(
 	serverRecords []syntrail.Record,
 	probeRecords []syntrail.Record,
 	firstPacket time.Time,
+	countIMSI bool,
 ) (string, error) {
 	f, err := om.Create(privateNonFleetEndpointsFilename)
 	if err != nil {
@@ -413,7 +415,7 @@ func writePrivateNonFleetEndpointsArtifact(
 	}
 
 	path := f.Name()
-	writeErr := syntrail.WritePrivateNonFleetEndpointsJSON(f, serverRecords, probeRecords, firstPacket)
+	writeErr := syntrail.WritePrivateNonFleetEndpointsJSONWithIMSI(f, serverRecords, probeRecords, firstPacket, countIMSI)
 	closeErr := f.Close()
 	if writeErr != nil {
 		return "", fmt.Errorf("write %s: %w", privateNonFleetEndpointsFilename, writeErr)

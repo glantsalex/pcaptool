@@ -19,6 +19,7 @@ import (
 	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/aglants/pcaptool/progress"
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
 
@@ -120,13 +121,7 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 	var truncatedDNSPackets []TruncatedDNSPacket
 
 	// Global SNI dedup across files
-	type sniDedupKey struct {
-		issuer string
-		dstIP  string
-		port   uint16
-		sni    string
-	}
-	seenSNI := make(map[sniDedupKey]struct{})
+	seenSNI := make(map[sniKey]int)
 
 	var (
 		globalEarliest time.Time
@@ -170,16 +165,22 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 			if ip0 == nil {
 				continue
 			}
-			k := sniDedupKey{
-				issuer: tx.IssuerIP.String(),
-				dstIP:  ip0.String(),
-				port:   *tx.DestinationPort,
-				sni:    tx.DNSName,
+			k := sniKey{
+				observedAt: tx.RequestTime.UTC(),
+				issuer:     tx.IssuerIP.String(),
+				dstIP:      ip0.String(),
+				port:       *tx.DestinationPort,
+				sni:        tx.DNSName,
 			}
-			if _, exists := seenSNI[k]; exists {
+			if idx, exists := seenSNI[k]; exists {
+				// Duplicate capture copies choose stable provenance, independent
+				// of worker completion order. Identity is resolved downstream.
+				if tx.PCAPFile < globalSNI[idx].PCAPFile {
+					globalSNI[idx] = tx
+				}
 				continue
 			}
-			seenSNI[k] = struct{}{}
+			seenSNI[k] = len(globalSNI)
 			globalSNI = append(globalSNI, tx)
 		}
 
@@ -202,7 +203,7 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 		ti := txs[i].RequestTime
 		tj := txs[j].RequestTime
 		if ti.Equal(tj) {
-			return txs[i].DNSName < txs[j].DNSName
+			return transactionTieLess(txs[i], txs[j])
 		}
 		return ti.Before(tj)
 	})
@@ -252,15 +253,8 @@ func scanDNSAndSNIInFile(
 	}
 	defer handle.Close()
 
-	// Performance: when SNI is enabled include all TCP for ClientHello parsing,
-	// otherwise keep scan strictly on DNS transport.
-	filter := "udp port 53"
-	if includeSNI {
-		filter = "udp port 53 or tcp"
-	}
-	if err := handle.SetBPFFilter(filter); err != nil {
-		return nil, nil, nil, time.Time{}, fmt.Errorf("set BPF filter on %s: %w", path, err)
-	}
+	// Decode link encapsulation before selecting transports. A plain libpcap
+	// "udp port 53 or tcp" filter silently drops VLAN-tagged DNS and TLS.
 
 	src := gopacket.NewPacketSource(handle, handle.LinkType())
 	src.NoCopy = true
@@ -292,7 +286,7 @@ func scanDNSAndSNIInFile(
 				}
 				return dnsEx.Map(), sniTxs, dnsEx.TruncatedDNSPackets(), earliest, nil
 			}
-			if admit != nil && !admit(pkt) {
+			if !isDNSOrSNIPacket(pkt, includeSNI) || (admit != nil && !admit(pkt)) {
 				continue
 			}
 
@@ -305,4 +299,27 @@ func scanDNSAndSNIInFile(
 			}
 		}
 	}
+}
+
+// isDNSOrSNIPacket preserves the scan's UDP/53 plus optional TCP selection
+// after VLAN/QinQ decoding. Check the outer IP protocol so quoted packets in
+// ICMP errors cannot become independent DNS/SNI evidence.
+func isDNSOrSNIPacket(pkt gopacket.Packet, includeSNI bool) bool {
+	var protocol layers.IPProtocol
+	switch ip := pkt.NetworkLayer().(type) {
+	case *layers.IPv4:
+		protocol = ip.Protocol
+	case *layers.IPv6:
+		protocol = ip.NextHeader
+	default:
+		return false
+	}
+	if protocol == layers.IPProtocolTCP {
+		return includeSNI
+	}
+	if protocol != layers.IPProtocolUDP {
+		return false
+	}
+	udp, ok := pkt.TransportLayer().(*layers.UDP)
+	return ok && (udp.SrcPort == 53 || udp.DstPort == 53)
 }

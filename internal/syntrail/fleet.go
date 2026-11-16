@@ -9,9 +9,10 @@ import (
 	"strings"
 )
 
-// FleetSet contains the canonical IPv4 addresses that identify fleet hosts.
+// FleetSet identifies fleet hosts by canonical IPv4 addresses or device-pool prefixes.
 type FleetSet struct {
-	ips map[netip.Addr]struct{}
+	ips      map[netip.Addr]struct{}
+	prefixes []netip.Prefix
 }
 
 // LoadFleetIPv4File loads a fleet IPv4 address list from path.
@@ -68,8 +69,37 @@ func (f FleetSet) Contains(ip netip.Addr) bool {
 	if !ip.Is4() {
 		return false
 	}
-	_, ok := f.ips[ip]
-	return ok
+	if _, ok := f.ips[ip]; ok {
+		return true
+	}
+	for _, prefix := range f.prefixes {
+		if prefix.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseFleetSubnets parses an explicitly supplied, nonempty IPv4 device pool.
+// Membership uses native prefixes; no individual addresses are enumerated.
+func ParseFleetSubnets(values []string) (FleetSet, error) {
+	if len(values) == 0 {
+		return FleetSet{}, fmt.Errorf("fleet_subnets must not be empty")
+	}
+	fleet := FleetSet{}
+	seen := make(map[netip.Prefix]struct{}, len(values))
+	for _, value := range values {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+		if err != nil || !prefix.Addr().Is4() {
+			return FleetSet{}, fmt.Errorf("invalid IPv4 fleet subnet %q", value)
+		}
+		prefix = prefix.Masked()
+		if _, ok := seen[prefix]; !ok {
+			seen[prefix] = struct{}{}
+			fleet.prefixes = append(fleet.prefixes, prefix)
+		}
+	}
+	return fleet, nil
 }
 
 func isLocalIPv4(ip netip.Addr) bool {

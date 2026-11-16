@@ -5,12 +5,14 @@ import (
 	"time"
 
 	"github.com/aglants/pcaptool/internal/dns"
+	"github.com/aglants/pcaptool/internal/syntrail"
 )
 
 // DNSExtractOptions contains the source-neutral configuration for one
 // dnsextract execution. CLI parsing is responsible only for populating this
 // model; execution and semantic validation do not depend on Cobra.
 type DNSExtractOptions struct {
+	FleetSubnets                 []string
 	NetID                        string
 	OutputRoot                   string
 	EnforcePrivateAsSource       bool
@@ -69,6 +71,15 @@ type validatedDNSExtractOptions struct {
 }
 
 func validateDNSExtractOptions(opts DNSExtractOptions) (validatedDNSExtractOptions, error) {
+	if opts.FleetSubnets != nil {
+		if opts.Fleet != "" {
+			return validatedDNSExtractOptions{}, fmt.Errorf("fleet and fleet_subnets are mutually exclusive")
+		}
+		if _, err := syntrail.ParseFleetSubnets(opts.FleetSubnets); err != nil {
+			return validatedDNSExtractOptions{}, err
+		}
+	}
+
 	if opts.Format != "table" && opts.Format != "json" {
 		return validatedDNSExtractOptions{}, fmt.Errorf("unsupported --format %q (use table|json)", opts.Format)
 	}

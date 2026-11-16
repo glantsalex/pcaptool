@@ -5,14 +5,13 @@ import (
 	"context"
 	"crypto/sha1"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
-	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -26,8 +25,6 @@ func processRadiusFile(
 	ctx context.Context,
 	path string,
 	collector *radiusCollector,
-	dedup *deduper,
-	admit pcaputil.PacketAdmission,
 ) error {
 
 	var src *gopacket.PacketSource
@@ -44,15 +41,7 @@ func processRadiusFile(
 	//  buffer locally to reduce lock churn, then flush to shared collector
 	local := make([]radMsg, 0, 256)
 
-	emit := func(tsMs int64, imsi, ip, sid string, status radStatus, sessTimeSec uint32) {
-		local = append(local, radMsg{
-			tsMs: tsMs, imsi: imsi, ip: ip, sid: sid, status: status, sessTimeSec: sessTimeSec,
-		})
-		if len(local) >= 256 {
-			collector.AddBatch(local)
-			local = local[:0]
-		}
-	}
+	var captureEnd time.Time
 
 	r := bufio.NewReader(f)
 	magic, _ := r.Peek(4)
@@ -70,110 +59,74 @@ func processRadiusFile(
 		if e != nil {
 			return e
 		}
+		defer handle.Close()
 		src = gopacket.NewPacketSource(handle, handle.LinkType())
 	}
 
-	packets := src.Packets()
 	for {
-		select {
-		case <-fileCtx.Done():
-			return fileCtx.Err()
-		case pkt, ok := <-packets:
-			if !ok {
-				return nil
-			}
-			if admit != nil && !admit(pkt) {
-				continue
-			}
-			netL := pkt.NetworkLayer()
-			transL := pkt.TransportLayer()
-			if netL == nil || transL == nil {
-				continue
-			}
-			udp, ok := transL.(*layers.UDP)
-			if !ok || !(isRadiusPort(udp.SrcPort) || isRadiusPort(udp.DstPort)) {
-				continue
-			}
-
-			var rad layers.RADIUS
-			parser := gopacket.NewDecodingLayerParser(layers.LayerTypeRADIUS, &rad)
-			decoded := []gopacket.LayerType{}
-			if err := parser.DecodeLayers(udp.Payload, &decoded); err != nil {
-				continue
-			}
-			if rad.Code != layers.RADIUSCodeAccountingRequest {
-				continue
-			}
-
-			if dedup.Seen(rawDedupKey(&rad, netL, udp), pkt.Metadata().Timestamp) {
-				continue
-			}
-
-			ip, imsi := extractIPAndIMSI(&rad)
-			if ip == "" || imsi == "" {
-				continue
-			}
-
-			//TODO how to handle it after refactoring?
-			//does IMSI belong to this stream?
-			/*
-				if _, ok = idToDevice[imsi]; !ok {
-					continue
-				}
-			*/
-			if net.ParseIP(ip) == nil {
-				continue
-			}
-
-			status, sid, sessTimeSec, ok := extractStatusAndSessionID(&rad)
-			if !ok {
-				continue
-			}
-
-			pktTsMs := toMs(pkt.Metadata().Timestamp)
-
-			emit(pktTsMs, imsi, ip, sid, mapAcctStatusToRadStatus(status), sessTimeSec)
+		if err := fileCtx.Err(); err != nil {
+			return err
 		}
-	}
-}
-
-func coalesceSameRunForIndex(wins []SessionWindow) []SessionWindow {
-	if len(wins) == 0 {
-		return wins
-	}
-	sort.Slice(wins, func(i, j int) bool {
-		if wins[i].IMSI == wins[j].IMSI {
-			if wins[i].IP == wins[j].IP {
-				if wins[i].SessionID == wins[j].SessionID {
-					return wins[i].StartMs < wins[j].StartMs
-				}
-				return wins[i].SessionID < wins[j].SessionID
+		pkt, err := src.NextPacket()
+		if err == io.EOF {
+			if err := fileCtx.Err(); err != nil {
+				return err
 			}
-			return wins[i].IP < wins[j].IP
+			collector.AddBatch(local)
+			collector.ObserveCaptureEnd(captureEnd)
+			return nil
 		}
-		return wins[i].IMSI < wins[j].IMSI
-	})
-	out := wins[:0]
-	for _, w := range wins {
-		if len(out) == 0 {
-			out = append(out, w)
+		if err != nil {
+			return fmt.Errorf("read RADIUS capture: %w", err)
+		}
+		if ts := pkt.Metadata().Timestamp; ts.After(captureEnd) {
+			captureEnd = ts
+		}
+
+		netL := pkt.NetworkLayer()
+		transL := pkt.TransportLayer()
+		if netL == nil || transL == nil {
 			continue
 		}
-		last := &out[len(out)-1]
-		same := last.IMSI == w.IMSI && last.IP == w.IP && last.SessionID == w.SessionID
-		touches := w.StartMs <= last.EndMs+coalesceEpsMs
-		if same && touches {
-			if w.StartMs < last.StartMs {
-				last.StartMs = w.StartMs
-			}
-			if w.EndMs > last.EndMs {
-				last.EndMs = w.EndMs
-			}
+		udp, ok := transL.(*layers.UDP)
+		if !ok || !(isRadiusPort(udp.SrcPort) || isRadiusPort(udp.DstPort)) {
 			continue
 		}
-		out = append(out, w)
+
+		var rad layers.RADIUS
+		parser := gopacket.NewDecodingLayerParser(layers.LayerTypeRADIUS, &rad)
+		decoded := []gopacket.LayerType{}
+		if err := parser.DecodeLayers(udp.Payload, &decoded); err != nil {
+			continue
+		}
+		if rad.Code != layers.RADIUSCodeAccountingRequest {
+			continue
+		}
+
+		ip, imsi := extractIPAndIMSI(&rad)
+		if ip == "" || imsi == "" {
+			continue
+		}
+
+		if net.ParseIP(ip) == nil {
+			continue
+		}
+
+		status, sid, sessTimeSec, hasSessionTime, ok := extractStatusAndSessionID(&rad)
+		if !ok {
+			continue
+		}
+
+		pktTsMs := pkt.Metadata().Timestamp.UTC().UnixMilli()
+
+		local = append(local, radMsg{tsMs: pktTsMs, imsi: imsi, ip: ip, sid: sid,
+			status: mapAcctStatusToRadStatus(status), sessTimeSec: sessTimeSec,
+			hasSessionTime: hasSessionTime, dedupKey: rawDedupKey(&rad, netL, udp)})
+		if len(local) >= 256 {
+			collector.AddBatch(local)
+			local = local[:0]
+		}
 	}
-	return out
 }
 
 func isRadiusPort(p layers.UDPPort) bool {
@@ -221,7 +174,7 @@ func canonicalRadiusPayload(udpPayload []byte) []byte {
 	}
 	return buf
 }
-func extractStatusAndSessionID(r *layers.RADIUS) (status uint32, sid string, sessTimeSec uint32, ok bool) {
+func extractStatusAndSessionID(r *layers.RADIUS) (status uint32, sid string, sessTimeSec uint32, hasSessionTime, ok bool) {
 	for _, a := range r.Attributes {
 		switch a.Type {
 		case layers.RADIUSAttributeTypeAcctStatusType: // 40
@@ -232,11 +185,12 @@ func extractStatusAndSessionID(r *layers.RADIUS) (status uint32, sid string, ses
 			sid = canonicalSID(string(a.Value))
 		case layers.RADIUSAttributeTypeAcctSessionTime: // 46 (seconds)+
 			if len(a.Value) >= 4 {
+				hasSessionTime = true
 				sessTimeSec = uint32(a.Value[0])<<24 | uint32(a.Value[1])<<16 | uint32(a.Value[2])<<8 | uint32(a.Value[3])
 			}
 		}
 	}
-	return status, sid, sessTimeSec, status != 0
+	return status, sid, sessTimeSec, hasSessionTime, status == acctStatusStart || status == acctStatusInterim || status == acctStatusStop
 }
 
 func extractIPAndIMSI(r *layers.RADIUS) (ip, imsi string) {

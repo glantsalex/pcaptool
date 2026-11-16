@@ -22,6 +22,8 @@ type ScanProgressFunc func(done, total int, file string)
 
 // ScanOptions controls packet capture scanning behavior.
 type ScanOptions struct {
+	// FleetIdentity resolves the fleet-side IMSI before observations are aggregated.
+	FleetIdentity func(Record) string
 	// Workers is the maximum number of capture files scanned concurrently.
 	// Values <= 1 preserve the historical sequential scan behavior.
 	Workers int
@@ -58,7 +60,7 @@ func ScanFilesWithOptions(ctx context.Context, files []string, opts ScanOptions)
 		cache = NewSyslogCache()
 	}
 	scanner := func(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
-		return ScanFileWithOptions(ctx, path, ScanOptions{PacketAdmission: admit, SyslogCache: cache, SyslogEligible: opts.SyslogEligible})
+		return ScanFileWithOptions(ctx, path, ScanOptions{PacketAdmission: admit, SyslogCache: cache, SyslogEligible: opts.SyslogEligible, FleetIdentity: opts.FleetIdentity})
 	}
 	records, err := scanFilesConcurrentWithScanner(ctx, files, opts.Workers, opts.Progress, opts.PacketAdmission, scanner)
 	ApplySyslogQualifications(records, cache)
@@ -309,6 +311,7 @@ func (a *Accumulator) TakeRecords() []Record {
 // Collector extracts trail evidence from one decoded capture file. Collector
 // is owned by one file worker and is not safe for concurrent use.
 type Collector struct {
+	fleetIdentity  func(Record) string
 	syslogCache    *SyslogCache
 	syslogEligible func(netip.Addr, netip.Addr) bool
 	tcpRecords     []Record
@@ -328,16 +331,22 @@ func NewCollectorWithOptions(opts ScanOptions) *Collector {
 	if cache == nil {
 		cache = NewSyslogCache()
 	}
-	return &Collector{udpRecords: make(map[observedRecordKey]Record), syslogCache: cache, syslogEligible: opts.SyslogEligible}
+	return &Collector{fleetIdentity: opts.FleetIdentity, udpRecords: make(map[observedRecordKey]Record), syslogCache: cache, syslogEligible: opts.SyslogEligible}
 }
 
 // Observe records eligible raw TCP SYN and UDP evidence from packet. All
 // retained fields are copied into stable value types before Observe returns.
 func (c *Collector) Observe(packet gopacket.Packet) {
 	if record, ok := synRecord(packet); ok {
+		if c.fleetIdentity != nil {
+			record.FleetIdentity = c.fleetIdentity(record)
+		}
 		c.tcpRecords = append(c.tcpRecords, record)
 	}
 	if record, ok := udpRecord(packet); ok {
+		if c.fleetIdentity != nil {
+			record.FleetIdentity = c.fleetIdentity(record)
+		}
 		if c.syslogEligible != nil && c.syslogEligible(record.SrcIP, record.DstIP) {
 			udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
 			record.SyslogQualified = c.syslogCache.Qualify(record.DstIP, record.DstPort, udp.Payload)
@@ -516,18 +525,20 @@ func udpRecord(packet gopacket.Packet) (Record, bool) {
 }
 
 type observedRecordKey struct {
-	srcIP    netip.Addr
-	dstIP    netip.Addr
-	dstPort  uint16
-	protocol Protocol
+	fleetIdentity string
+	srcIP         netip.Addr
+	dstIP         netip.Addr
+	dstPort       uint16
+	protocol      Protocol
 }
 
 func addEarliestRecord(records map[observedRecordKey]Record, order *[]observedRecordKey, record Record) {
 	key := observedRecordKey{
-		srcIP:    record.SrcIP,
-		dstIP:    record.DstIP,
-		dstPort:  record.DstPort,
-		protocol: record.Protocol,
+		fleetIdentity: record.FleetIdentity,
+		srcIP:         record.SrcIP,
+		dstIP:         record.DstIP,
+		dstPort:       record.DstPort,
+		protocol:      record.Protocol,
 	}
 	current, ok := records[key]
 	if !ok {

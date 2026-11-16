@@ -2,6 +2,18 @@
 
 Scope: this inventory covers the most important data carriers on the active `pcaptool dnsextract` path. It intentionally skips small file-local helpers unless they materially affect control flow or final semantics.
 
+## Timed observation identity (2026-11-16)
+
+`dns.sniKey` contains issuer IP, destination IP, destination port, name and full
+UTC `time.Time`. It deliberately has no IMSI. Identical copies collapse, while
+observations at different times remain available for identity resolution.
+`connectivity.Edge.IssuerIdentity` is an internal grouping discriminator: empty
+means legacy/unscoped; in RADIUS mode it holds the timed IMSI or raw-IP fallback.
+`IssuerIP` always retains the raw address for name correlation. Both the collector
+key and global edge-aggregation key include identity before applying their bounded
+timestamp merge. The topology join additionally scopes DNS/SNI by the identity at
+its `RequestTime`. These are in-memory changes, not artifact schema additions.
+
 ## Classification Legend
 
 - `contract-bearing`: directly shapes on-disk artifacts or persisted behavior
@@ -31,14 +43,14 @@ Scope: this inventory covers the most important data carriers on the active `pca
 | `Evidence` | `internal/dns/evidence.go` | Bitmask describing how a name/IP association was obtained. | DNS response parsing, SNI synthesis, active resolve, observed-connection marking | `ToOutputRecords`, topology builder, audit builder, tests | Yes; OR-ed into `DNSTransaction.ResolvedIPEvidence` and normalized in helper code | heuristic-state | Central to source labels. CSV fallback in topology bypasses this type and writes source strings directly. |
 | `FirstPacketInfo` | `internal/dns/from_pcap.go` | Earliest packet metadata seen during correlation scan. | `AttachConnectionsAndCollectEdgesFromPCAPs` | manifest writing, IP/DNS append audit writing | No after return | intermediate | Metadata carrier only, but it feeds the manifest contract. |
 | `Edge` | `internal/connectivity/collector.go` | Observed `(issuer,dst,proto,port,firstSeen)` connectivity fact. | `connectivity.Collector.Edges` / `EdgesByFirstSeen`, aggregated by `AttachConnectionsAndCollectEdgesFromPCAPs` | topology builder, FTP suppression helper, tests | No after creation/aggregation | intermediate | Bridge from packet observation to topology attribution. |
-| `SessionWindow` | `internal/radius/radius_session_builder.go` | Time window of IP ownership for `(IMSI, IP, SessionID)`. | `sessionBuilder.ingest`, `finalizeForReplay`, `closedCoalesced` | `BuildIMSIIndexFromPCAPs`, then `IMSIIndex.Lookup` | Yes; mutated inside `sessionBuilder` as accounting messages arrive | heuristic-state | Optional branch, but it changes issuer identity semantics, not just cosmetics. |
+| `SessionWindow` | `internal/radius/radius_session_builder.go` | Time window of IP ownership for `(IMSI, IP, SessionID)`. | `buildSessionWindows` | `BuildIMSIIndexFromPCAPs`, then `IMSIIndex.Lookup` | Yes during deterministic construction; immutable after index completion | heuristic-state | Optional branch, but it changes issuer identity semantics, not just cosmetics. |
 | `IMSIIndex` | `internal/radius/index.go` | Time-aware IP -> IMSI lookup structure. | `BuildIMSIIndexFromPCAPs` | issuer-label mutation in `runDNSExtract`, topology `issuerFn` | Yes during build; effectively read-only after return | heuristic-state | Empty index is a valid degraded result. |
 
 ## Types That Look Legacy, Duplicated, Or Ambiguous
 
 - `internal/pcap.Event` and `dns.txKey` support the older `BuildTransactionsFromEvents` / `AttachConnections` flow. They do not appear on the current `dnsextract` hot path.
 - `BuildSNITransactionsFromPCAPs` in `internal/dns/from_tls.go` produces synthetic `DNSTransaction` values too, which overlaps with the active `sniExtractor` path in `extractors.go` and `from_pcap_names.go`.
-- Those two SNI-producing paths populate `DNSTransaction` differently: `from_tls.go` sets `NameEvidence: EvSNI`, while the active `sniExtractor` path does not currently do so.
+- Both SNI-producing paths set `NameEvidence: EvSNI`; the active combined scan additionally defines the timed deduplication contract above.
 - `BuildNameIPEvidenceIndex` and `NameIPSourceLabel` in `internal/dns/name_ip_evidence_index.go` look current, but they are not referenced on the active runtime path inspected in this pass.
 - `internal/dns.L4Proto` and `internal/connectivity.L4Proto` represent the same domain concept with separate package-local types.
 
@@ -47,3 +59,14 @@ Scope: this inventory covers the most important data carriers on the active `pca
 - Should the older event-based flow be treated as dormant legacy or as a secondary supported path?
 - Is `from_tls.go` still meant to be authoritative anywhere, or has `BuildTransactionsWithSNIFromPCAPs` fully replaced it?
 - Are the unused evidence-index helpers intentionally reserved for future output work, or are they stale code?
+
+## RADIUS/subnet additions (2026-11-15)
+
+`FleetSet` supports exact IPv4 addresses or parsed IPv4 prefixes. `DNSExtractOptions`
+and YAML carry `FleetSubnets`; PTI supplies the DB-owned values. `SessionWindow`
+retains supported start/end bounds and evidence needed to limit inferred tails.
+`IMSIIndex` uses `netip.Addr` keys and an allocation-free address lookup; conflicting
+owners resolve to unknown. `syntrail.Record.FleetIdentity` is resolved before UDP
+aggregation and retained in its key. Daily private-endpoint documents declare the
+IMSI count basis and unresolved address coverage; legacy non-RADIUS JSON is unchanged.
+See README's RADIUS/subnet contract for interval and compatibility semantics.

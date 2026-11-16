@@ -27,17 +27,24 @@ const (
 )
 
 type Edge struct {
-	IssuerIP      string
-	DstIP         string
-	Protocol      L4Proto
-	Port          uint16
-	FirstSeen     time.Time
-	ObservedTimes []time.Time
+	// IssuerIdentity scopes observations before pruning: IMSI or raw-IP fallback.
+	// Empty means legacy, unpartitioned collection. IssuerIP remains the raw IP.
+	IssuerIdentity string
+	IssuerIP       string
+	DstIP          string
+	Protocol       L4Proto
+	Port           uint16
+	FirstSeen      time.Time
+	ObservedTimes  []time.Time
 }
 
 const maxEdgeObservedTimes = 128
 
 type Options struct {
+	// IssuerIdentity resolves the issuer at each observation time. It must be
+	// safe for concurrent calls when shared by file collectors. Nil preserves
+	// legacy grouping; an empty result in scoped mode uses the raw IP.
+	IssuerIdentity         func(string, time.Time) string
 	PendingTTL             time.Duration
 	SweepEvery             time.Duration
 	ExcludedDstPorts       map[uint16]struct{}
@@ -90,10 +97,11 @@ type tcpKey struct {
 type udpKey = tcpKey
 
 type edgeKey struct {
-	issuer string
-	dst    string
-	proto  L4Proto
-	port   uint16
+	identity string
+	issuer   string
+	dst      string
+	proto    L4Proto
+	port     uint16
 }
 
 func NewCollector(opt Options) *Collector {
@@ -167,12 +175,13 @@ func (c *Collector) Edges() []Edge {
 			continue
 		}
 		out = append(out, Edge{
-			IssuerIP:      k.issuer,
-			DstIP:         k.dst,
-			Protocol:      k.proto,
-			Port:          k.port,
-			FirstSeen:     times[0],
-			ObservedTimes: append([]time.Time(nil), times...),
+			IssuerIdentity: k.identity,
+			IssuerIP:       k.issuer,
+			DstIP:          k.dst,
+			Protocol:       k.proto,
+			Port:           k.port,
+			FirstSeen:      times[0],
+			ObservedTimes:  append([]time.Time(nil), times...),
 		})
 	}
 
@@ -186,7 +195,10 @@ func (c *Collector) Edges() []Edge {
 		if out[i].Protocol != out[j].Protocol {
 			return out[i].Protocol < out[j].Protocol
 		}
-		return out[i].Port < out[j].Port
+		if out[i].Port != out[j].Port {
+			return out[i].Port < out[j].Port
+		}
+		return out[i].IssuerIdentity < out[j].IssuerIdentity
 	})
 
 	return out
@@ -199,12 +211,13 @@ func (c *Collector) EdgesByFirstSeen() []Edge {
 			continue
 		}
 		out = append(out, Edge{
-			IssuerIP:      k.issuer,
-			DstIP:         k.dst,
-			Protocol:      k.proto,
-			Port:          k.port,
-			FirstSeen:     times[0],
-			ObservedTimes: append([]time.Time(nil), times...),
+			IssuerIdentity: k.identity,
+			IssuerIP:       k.issuer,
+			DstIP:          k.dst,
+			Protocol:       k.proto,
+			Port:           k.port,
+			FirstSeen:      times[0],
+			ObservedTimes:  append([]time.Time(nil), times...),
 		})
 	}
 
@@ -221,7 +234,10 @@ func (c *Collector) EdgesByFirstSeen() []Edge {
 		if out[i].Protocol != out[j].Protocol {
 			return out[i].Protocol < out[j].Protocol
 		}
-		return out[i].Port < out[j].Port
+		if out[i].Port != out[j].Port {
+			return out[i].Port < out[j].Port
+		}
+		return out[i].IssuerIdentity < out[j].IssuerIdentity
 	})
 
 	return out
@@ -267,6 +283,12 @@ func MergeEdgeObservedTimes(existing []time.Time, additions ...time.Time) []time
 }
 
 func (c *Collector) recordEdgeObservation(ek edgeKey, ts time.Time) {
+	if c.opt.IssuerIdentity != nil {
+		ek.identity = c.opt.IssuerIdentity(ek.issuer, ts)
+		if ek.identity == "" {
+			ek.identity = ek.issuer
+		}
+	}
 	c.edges[ek] = appendEdgeObservedTime(c.edges[ek], ts)
 }
 
@@ -343,7 +365,7 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 			return
 		}
 
-		ek := edgeKey{k.cip, k.sip, ProtoTCP, k.spt}
+		ek := edgeKey{issuer: k.cip, dst: k.sip, proto: ProtoTCP, port: k.spt}
 
 		if c.opt.CollapseFTPPassive {
 			if _, ok := c.ftpPassivePort[ek]; ok {
@@ -459,7 +481,7 @@ func (c *Collector) onUDP(srcIP, dstIP net.IP, udp *layers.UDP, ts time.Time) {
 		}
 	}
 
-	ek := edgeKey{issuer, dst, ProtoUDP, port}
+	ek := edgeKey{issuer: issuer, dst: dst, proto: ProtoUDP, port: port}
 	// For UDP confirmed edges, keep the first packet timestamp from issuer->dst flow.
 	c.recordEdgeObservation(ek, revTS)
 }

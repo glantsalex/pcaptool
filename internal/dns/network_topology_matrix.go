@@ -120,11 +120,21 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	}
 
 	type joinKey struct {
-		issuer string
-		dstIP  string
+		identity string
+		issuer   string
+		dstIP    string
 	}
 
-	// Raw-IP keyed tx index (not label keyed): (issuerIP,dstIP) -> tx list sorted by RequestTime.
+	scoped, legacy := false, false
+	for _, e := range edges {
+		if e.IssuerIdentity == "" {
+			legacy = true
+		} else {
+			scoped = true
+		}
+	}
+	// Keep raw IP for endpoint correlation; scope direct name evidence by its
+	// own timed identity so a previous owner's SNI cannot label a new owner.
 	txByIssuerDst := make(map[joinKey][]*DNSTransaction, 4096)
 	for _, tx := range txs {
 		if tx == nil || tx.IssuerIP == nil || tx.DNSName == "" {
@@ -133,6 +143,12 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		issuerRaw := strings.TrimSpace(tx.IssuerIP.String())
 		if issuerRaw == "" {
 			continue
+		}
+		identity := issuerRaw
+		if scoped && issuerLabel != nil {
+			if label := strings.TrimSpace(issuerLabel(issuerRaw, tx.RequestTime)); label != "" {
+				identity = label
+			}
 		}
 		for _, ip := range tx.ResolvedIPs {
 			if ip == nil {
@@ -143,12 +159,22 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 				continue
 			}
 			k := joinKey{issuer: issuerRaw, dstIP: ip4.String()}
-			txByIssuerDst[k] = append(txByIssuerDst[k], tx)
+			if legacy {
+				txByIssuerDst[k] = append(txByIssuerDst[k], tx)
+			}
+			if scoped {
+				k.identity = identity
+				txByIssuerDst[k] = append(txByIssuerDst[k], tx)
+			}
 		}
 	}
 	for k := range txByIssuerDst {
 		sort.Slice(txByIssuerDst[k], func(i, j int) bool {
-			return txByIssuerDst[k][i].RequestTime.Before(txByIssuerDst[k][j].RequestTime)
+			a, b := txByIssuerDst[k][i], txByIssuerDst[k][j]
+			if a.RequestTime.Equal(b.RequestTime) {
+				return transactionTieLess(a, b)
+			}
+			return a.RequestTime.Before(b.RequestTime)
 		})
 	}
 
@@ -344,12 +370,6 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			}
 		}
 
-		if issuerLabel != nil {
-			if lbl := issuerLabel(issuerRaw, observedAt); lbl != "" {
-				issuer = strings.TrimSpace(lbl)
-			}
-		}
-
 		proto := string(e.Protocol)
 
 		emit := func(dnsName, src string) {
@@ -357,7 +377,8 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			key := issuer + "|" + dstIP + "|" + dnsName + "|" + proto + "|" + itoa16(e.Port)
 			if idx, ok := seen[key]; ok {
 				// Keep one row per key, but prefer stronger attribution source.
-				if topologySourceRank(src) > topologySourceRank(out[idx].DNSSource) {
+				if topologySourceRank(src) > topologySourceRank(out[idx].DNSSource) ||
+					(topologySourceRank(src) == topologySourceRank(out[idx].DNSSource) && observedAt.Before(out[idx].ObservedAt)) {
 					out[idx].DNSSource = src
 					out[idx].ObservedAt = observedAt
 				}
@@ -376,9 +397,18 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		}
 
 		// Canonical dstIP is used for map keys.
-		bestTx, matchedObservedAt := pickBestTxForEdge(txByIssuerDst[joinKey{issuer: issuerRaw, dstIP: dstIP}], e, dstIP)
+		bestTx, matchedObservedAt := pickBestTxForEdge(txByIssuerDst[joinKey{issuer: issuerRaw, dstIP: dstIP, identity: e.IssuerIdentity}], e, dstIP)
 		if !matchedObservedAt.IsZero() {
 			observedAt = matchedObservedAt
+		}
+		// DNS/SNI can select a later edge observation. Resolve timed identity
+		// at the timestamp actually emitted, after that selection is final.
+		if e.IssuerIdentity != "" {
+			issuer = e.IssuerIdentity
+		} else if issuerLabel != nil {
+			if lbl := issuerLabel(issuerRaw, observedAt); lbl != "" {
+				issuer = strings.TrimSpace(lbl)
+			}
 		}
 		if bestTx != nil {
 			dnsName := normalize(bestTx.DNSName)

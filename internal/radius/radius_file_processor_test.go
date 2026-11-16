@@ -4,27 +4,23 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
 )
 
-func TestProcessRadiusFilePacketAdmissionFiltersBeforeEvidence(t *testing.T) {
+func TestProcessRadiusFileRetainsAllAccountingAndPartialBatch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "radius.pcap")
 	packets := []radiusAdmissionPacket{
 		{src: "192.168.1.10", dst: "192.168.1.20", imsi: "123456789012345", framedIP: "10.10.10.10", sessionID: "excluded"},
 	}
-	// processRadiusFile flushes evidence to its shared collector in batches of
-	// 256, so provide one full retained batch after the excluded packet.
+	// One full batch followed by a partial batch must retain every record.
 	for i := 0; i < 256; i++ {
 		packet := radiusAdmissionPacket{
 			src:       "10.0.0.1",
@@ -40,34 +36,17 @@ func TestProcessRadiusFilePacketAdmissionFiltersBeforeEvidence(t *testing.T) {
 	}
 	writeRadiusAdmissionPCAP(t, path, packets)
 
-	unfiltered := collectRadiusMessages(t, path, nil)
-	if len(unfiltered) != 256 || unfiltered[0].sid != "excluded" {
-		t.Fatalf("unfiltered RADIUS batch = %d messages, first session %q; want 256/excluded", len(unfiltered), unfiltered[0].sid)
+	unfiltered := collectRadiusMessages(t, path)
+	if len(unfiltered) != 257 || unfiltered[0].sid != "excluded" {
+		t.Fatalf("unfiltered RADIUS batch = %d messages, first session %q; want 257/excluded", len(unfiltered), unfiltered[0].sid)
 	}
 
-	fleet := map[netip.Addr]struct{}{
-		netip.MustParseAddr("10.0.0.1"): {},
-		netip.MustParseAddr("10.0.0.2"): {},
-	}
-	admit := pcaputil.IPv4EndpointAdmission(func(ip netip.Addr) bool {
-		_, ok := fleet[ip]
-		return ok
-	})
-	filtered := collectRadiusMessages(t, path, admit)
-	if len(filtered) != 256 {
-		t.Fatalf("filtered RADIUS messages = %d, want 256", len(filtered))
-	}
-	for _, message := range filtered {
-		if !strings.HasPrefix(message.sid, "retained-") {
-			t.Fatalf("excluded RADIUS evidence leaked through packet admission: %+v", message)
-		}
-	}
 }
 
-func collectRadiusMessages(t *testing.T, path string, admit pcaputil.PacketAdmission) []radMsg {
+func collectRadiusMessages(t *testing.T, path string) []radMsg {
 	t.Helper()
 	collector := NewRadiusCollector(4)
-	if err := processRadiusFile(context.Background(), path, collector, newDeduper(time.Hour, 1), admit); err != nil {
+	if err := processRadiusFile(context.Background(), path, collector); err != nil {
 		t.Fatalf("processRadiusFile(%q): %v", path, err)
 	}
 	return collector.Drain()
@@ -79,6 +58,9 @@ type radiusAdmissionPacket struct {
 	imsi      string
 	framedIP  string
 	sessionID string
+	status    uint32
+	duration  *uint32
+	ts        time.Time
 }
 
 func writeRadiusAdmissionPCAP(t *testing.T, path string, packets []radiusAdmissionPacket) {
@@ -96,7 +78,7 @@ func writeRadiusAdmissionPCAP(t *testing.T, path string, packets []radiusAdmissi
 	for i, packet := range packets {
 		data := buildRadiusAdmissionPacket(t, packet, byte(i+1))
 		if err := w.WritePacket(gopacket.CaptureInfo{
-			Timestamp: base.Add(time.Duration(i) * time.Second), CaptureLength: len(data), Length: len(data),
+			Timestamp: packetTime(packet, base.Add(time.Duration(i)*time.Second)), CaptureLength: len(data), Length: len(data),
 		}, data); err != nil {
 			f.Close()
 			t.Fatalf("write RADIUS pcap packet %d: %v", i, err)
@@ -117,7 +99,18 @@ func buildRadiusAdmissionPacket(t *testing.T, packet radiusAdmissionPacket, iden
 	payload[1] = identifier
 	payload = append(payload, attribute(byte(layers.RADIUSAttributeTypeUserName), []byte(packet.imsi))...)
 	payload = append(payload, attribute(byte(layers.RADIUSAttributeTypeFramedIPAddress), net.ParseIP(packet.framedIP).To4())...)
-	payload = append(payload, attribute(byte(layers.RADIUSAttributeTypeAcctStatusType), []byte{0, 0, 0, 1})...)
+	status := packet.status
+	if status == 0 {
+		status = acctStatusStart
+	}
+	value := make([]byte, 4)
+	binary.BigEndian.PutUint32(value, status)
+	payload = append(payload, attribute(byte(layers.RADIUSAttributeTypeAcctStatusType), value)...)
+	if packet.duration != nil {
+		value = make([]byte, 4)
+		binary.BigEndian.PutUint32(value, *packet.duration)
+		payload = append(payload, attribute(byte(layers.RADIUSAttributeTypeAcctSessionTime), value)...)
+	}
 	payload = append(payload, attribute(byte(layers.RADIUSAttributeTypeAcctSessionId), []byte(packet.sessionID))...)
 	binary.BigEndian.PutUint16(payload[2:4], uint16(len(payload)))
 
@@ -143,4 +136,11 @@ func buildRadiusAdmissionPacket(t *testing.T, packet radiusAdmissionPacket, iden
 		t.Fatalf("serialize RADIUS packet: %v", err)
 	}
 	return buf.Bytes()
+}
+
+func packetTime(p radiusAdmissionPacket, fallback time.Time) time.Time {
+	if !p.ts.IsZero() {
+		return p.ts
+	}
+	return fallback
 }
