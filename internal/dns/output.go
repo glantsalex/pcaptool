@@ -39,7 +39,7 @@ type OutputRecord struct {
 // FilterAndDedupRecords:
 //   - drop records with no destination_port
 //   - keep only one record per (issuer_ip, dns_name, destination_port)
-//     (earliest one wins because we sort by time later)
+//     (first encountered record wins; later sorting does not change the winner)
 func FilterAndDedupRecords(records []OutputRecord) []OutputRecord {
 	out := make([]OutputRecord, 0, len(records))
 	seen := make(map[string]struct{}, len(records))
@@ -65,83 +65,112 @@ func FilterAndDedupRecords(records []OutputRecord) []OutputRecord {
 // It also deduplicates ResolvedIPs per transaction.
 func ToOutputRecords(txs []*DNSTransaction) []OutputRecord {
 	records := make([]OutputRecord, 0, len(txs))
-
 	for _, tx := range txs {
-		issuer := tx.IssuerLabel
-		if issuer == "" && tx.IssuerIP != nil {
-			issuer = tx.IssuerIP.String()
+		records = append(records, toOutputRecord(tx))
+	}
+	return records
+}
+
+func outputIssuer(tx *DNSTransaction) string {
+	if tx.IssuerLabel != "" {
+		return tx.IssuerLabel
+	}
+	if tx.IssuerIP != nil {
+		return tx.IssuerIP.String()
+	}
+	return ""
+}
+
+// ConnectedOutputRecords is equivalent to FilterAndDedupRecords(ToOutputRecords(txs)),
+// but rejects missing ports and later duplicate keys before formatting answers,
+// timestamps, and resolver addresses. It preserves first encounter wins, including
+// the historical concatenated-key behavior. Callers retain txs for other reports.
+func ConnectedOutputRecords(txs []*DNSTransaction) []OutputRecord {
+	records := make([]OutputRecord, 0)
+	seen := make(map[string]struct{})
+	for _, tx := range txs {
+		if tx.DestinationPort == nil {
+			continue
 		}
-
-		rec := OutputRecord{
-			RequestTimeStr: tx.RequestTime.UTC().Format("2006-01-02 15:04:05.000"),
-			IssuerIP:       issuer,
-			DNSName:        tx.DNSName,
-			PCAPFile:       tx.PCAPFile,
+		key := outputIssuer(tx) + "|" + tx.DNSName + "|" + strconv.Itoa(int(*tx.DestinationPort))
+		if _, exists := seen[key]; exists {
+			continue
 		}
+		seen[key] = struct{}{}
+		records = append(records, toOutputRecord(tx))
+	}
+	return records
+}
 
-		// --- Dedup resolved IPs while preserving order ---
-		seen := make(map[string]struct{}, tx.resolvedIPLen())
+func toOutputRecord(tx *DNSTransaction) OutputRecord {
+	issuer := outputIssuer(tx)
 
-		// We'll fill sources only when we have at least one non-empty label.
-		var srcMap map[string]string
-
-		for i := 0; i < tx.resolvedIPLen(); i++ {
-			ip := tx.resolvedIPAt(i)
-			if ip.isNil() || ip.Equal(net.IP{}) {
-				continue
-			}
-
-			// Force IPv4-only here (consistent with your rules).
-			ip4 := ip.To4()
-			if ip4.isNil() {
-				continue
-			}
-			s := ip4.String()
-
-			if _, ok := seen[s]; ok {
-				continue
-			}
-			seen[s] = struct{}{}
-			rec.ResolvedIPs = append(rec.ResolvedIPs, s)
-
-			// Evidence label for this IP (best-effort).
-			ev := EvNone
-			if tx.hasResolvedIPEvidence() {
-				ev = tx.resolvedIPEvidenceValue(s)
-			}
-			// Fallback: if map missing, fall back to NameEvidence (dns/sni)
-			if ev == EvNone {
-				ev = tx.NameEvidence
-			}
-			label := EvidenceString(ev)
-			if label != "" {
-				if srcMap == nil {
-					srcMap = make(map[string]string, 4)
-				}
-				srcMap[s] = label
-			}
-		}
-
-		if srcMap != nil {
-			rec.ResolvedIPSources = srcMap
-		}
-
-		// Resolver IP (optional)
-		if tx.ResolverIP != nil && !tx.ResolverIP.Equal(net.IP{}) {
-			s := tx.ResolverIP.String()
-			rec.ResolverIP = &s
-		}
-
-		// Destination port (optional)
-		if tx.DestinationPort != nil {
-			p := int(*tx.DestinationPort)
-			rec.DestinationPort = &p
-		}
-
-		records = append(records, rec)
+	rec := OutputRecord{
+		RequestTimeStr: tx.RequestTime.UTC().Format("2006-01-02 15:04:05.000"),
+		IssuerIP:       issuer,
+		DNSName:        tx.DNSName,
+		PCAPFile:       tx.PCAPFile,
 	}
 
-	return records
+	// --- Dedup resolved IPs while preserving order ---
+	seen := make(map[string]struct{}, tx.resolvedIPLen())
+
+	// We'll fill sources only when we have at least one non-empty label.
+	var srcMap map[string]string
+
+	for i := 0; i < tx.resolvedIPLen(); i++ {
+		ip := tx.resolvedIPAt(i)
+		if ip.isNil() || ip.Equal(net.IP{}) {
+			continue
+		}
+
+		// Force IPv4-only here (consistent with your rules).
+		ip4 := ip.To4()
+		if ip4.isNil() {
+			continue
+		}
+		s := ip4.String()
+
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		rec.ResolvedIPs = append(rec.ResolvedIPs, s)
+
+		// Evidence label for this IP (best-effort).
+		ev := EvNone
+		if tx.hasResolvedIPEvidence() {
+			ev = tx.resolvedIPEvidenceValue(s)
+		}
+		// Fallback: if map missing, fall back to NameEvidence (dns/sni)
+		if ev == EvNone {
+			ev = tx.NameEvidence
+		}
+		label := EvidenceString(ev)
+		if label != "" {
+			if srcMap == nil {
+				srcMap = make(map[string]string, 4)
+			}
+			srcMap[s] = label
+		}
+	}
+
+	if srcMap != nil {
+		rec.ResolvedIPSources = srcMap
+	}
+
+	// Resolver IP (optional)
+	if tx.ResolverIP != nil && !tx.ResolverIP.Equal(net.IP{}) {
+		s := tx.ResolverIP.String()
+		rec.ResolverIP = &s
+	}
+
+	// Destination port (optional)
+	if tx.DestinationPort != nil {
+		p := int(*tx.DestinationPort)
+		rec.DestinationPort = &p
+	}
+	return rec
 }
 
 // SortOutputRecords sorts by request time, then issuer ip.

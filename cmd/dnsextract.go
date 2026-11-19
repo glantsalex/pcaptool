@@ -549,12 +549,8 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	diagnostic.Checkpoint("topology_output", nil, true)
 	progress.SetStage("Preparing records for output...")
 
-	// All DNS transactions (with & without connections)
-	allRecords := dns.ToOutputRecords(txs)
-
-	// Keep all rows (with & without connections), dedup by (issuer,dns,port)
-	// Port will be empty when there was no matched connection.
-	records := dns.FilterAndDedupRecords(allRecords)
+	// Select connected first-winning rows before allocating their rendered fields.
+	records := dns.ConnectedOutputRecords(txs)
 	dns.SortOutputRecords(records)
 
 	progress.SetStage(fmt.Sprintf("Writing output to %s...", om.RunDir()))
