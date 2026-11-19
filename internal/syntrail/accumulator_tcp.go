@@ -40,17 +40,22 @@ func (c *tcpChunk) add(r Record) {
 	c.slots = append(c.slots, slot)
 }
 
+// recordAt decodes a slot without allocating an intermediate record slice.
+func (c tcpChunk) recordAt(i int) Record {
+	slot := c.slots[i]
+	if slot.exception != 0 {
+		return c.exceptions[slot.exception-1]
+	}
+	return Record{
+		FleetIdentity: slot.fleetIdentity, SrcIP: slot.src, DstIP: slot.dst,
+		DstPort: slot.dstPort, Protocol: ProtocolTCP, Timestamp: slot.unixNanos, MissingTime: slot.missingTime,
+		SyslogQualified: slot.syslogQualified,
+	}
+}
+
 func (c tcpChunk) unpackInto(dst []Record) int {
-	for i, slot := range c.slots {
-		if slot.exception != 0 {
-			dst[i] = c.exceptions[slot.exception-1]
-			continue
-		}
-		dst[i] = Record{
-			FleetIdentity: slot.fleetIdentity, SrcIP: slot.src, DstIP: slot.dst,
-			DstPort: slot.dstPort, Protocol: ProtocolTCP, Timestamp: slot.unixNanos, MissingTime: slot.missingTime,
-			SyslogQualified: slot.syslogQualified,
-		}
+	for i := range c.slots {
+		dst[i] = c.recordAt(i)
 	}
 	return len(c.slots)
 }

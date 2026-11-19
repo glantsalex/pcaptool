@@ -72,6 +72,10 @@ func writeSYNTrailArtifactsFromRecords(
 ) (map[string]string, error) {
 	opt.Diagnostics.Checkpoint("fleet_classify", recordCounts(opt.Diagnostics, records), true)
 	buckets := syntrail.ClassifyRecords(records, fleet)
+	return writeClassifiedSYNTrailArtifacts(om, buckets, opt)
+}
+
+func writeClassifiedSYNTrailArtifacts(om *OutputManager, buckets syntrail.BucketedRecords, opt synTrailArtifactOptions) (map[string]string, error) {
 	if opt.Diagnostics != nil {
 		counts := make(map[string]int, 2*len(buckets))
 		for name, items := range buckets {

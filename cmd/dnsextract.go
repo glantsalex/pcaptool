@@ -508,14 +508,13 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 		} else {
 			progress.SetStage("Writing fleet trail artifacts...")
 			diagnostic.Checkpoint("fleet_accumulator_take", nil, true)
-			records := sharedFleetAccumulator.TakeRecords()
-			syntrail.ApplySyslogQualifications(records, sharedFleetOptions.SyslogCache)
-			synTrailArtifacts, err = writeSYNTrailArtifactsFromRecords(
-				om,
-				records,
-				*fleet,
-				artifactOpt,
-			)
+			// Transfer and classification now share one allocation phase. There is
+			// no intermediate record slice (and therefore no records_cap).
+			if diagnostic != nil {
+				diagnostic.Checkpoint("fleet_classify", map[string]int{"records_len": sharedFleetAccumulator.RecordCount()}, true)
+			}
+			buckets := sharedFleetAccumulator.TakeClassifiedRecords(*fleet, sharedFleetOptions.SyslogCache)
+			synTrailArtifacts, err = writeClassifiedSYNTrailArtifacts(om, buckets, artifactOpt)
 			synTrailElapsed := time.Since(synTrailStartedAt).Round(time.Millisecond)
 			if err != nil {
 				return fmt.Errorf("write fleet trail artifacts (elapsed %s): %w", synTrailElapsed, err)
