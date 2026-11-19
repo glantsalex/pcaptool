@@ -103,11 +103,11 @@ func writeSYNTrailArtifacts(
 			continue
 		}
 		opt.Diagnostics.Checkpoint("fleet_select_"+spec.key, nil, false)
-		records := spec.records(buckets)
-		switch spec.key {
-		case "public_servers_unique":
-			records = filterOwnedPassiveFTPServerSummaryRecords(records, opt)
-			records = filterOwnedUDPServerSummaryRecords(records, opt.ServerSummaryExcludeUDPPorts)
+		var records []syntrail.Record
+		if spec.key == "public_servers_unique" {
+			records = publicServerSummaryRecords(bucketRecords(buckets, syntrail.BucketFleetToNonFleet), opt)
+		} else {
+			records = spec.records(buckets)
 		}
 		opt.Diagnostics.Checkpoint("fleet_write_"+spec.key, recordCounts(opt.Diagnostics, records), true)
 		path, err := writeSYNTrailArtifact(om, spec.filename, records, spec.writer)
@@ -158,8 +158,8 @@ type synTrailArtifactSpec struct {
 	filename  string
 	key       string
 	debugOnly bool
-	// Public-server summaries compact records before writing; sorting writers
-	// also require owned storage. Only read-only paths may borrow a bucket.
+	// Sorting writers require owned storage. The public summary uses its
+	// dedicated filtered aggregation path instead of this selector.
 	records func(syntrail.BucketedRecords) []syntrail.Record
 	writer  func(io.Writer, []syntrail.Record) error
 }
@@ -196,10 +196,7 @@ var synTrailArtifactSpecs = []synTrailArtifactSpec{
 	{
 		filename: "public-servers-unique.csv",
 		key:      "public_servers_unique",
-		records: func(buckets syntrail.BucketedRecords) []syntrail.Record {
-			return syntrail.SelectFleetToNonFleetByDestinationLocality(bucketRecords(buckets, syntrail.BucketFleetToNonFleet), false)
-		},
-		writer: syntrail.WritePublicServersCSV,
+		writer:   syntrail.WritePublicServersCSV,
 	},
 	{
 		filename:  "fleet-to-private-nonfleet-syn-unique.csv",
@@ -282,6 +279,33 @@ func tcpSYNTrailRecords(records []syntrail.Record) []syntrail.Record {
 type synTrailPair struct {
 	srcIP netip.Addr
 	dstIP netip.Addr
+}
+
+// publicServerSummaryRecords keeps borrowed buckets intact and never materializes
+// the public observation partition. All control evidence must precede filtering,
+// including controls occurring later than passive connections. A private control
+// cannot suppress a public observation because the pair includes destination IP.
+func publicServerSummaryRecords(records []syntrail.Record, opt synTrailArtifactOptions) []syntrail.Record {
+	opt = normalizeSYNTrailArtifactOptions(opt)
+	controlSeen := make(map[synTrailPair]struct{})
+	for _, record := range records {
+		if isTCPSYNTrailRecord(record) {
+			if _, ok := opt.FTPControlPorts[record.DstPort]; ok {
+				controlSeen[synTrailPair{srcIP: record.SrcAddr(), dstIP: record.DstAddr()}] = struct{}{}
+			}
+		}
+	}
+	return syntrail.SelectPublicServerSummary(records, func(record syntrail.Record) bool {
+		if shouldSuppressPassiveFTPRecord(record, opt, controlSeen) {
+			return false
+		}
+		if record.Protocol == syntrail.ProtocolUDP {
+			if _, excluded := opt.ServerSummaryExcludeUDPPorts[record.DstPort]; excluded {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 // filterPassiveFTPServerSummaryRecords accepts borrowed input.

@@ -44,3 +44,24 @@ func SelectFleetToNonFleetByDestinationLocality(records []Record, private bool) 
 	}
 	return selected
 }
+
+// SelectPublicServerSummary returns one representative per normalized public
+// destination/protocol/port tuple after keep accepts the observation. Filtering
+// precedes deduplication because acceptance may depend on the source. The input
+// is borrowed read-only; result storage grows with distinct endpoints only.
+func SelectPublicServerSummary(records []Record, keep func(Record) bool) []Record {
+	seen := make(map[ServerTuple]struct{})
+	selected := make([]Record, 0)
+	for _, record := range records {
+		if isLocalIPv4(record.DstAddr()) || (keep != nil && !keep(record)) {
+			continue
+		}
+		key := ServerTuple{DstIP: record.DstAddr(), DstPort: record.DstPort, Protocol: normalizedProtocol(record.Protocol)}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		selected = append(selected, record)
+	}
+	return selected
+}
