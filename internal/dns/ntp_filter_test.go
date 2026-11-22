@@ -27,21 +27,23 @@ func TestLooksLikeNTPDNSName(t *testing.T) {
 }
 
 func TestFilterOutNTPDNSTransactions(t *testing.T) {
+	hostnames := NewHostnames()
+
 	keep := &DNSTransaction{
-		DNSName:      "api.mobilepay.dk",
+		DNSNameID:    hostnames.intern("api.mobilepay.dk"),
 		NameEvidence: EvDNSAnswer,
 	}
 	drop := &DNSTransaction{
-		DNSName:      "time.esa.int",
+		DNSNameID:    hostnames.intern("time.esa.int"),
 		NameEvidence: EvDNSAnswer,
 	}
 	keepSNI := &DNSTransaction{
-		DNSName:      "time.esa.int",
+		DNSNameID:    hostnames.intern("time.esa.int"),
 		NameEvidence: EvSNI,
 	}
 
 	in := []*DNSTransaction{keep, drop, keepSNI}
-	out, dropped := FilterOutNTPDNSTransactions(in)
+	out, dropped := FilterOutNTPDNSTransactions(hostnames, in)
 
 	if dropped != 1 {
 		t.Fatalf("dropped=%d, want 1", dropped)

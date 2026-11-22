@@ -5,11 +5,11 @@ import "bytes"
 // transactionTieLess gives equal-time name evidence a stable order without
 // consulting mutable correlation fields. Exact timed SNI duplicates have
 // already collapsed to the lexicographically smallest capture basename.
-func transactionTieLess(a, b *DNSTransaction) bool {
-	if a.DNSName != b.DNSName {
-		return a.DNSName < b.DNSName
+func transactionTieLess(hostnames *Hostnames, a, b *DNSTransaction) bool {
+	if a.DNSNameID != b.DNSNameID {
+		return hostnames.name(a.DNSNameID) < hostnames.name(b.DNSNameID)
 	}
-	if c := bytes.Compare(a.IssuerIP, b.IssuerIP); c != 0 {
+	if c := bytes.Compare(a.issuerIP(), b.issuerIP()); c != 0 {
 		return c < 0
 	}
 	if a.NameEvidence != b.NameEvidence {

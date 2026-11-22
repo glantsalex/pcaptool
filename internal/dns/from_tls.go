@@ -26,7 +26,7 @@ import (
 //
 // These transactions already have DestinationPort and ResolvedIPs set and do
 // NOT need further correlation.
-func BuildSNITransactionsFromPCAPs(ctx context.Context, files []string) ([]*DNSTransaction, error) {
+func BuildSNITransactionsFromPCAPs(ctx context.Context, hostnames *Hostnames, files []string) ([]*DNSTransaction, error) {
 	var (
 		mu   sync.Mutex
 		out  []*DNSTransaction
@@ -129,15 +129,15 @@ func BuildSNITransactionsFromPCAPs(ctx context.Context, files []string) ([]*DNST
 				// Build synthetic DNSTransaction from SNI
 				dp := port
 				tx := &DNSTransaction{
-					RequestTime:     pkt.Metadata().Timestamp,
-					IssuerIP:        append(net.IP(nil), srcIP...),
-					DNSName:         sni,
-					NameEvidence:    EvSNI, // NEW
-					ResolverIP:      nil,
+					RequestTime:   wireTime(pkt.Metadata().Timestamp),
+					wireEndpoints: makeEndpoints(srcIP, nil),
+					DNSNameID:     hostnames.intern(sni),
+					NameEvidence:  EvSNI, // NEW
+
 					DestinationPort: &dp,
 					PCAPFile:        path,
 					Candidates:      nil,
-					ProtocolL4:      L4ProtoTCP,
+					ProtocolL4:      wireTCP,
 				}
 
 				// Add resolved IP with evidence.
@@ -170,10 +170,10 @@ func BuildSNITransactionsFromPCAPs(ctx context.Context, files []string) ([]*DNST
 		sort.Slice(out, func(i, j int) bool {
 			ti := out[i].RequestTime
 			tj := out[j].RequestTime
-			if ti.Equal(tj) {
-				return out[i].DNSName < out[j].DNSName
+			if ti == tj {
+				return hostnames.name(out[i].DNSNameID) < hostnames.name(out[j].DNSNameID)
 			}
-			return ti.Before(tj)
+			return ti.compare(tj) < 0
 		})
 	}
 

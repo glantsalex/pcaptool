@@ -113,13 +113,13 @@ func ComputeTableStats(allRecords, usedRecords []OutputRecord) TableStats {
 	}
 }
 
-func ComputeTableStatsFromTx(txs []*DNSTransaction, usedRecords []OutputRecord) TableStats {
+func ComputeTableStatsFromTx(hostnames *Hostnames, txs []*DNSTransaction, usedRecords []OutputRecord) TableStats {
 	sourceSet := make(map[string]struct{})
 	destIPSet := make(map[string]struct{})
 	connectedDNSSet := make(map[string]struct{})
 
 	// DNS names that ever had a connection (at tx level)
-	namesWithConn := make(map[string]struct{})
+	namesWithConn := make(map[uint64]struct{})
 
 	// 1) Unique sources/dests/connected DNS from usedRecords (printed rows)
 	for _, r := range usedRecords {
@@ -134,11 +134,11 @@ func ComputeTableStatsFromTx(txs []*DNSTransaction, usedRecords []OutputRecord) 
 
 	// 2) At tx level, mark names that have a DestinationPort
 	for _, tx := range txs {
-		if tx.DNSName == "" {
+		if tx.DNSNameID == 0 {
 			continue
 		}
 		if tx.DestinationPort != nil {
-			namesWithConn[tx.DNSName] = struct{}{}
+			namesWithConn[tx.DNSNameID] = struct{}{}
 		}
 	}
 
@@ -148,13 +148,13 @@ func ComputeTableStatsFromTx(txs []*DNSTransaction, usedRecords []OutputRecord) 
 		resolvedIPs map[string]struct{}
 		pcaps       map[string]struct{}
 	}
-	unusedAgg := make(map[string]*agg) // name -> agg
+	unusedAgg := make(map[uint64]*agg) // name -> agg
 
 	for _, tx := range txs {
-		if tx.DNSName == "" {
+		if tx.DNSNameID == 0 {
 			continue
 		}
-		if _, ok := namesWithConn[tx.DNSName]; ok {
+		if _, ok := namesWithConn[tx.DNSNameID]; ok {
 			// this DNS name has at least one tx with a connection
 			continue
 		}
@@ -162,18 +162,18 @@ func ComputeTableStatsFromTx(txs []*DNSTransaction, usedRecords []OutputRecord) 
 			continue
 		}
 
-		a, ok := unusedAgg[tx.DNSName]
+		a, ok := unusedAgg[tx.DNSNameID]
 		if !ok {
 			a = &agg{
 				issuers:     make(map[string]struct{}),
 				resolvedIPs: make(map[string]struct{}),
 				pcaps:       make(map[string]struct{}),
 			}
-			unusedAgg[tx.DNSName] = a
+			unusedAgg[tx.DNSNameID] = a
 		}
 
 		// issuer
-		issuer := tx.IssuerIP.String()
+		issuer := tx.issuerIP().String()
 		if issuer != "" {
 			a.issuers[issuer] = struct{}{}
 		}
@@ -192,7 +192,7 @@ func ComputeTableStatsFromTx(txs []*DNSTransaction, usedRecords []OutputRecord) 
 	}
 
 	unused := make([]DNSUnusedStat, 0, len(unusedAgg))
-	for name, a := range unusedAgg {
+	for id, a := range unusedAgg {
 		issuers := make([]string, 0, len(a.issuers))
 		for ip := range a.issuers {
 			issuers = append(issuers, ip)
@@ -212,7 +212,7 @@ func ComputeTableStatsFromTx(txs []*DNSTransaction, usedRecords []OutputRecord) 
 		sort.Strings(files)
 
 		unused = append(unused, DNSUnusedStat{
-			Name:        name,
+			Name:        hostnames.name(id),
 			Issuers:     issuers,
 			ResolvedIPs: resIPs,
 			PCAPFiles:   files,
@@ -236,7 +236,7 @@ func ComputeTableStatsFromTx(txs []*DNSTransaction, usedRecords []OutputRecord) 
 //     as resolved/used and excluded from this report for all issuers
 //   - otherwise, we emit one row per issuer that queried that name
 //   - FirstPCAPFile is the first observed file for that (name, issuer) context row
-func ComputeUnresolvedDNSFirstSeen(txs []*DNSTransaction) []DNSUnresolvedStat {
+func ComputeUnresolvedDNSFirstSeen(hostnames *Hostnames, txs []*DNSTransaction) []DNSUnresolvedStat {
 	type rowKey struct {
 		name   string
 		issuer string
@@ -252,7 +252,7 @@ func ComputeUnresolvedDNSFirstSeen(txs []*DNSTransaction) []DNSUnresolvedStat {
 		if tx == nil {
 			continue
 		}
-		name := canonicalDNSName(tx.DNSName)
+		name := canonicalDNSName(hostnames.name(tx.DNSNameID))
 		if name == "" {
 			continue
 		}
@@ -261,8 +261,8 @@ func ComputeUnresolvedDNSFirstSeen(txs []*DNSTransaction) []DNSUnresolvedStat {
 		}
 
 		issuer := ""
-		if tx.IssuerIP != nil {
-			issuer = tx.IssuerIP.String()
+		if tx.issuerIP() != nil {
+			issuer = tx.issuerIP().String()
 		}
 		k := rowKey{name: name, issuer: issuer}
 

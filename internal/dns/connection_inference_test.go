@@ -14,6 +14,8 @@ import (
 )
 
 func TestAttachConnectionsInferenceFlagControlsIssuerOnlyFallback(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer   = "10.245.214.104"
 		dst      = "23.48.23.56"
@@ -26,11 +28,10 @@ func TestAttachConnectionsInferenceFlagControlsIssuerOnlyFallback(t *testing.T) 
 
 	newTx := func(nameEvidence Evidence, resolved bool) []*DNSTransaction {
 		tx := &DNSTransaction{
-			RequestTime:  base,
-			IssuerIP:     net.ParseIP(issuer),
-			DNSName:      "query-only.example.com",
-			ResolverIP:   net.ParseIP(resolver),
-			NameEvidence: nameEvidence,
+			RequestTime:   wireTime(base),
+			wireEndpoints: makeEndpoints(net.ParseIP(issuer), net.ParseIP(resolver)),
+			DNSNameID:     hostnames.intern("query-only.example.com"),
+			NameEvidence:  nameEvidence,
 		}
 		if resolved {
 			tx.NameEvidence = EvDNSAnswer
@@ -78,8 +79,7 @@ func TestAttachConnectionsInferenceFlagControlsIssuerOnlyFallback(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(
-				context.Background(),
+			edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(context.Background(), hostnames,
 				files,
 				tt.txs,
 				true,
@@ -94,7 +94,7 @@ func TestAttachConnectionsInferenceFlagControlsIssuerOnlyFallback(t *testing.T) 
 				t.Fatalf("attach connections and collect edges: %v", err)
 			}
 
-			rows := BuildNetworkTopologyMatrixEntriesWithOptions(tt.txs, edges, nil, nil, DefaultTopologyBuildOptions())
+			rows := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, tt.txs, edges, nil, nil, DefaultTopologyBuildOptions())
 			if len(rows) != 1 {
 				t.Fatalf("got %d rows, want 1: %#v", len(rows), rows)
 			}

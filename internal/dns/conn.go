@@ -26,7 +26,7 @@ func AttachConnections(events []pce.Event, txs []*DNSTransaction) error {
 		if tx.resolvedIPLen() == 0 {
 			continue
 		}
-		issuer := tx.IssuerIP.String()
+		issuer := tx.issuerIP().String()
 
 		ipSet := make(map[string]struct{}, tx.resolvedIPLen())
 		for i := 0; i < tx.resolvedIPLen(); i++ {
@@ -34,13 +34,13 @@ func AttachConnections(events []pce.Event, txs []*DNSTransaction) error {
 			ipSet[ip.String()] = struct{}{}
 		}
 
-		for ci < len(conns) && conns[ci].Timestamp.Before(tx.RequestTime) {
+		for ci < len(conns) && conns[ci].Timestamp.Before(tx.RequestTime.utc()) {
 			ci++
 		}
 
 		for j := ci; j < len(conns); j++ {
 			c := conns[j]
-			if !c.Timestamp.After(tx.RequestTime) {
+			if !c.Timestamp.After(tx.RequestTime.utc()) {
 				continue
 			}
 			if c.SrcIP.String() != issuer {

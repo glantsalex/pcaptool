@@ -32,6 +32,8 @@ func findTopologyRow(entries []TopologyEntry, issuer, dst, proto string, port ui
 }
 
 func TestBuildNetworkTopologyMatrixEntries_CSVMidSingleNameUsesFullFQDNAndDedups(t *testing.T) {
+	hostnames := NewHostnames()
+
 	edges := []connectivity.Edge{
 		{
 			IssuerIP:  "10.10.10.10",
@@ -53,7 +55,7 @@ func TestBuildNetworkTopologyMatrixEntries_CSVMidSingleNameUsesFullFQDNAndDedups
 		"153.46.253.156": {"europe-03.nominatim.openstreetmap.org"},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		nil,
 		edges,
 		nil,
@@ -75,6 +77,8 @@ func TestBuildNetworkTopologyMatrixEntries_CSVMidSingleNameUsesFullFQDNAndDedups
 }
 
 func TestBuildNetworkTopologyMatrixEntries_EVSECSVMidForMappedIPs(t *testing.T) {
+	hostnames := NewHostnames()
+
 	edges := []connectivity.Edge{
 		{IssuerIP: "10.93.3.28", DstIP: "63.183.18.177", Protocol: connectivity.ProtoTCP, Port: 443},
 		{IssuerIP: "10.93.3.28", DstIP: "63.184.210.25", Protocol: connectivity.ProtoTCP, Port: 443},
@@ -84,7 +88,7 @@ func TestBuildNetworkTopologyMatrixEntries_EVSECSVMidForMappedIPs(t *testing.T) 
 		"63.184.210.25": {"evse.total-ev-charge.com"},
 	}
 
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
 	if len(got) != 2 {
 		t.Fatalf("got %d rows, want 2: %#v", len(got), got)
 	}
@@ -96,6 +100,8 @@ func TestBuildNetworkTopologyMatrixEntries_EVSECSVMidForMappedIPs(t *testing.T) 
 }
 
 func TestBuildNetworkTopologyMatrixEntries_CSVConnSingleNameUsesFullFQDN(t *testing.T) {
+	hostnames := NewHostnames()
+
 	edges := []connectivity.Edge{
 		{
 			IssuerIP:  "44.44.44.44",
@@ -110,7 +116,7 @@ func TestBuildNetworkTopologyMatrixEntries_CSVConnSingleNameUsesFullFQDN(t *test
 		"153.46.253.156": {"europe-03.nominatim.openstreetmap.org"},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		nil,
 		edges,
 		nil,
@@ -163,6 +169,8 @@ func TestCSVNameForIP_EVSEMappedIPsReturnExactCanonicalName(t *testing.T) {
 }
 
 func TestBuildNetworkTopologyMatrixEntries_AmbiguousCSVRemainsUnresolved(t *testing.T) {
+	hostnames := NewHostnames()
+
 	edges := []connectivity.Edge{{
 		IssuerIP: "10.93.3.28",
 		DstIP:    "63.184.210.25",
@@ -173,7 +181,7 @@ func TestBuildNetworkTopologyMatrixEntries_AmbiguousCSVRemainsUnresolved(t *test
 		"63.184.210.25": {"evse.total-ev-charge.com", "other.example.com"},
 	}
 
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %#v", len(got), got)
 	}
@@ -184,6 +192,8 @@ func TestBuildNetworkTopologyMatrixEntries_AmbiguousCSVRemainsUnresolved(t *test
 }
 
 func TestNetworkTopologyMatrixDoesNotEmitDNSNameWithoutSource(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.118.229.71"
 		dst    = "48.209.138.168"
@@ -191,9 +201,9 @@ func TestNetworkTopologyMatrixDoesNotEmitDNSNameWithoutSource(t *testing.T) {
 	)
 	txTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	txs := []*DNSTransaction{withTestResolvedAnswers(&DNSTransaction{
-		RequestTime: txTime,
-		IssuerIP:    net.ParseIP(issuer),
-		DNSName:     name,
+		RequestTime:   wireTime(txTime),
+		wireEndpoints: makeEndpoints(net.ParseIP(issuer), nil),
+		DNSNameID:     hostnames.intern(name),
 	}, []net.IP{net.ParseIP(dst)}, nil)}
 	edges := []connectivity.Edge{{
 		IssuerIP:  issuer,
@@ -203,7 +213,7 @@ func TestNetworkTopologyMatrixDoesNotEmitDNSNameWithoutSource(t *testing.T) {
 		FirstSeen: txTime.Add(100 * time.Millisecond),
 	}}
 
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, DefaultTopologyBuildOptions())
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, txs, edges, nil, nil, DefaultTopologyBuildOptions())
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %#v", len(got), got)
 	}
@@ -214,6 +224,8 @@ func TestNetworkTopologyMatrixDoesNotEmitDNSNameWithoutSource(t *testing.T) {
 }
 
 func TestNetworkTopologyMatrixStillEmitsDNSSynackForEvidenceBackedTransaction(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.118.229.71"
 		dst    = "48.209.138.168"
@@ -221,10 +233,10 @@ func TestNetworkTopologyMatrixStillEmitsDNSSynackForEvidenceBackedTransaction(t 
 	)
 	txTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	tx := &DNSTransaction{
-		RequestTime:  txTime,
-		IssuerIP:     net.ParseIP(issuer),
-		DNSName:      name,
-		NameEvidence: EvDNSAnswer,
+		RequestTime:   wireTime(txTime),
+		wireEndpoints: makeEndpoints(net.ParseIP(issuer), nil),
+		DNSNameID:     hostnames.intern(name),
+		NameEvidence:  EvDNSAnswer,
 	}
 	tx.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer)
 	edges := []connectivity.Edge{{
@@ -235,7 +247,7 @@ func TestNetworkTopologyMatrixStillEmitsDNSSynackForEvidenceBackedTransaction(t 
 		FirstSeen: txTime.Add(100 * time.Millisecond),
 	}}
 
-	got := BuildNetworkTopologyMatrixEntriesWithOptions([]*DNSTransaction{tx}, edges, nil, nil, DefaultTopologyBuildOptions())
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, []*DNSTransaction{tx}, edges, nil, nil, DefaultTopologyBuildOptions())
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %#v", len(got), got)
 	}
@@ -246,6 +258,8 @@ func TestNetworkTopologyMatrixStillEmitsDNSSynackForEvidenceBackedTransaction(t 
 }
 
 func TestNetworkTopologyMatrixCSVFallbackStillHasSource(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.93.3.28"
 		dst    = "48.209.138.168"
@@ -260,7 +274,7 @@ func TestNetworkTopologyMatrixCSVFallbackStillHasSource(t *testing.T) {
 	}}
 	ipToDNS := map[string][]string{dst: {name}}
 
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %#v", len(got), got)
 	}
@@ -290,6 +304,8 @@ func TestNetworkTopologyMatrixNormalizedRowsStillHaveSource(t *testing.T) {
 }
 
 func TestNetworkTopologyMatrixAllowsDirectDNSAttributionForPrivateDestination(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.119.239.123"
 		dst    = "10.241.221.12"
@@ -298,11 +314,10 @@ func TestNetworkTopologyMatrixAllowsDirectDNSAttributionForPrivateDestination(t 
 	dnsTime := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 
 	txs := []*DNSTransaction{withTestResolvedAnswers(&DNSTransaction{
-		RequestTime: dnsTime,
-		IssuerIP:    net.ParseIP(issuer),
-		DNSName:     name,
-
-		NameEvidence: EvDNSAnswer,
+		RequestTime:   wireTime(dnsTime),
+		wireEndpoints: makeEndpoints(net.ParseIP(issuer), nil),
+		DNSNameID:     hostnames.intern(name),
+		NameEvidence:  EvDNSAnswer,
 	}, []net.IP{net.ParseIP(dst)}, map[string]Evidence{
 		dst: EvDNSAnswer,
 	})}
@@ -314,7 +329,7 @@ func TestNetworkTopologyMatrixAllowsDirectDNSAttributionForPrivateDestination(t 
 		FirstSeen: dnsTime.Add(100 * time.Millisecond),
 	}}
 
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, DefaultTopologyBuildOptions())
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, txs, edges, nil, nil, DefaultTopologyBuildOptions())
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %#v", len(got), got)
 	}
@@ -328,6 +343,8 @@ func TestNetworkTopologyMatrixAllowsDirectDNSAttributionForPrivateDestination(t 
 }
 
 func TestNetworkTopologyMatrixKeepsPrivateDestinationUnattributedWithoutDirectDNS(t *testing.T) {
+	hostnames := NewHostnames()
+
 	edges := []connectivity.Edge{{
 		IssuerIP:  "10.119.239.123",
 		DstIP:     "10.241.221.12",
@@ -336,7 +353,7 @@ func TestNetworkTopologyMatrixKeepsPrivateDestinationUnattributedWithoutDirectDN
 		FirstSeen: time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC),
 	}}
 
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(nil, edges, nil, nil, DefaultTopologyBuildOptions())
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, nil, edges, nil, nil, DefaultTopologyBuildOptions())
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %#v", len(got), got)
 	}
@@ -346,6 +363,8 @@ func TestNetworkTopologyMatrixKeepsPrivateDestinationUnattributedWithoutDirectDN
 }
 
 func TestNetworkTopologyMatrixDoesNotUseCSVFallbackForPrivateDestination(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const dst = "10.241.221.12"
 	edges := []connectivity.Edge{{
 		IssuerIP:  "10.119.239.123",
@@ -358,7 +377,7 @@ func TestNetworkTopologyMatrixDoesNotUseCSVFallbackForPrivateDestination(t *test
 		dst: {"evse.total-ev-charge.com"},
 	}
 
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %#v", len(got), got)
 	}
@@ -368,8 +387,10 @@ func TestNetworkTopologyMatrixDoesNotUseCSVFallbackForPrivateDestination(t *test
 }
 
 func TestPrivateCSVFallbackStillDisabled(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const dst = "10.241.221.12"
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		nil,
 		[]connectivity.Edge{{
 			IssuerIP:  "10.119.239.123",
@@ -491,7 +512,9 @@ func TestCompleteTopologyWithActiveDNSConservativeCompletion(t *testing.T) {
 }
 
 func TestCompleteTopologyWithActiveDNSDoesNotMutateTransactionsOrCSVLearning(t *testing.T) {
-	tx := &DNSTransaction{DNSName: "api.example.com", IssuerIP: net.ParseIP("10.0.0.1")}
+	hostnames := NewHostnames()
+
+	tx := &DNSTransaction{DNSNameID: hostnames.intern("api.example.com"), wireEndpoints: makeEndpoints(net.ParseIP("10.0.0.1"), nil)}
 	got := CompleteTopologyWithActiveDNS(
 		[]TopologyEntry{{
 			IssuerIP:      "10.0.0.1",
@@ -507,7 +530,7 @@ func TestCompleteTopologyWithActiveDNSDoesNotMutateTransactionsOrCSVLearning(t *
 	if tx.resolvedIPLen() != 0 || tx.NameEvidence != EvNone {
 		t.Fatalf("active matrix completion mutated transaction: %#v", tx)
 	}
-	if learned := StrongObservedIPDNSPairsFromTransactions([]*DNSTransaction{tx}); len(learned) != 0 {
+	if learned := StrongObservedIPDNSPairsFromTransactions(hostnames, []*DNSTransaction{tx}); len(learned) != 0 {
 		t.Fatalf("active matrix completion produced CSV learning candidates: %#v", learned)
 	}
 }
@@ -592,6 +615,8 @@ func TestPublicDonationDefaultBehaviorUnchanged(t *testing.T) {
 }
 
 func TestNetworkTopologyMatrixCanAttributeEndpointSeenBeforeDNSWhenLaterObservationMatchesDNS(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.118.216.226"
 		dst    = "18.158.161.168"
@@ -604,11 +629,10 @@ func TestNetworkTopologyMatrixCanAttributeEndpointSeenBeforeDNSWhenLaterObservat
 
 	txs := []*DNSTransaction{
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: dnsTime,
-			IssuerIP:    net.ParseIP(issuer),
-			DNSName:     name,
-
-			NameEvidence: EvDNSAnswer,
+			RequestTime:   wireTime(dnsTime),
+			wireEndpoints: makeEndpoints(net.ParseIP(issuer), nil),
+			DNSNameID:     hostnames.intern(name),
+			NameEvidence:  EvDNSAnswer,
 		}, []net.IP{net.ParseIP(dst)}, map[string]Evidence{
 			dst: EvDNSAnswer,
 		}),
@@ -626,7 +650,7 @@ func TestNetworkTopologyMatrixCanAttributeEndpointSeenBeforeDNSWhenLaterObservat
 
 	opt := DefaultTopologyBuildOptions()
 	opt.MaxDNSAge = time.Second
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, opt)
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, txs, edges, nil, nil, opt)
 
 	if len(got) != 1 {
 		t.Fatalf("expected one endpoint row, got %d: %#v", len(got), got)
@@ -644,6 +668,8 @@ func TestNetworkTopologyMatrixCanAttributeEndpointSeenBeforeDNSWhenLaterObservat
 }
 
 func TestNetworkTopologyMatrixUsesLaterObservationForMultiAResponse(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.244.201.9"
 		dst    = "3.64.65.68"
@@ -657,11 +683,10 @@ func TestNetworkTopologyMatrixUsesLaterObservationForMultiAResponse(t *testing.T
 
 	txs := []*DNSTransaction{
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: dnsTime,
-			IssuerIP:    net.ParseIP(issuer),
-			DNSName:     name,
-
-			NameEvidence: EvDNSAnswer,
+			RequestTime:   wireTime(dnsTime),
+			wireEndpoints: makeEndpoints(net.ParseIP(issuer), nil),
+			DNSNameID:     hostnames.intern(name),
+			NameEvidence:  EvDNSAnswer,
 		}, []net.IP{net.ParseIP(dst), net.ParseIP(otherA)}, map[string]Evidence{
 			dst:    EvDNSAnswer,
 			otherA: EvDNSAnswer,
@@ -680,7 +705,7 @@ func TestNetworkTopologyMatrixUsesLaterObservationForMultiAResponse(t *testing.T
 
 	opt := DefaultTopologyBuildOptions()
 	opt.MaxDNSAge = 500 * time.Millisecond
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, opt)
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, txs, edges, nil, nil, opt)
 
 	if len(got) != 1 {
 		t.Fatalf("expected one endpoint row, got %d: %#v", len(got), got)
@@ -698,6 +723,8 @@ func TestNetworkTopologyMatrixUsesLaterObservationForMultiAResponse(t *testing.T
 }
 
 func TestDNSAnswerDoesNotAttributeUnobservedPort(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.245.214.104"
 		dst    = "1.2.3.4"
@@ -709,11 +736,11 @@ func TestDNSAnswerDoesNotAttributeUnobservedPort(t *testing.T) {
 	p443 := uint16(443)
 
 	tx := &DNSTransaction{
-		RequestTime:     dnsTime,
-		IssuerIP:        net.ParseIP(issuer),
-		DNSName:         name,
+		RequestTime:     wireTime(dnsTime),
+		wireEndpoints:   makeEndpoints(net.ParseIP(issuer), nil),
+		DNSNameID:       hostnames.intern(name),
 		DestinationPort: &p443,
-		ProtocolL4:      L4ProtoTCP,
+		ProtocolL4:      wireTCP,
 		NameEvidence:    EvDNSAnswer,
 	}
 	tx.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer|EvObservedConn)
@@ -724,7 +751,7 @@ func TestDNSAnswerDoesNotAttributeUnobservedPort(t *testing.T) {
 		{IssuerIP: issuer, DstIP: dst, Protocol: connectivity.ProtoTCP, Port: 80, FirstSeen: t80, ObservedTimes: connectivity.NewObservationHistory(t80)},
 	}
 
-	got := BuildNetworkTopologyMatrixEntriesWithOptions([]*DNSTransaction{tx}, edges, nil, nil, DefaultTopologyBuildOptions())
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, []*DNSTransaction{tx}, edges, nil, nil, DefaultTopologyBuildOptions())
 	row443, ok := findTopologyRow(got, issuer, dst, "tcp", 443)
 	if !ok || row443.DNSName != name || row443.DNSSource != "dns+synack" {
 		t.Fatalf("tcp/443 row = %#v present=%v, want dns+synack; all rows %#v", row443, ok, got)
@@ -739,6 +766,8 @@ func TestDNSAnswerDoesNotAttributeUnobservedPort(t *testing.T) {
 }
 
 func TestObservedBindingMustMatchEdgeObservationTime(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.245.214.104"
 		dst    = "1.2.3.4"
@@ -750,17 +779,17 @@ func TestObservedBindingMustMatchEdgeObservationTime(t *testing.T) {
 	p443 := uint16(443)
 
 	tx := &DNSTransaction{
-		RequestTime:     dnsTime,
-		IssuerIP:        net.ParseIP(issuer),
-		DNSName:         name,
+		RequestTime:     wireTime(dnsTime),
+		wireEndpoints:   makeEndpoints(net.ParseIP(issuer), nil),
+		DNSNameID:       hostnames.intern(name),
 		DestinationPort: &p443,
-		ProtocolL4:      L4ProtoTCP,
+		ProtocolL4:      wireTCP,
 		NameEvidence:    EvDNSAnswer,
 	}
 	tx.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer|EvObservedConn)
 	tx.AddObservedEndpointBinding(ObservedEndpointBinding{DstIP: dst, Protocol: L4ProtoTCP, Port: 443, ObservedAt: bindingTime})
 
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		[]*DNSTransaction{tx},
 		[]connectivity.Edge{{
 			IssuerIP:      issuer,
@@ -785,6 +814,8 @@ func TestObservedBindingMustMatchEdgeObservationTime(t *testing.T) {
 }
 
 func TestMultipleDNSNamesSameIPDoNotCrossAttributePortsWithoutEvidence(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.245.214.104"
 		dst    = "1.2.3.4"
@@ -797,22 +828,22 @@ func TestMultipleDNSNamesSameIPDoNotCrossAttributePortsWithoutEvidence(t *testin
 	p80 := uint16(80)
 
 	txA := &DNSTransaction{
-		RequestTime:     t0,
-		IssuerIP:        net.ParseIP(issuer),
-		DNSName:         "a.example.com",
+		RequestTime:     wireTime(t0),
+		wireEndpoints:   makeEndpoints(net.ParseIP(issuer), nil),
+		DNSNameID:       hostnames.intern("a.example.com"),
 		DestinationPort: &p443,
-		ProtocolL4:      L4ProtoTCP,
+		ProtocolL4:      wireTCP,
 		NameEvidence:    EvDNSAnswer,
 	}
 	txA.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer|EvObservedConn)
 	txA.AddObservedEndpointBinding(ObservedEndpointBinding{DstIP: dst, Protocol: L4ProtoTCP, Port: 443, ObservedAt: t1})
 
 	txB := &DNSTransaction{
-		RequestTime:     t2,
-		IssuerIP:        net.ParseIP(issuer),
-		DNSName:         "b.example.com",
+		RequestTime:     wireTime(t2),
+		wireEndpoints:   makeEndpoints(net.ParseIP(issuer), nil),
+		DNSNameID:       hostnames.intern("b.example.com"),
 		DestinationPort: &p80,
-		ProtocolL4:      L4ProtoTCP,
+		ProtocolL4:      wireTCP,
 		NameEvidence:    EvDNSAnswer,
 	}
 	txB.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer|EvObservedConn)
@@ -820,7 +851,7 @@ func TestMultipleDNSNamesSameIPDoNotCrossAttributePortsWithoutEvidence(t *testin
 
 	opt := DefaultTopologyBuildOptions()
 	opt.MaxDNSAge = 5 * time.Second
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		[]*DNSTransaction{txA, txB},
 		[]connectivity.Edge{
 			{IssuerIP: issuer, DstIP: dst, Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: t1, ObservedTimes: connectivity.NewObservationHistory(t1)},
@@ -842,13 +873,15 @@ func TestMultipleDNSNamesSameIPDoNotCrossAttributePortsWithoutEvidence(t *testin
 }
 
 func TestLegacyDestinationPortStillPopulatesDNSOutput(t *testing.T) {
+	hostnames := NewHostnames()
+
 	p443 := uint16(443)
 	tx := &DNSTransaction{
-		RequestTime:     time.Date(2026, 7, 11, 23, 35, 4, 0, time.UTC),
-		IssuerIP:        net.ParseIP("10.245.214.104"),
-		DNSName:         "time.samsungcloudsolution.com",
+		RequestTime:     wireTime(time.Date(2026, 7, 11, 23, 35, 4, 0, time.UTC)),
+		wireEndpoints:   makeEndpoints(net.ParseIP("10.245.214.104"), nil),
+		DNSNameID:       hostnames.intern("time.samsungcloudsolution.com"),
 		DestinationPort: &p443,
-		ProtocolL4:      L4ProtoTCP,
+		ProtocolL4:      wireTCP,
 		NameEvidence:    EvDNSAnswer,
 	}
 	tx.AddResolvedIP(net.ParseIP("23.97.174.104"), EvDNSAnswer|EvObservedConn)
@@ -856,10 +889,10 @@ func TestLegacyDestinationPortStillPopulatesDNSOutput(t *testing.T) {
 		DstIP:      "23.97.174.104",
 		Protocol:   L4ProtoTCP,
 		Port:       80,
-		ObservedAt: tx.RequestTime.Add(200 * time.Millisecond),
+		ObservedAt: tx.RequestTime.utc().Add(200 * time.Millisecond),
 	})
 
-	records := ToOutputRecords([]*DNSTransaction{tx})
+	records := ToOutputRecords(hostnames, []*DNSTransaction{tx})
 	if len(records) != 1 {
 		t.Fatalf("ToOutputRecords produced %d records: %#v", len(records), records)
 	}
@@ -869,15 +902,17 @@ func TestLegacyDestinationPortStillPopulatesDNSOutput(t *testing.T) {
 }
 
 func TestObservedEndpointBindingsSurviveTransactionMerge(t *testing.T) {
+	hostnames := NewHostnames()
+
 	requestTime := time.Date(2026, 7, 11, 23, 35, 4, 0, time.UTC)
-	txA := &DNSTransaction{RequestTime: requestTime, IssuerIP: net.ParseIP("10.245.214.104"), DNSName: "example.com"}
+	txA := &DNSTransaction{RequestTime: wireTime(requestTime), wireEndpoints: makeEndpoints(net.ParseIP("10.245.214.104"), nil), DNSNameID: hostnames.intern("example.com")}
 	txA.AddObservedEndpointBinding(ObservedEndpointBinding{
 		DstIP:      "1.2.3.4",
 		Protocol:   L4ProtoTCP,
 		Port:       443,
 		ObservedAt: requestTime.Add(100 * time.Millisecond),
 	})
-	txB := &DNSTransaction{RequestTime: requestTime, IssuerIP: net.ParseIP("10.245.214.104"), DNSName: "example.com"}
+	txB := &DNSTransaction{RequestTime: wireTime(requestTime), wireEndpoints: makeEndpoints(net.ParseIP("10.245.214.104"), nil), DNSNameID: hostnames.intern("example.com")}
 	txB.AddObservedEndpointBinding(ObservedEndpointBinding{
 		DstIP:      "1.2.3.4",
 		Protocol:   L4ProtoTCP,
@@ -901,6 +936,8 @@ func TestObservedEndpointBindingsSurviveTransactionMerge(t *testing.T) {
 }
 
 func TestBuildNetworkTopologyMatrixEntries_SortsIssuersByEndpointCountDesc(t *testing.T) {
+	hostnames := NewHostnames()
+
 	// 10.0.0.9 has two unique endpoints (same dst, different ports).
 	// 10.0.0.10 has one endpoint.
 	// Order must be by endpoint count desc, not issuer lexical order.
@@ -928,7 +965,7 @@ func TestBuildNetworkTopologyMatrixEntries_SortsIssuersByEndpointCountDesc(t *te
 		},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		nil,
 		edges,
 		nil,
@@ -946,6 +983,8 @@ func TestBuildNetworkTopologyMatrixEntries_SortsIssuersByEndpointCountDesc(t *te
 }
 
 func TestBuildNetworkTopologyMatrixEntries_UnsortedKeepsIssuerFirstSeenOrder(t *testing.T) {
+	hostnames := NewHostnames()
+
 	edges := []connectivity.Edge{
 		{
 			IssuerIP:  "10.0.0.9",
@@ -973,7 +1012,7 @@ func TestBuildNetworkTopologyMatrixEntries_UnsortedKeepsIssuerFirstSeenOrder(t *
 	opt := DefaultTopologyBuildOptions()
 	opt.SortOutput = false
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(nil, edges, nil, nil, opt)
+	out := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, nil, edges, nil, nil, opt)
 	if len(out) != 3 {
 		t.Fatalf("expected 3 rows, got %d", len(out))
 	}
@@ -1066,6 +1105,8 @@ func TestSquashNetworkTopologyShort_UnsortedKeepsIssuerFirstSeenOrder(t *testing
 }
 
 func TestBuildNetworkTopologyMatrixEntries_PrivateDestinationIsLastWithinIssuer(t *testing.T) {
+	hostnames := NewHostnames()
+
 	edges := []connectivity.Edge{
 		{
 			IssuerIP:  "10.244.34.239",
@@ -1094,7 +1135,7 @@ func TestBuildNetworkTopologyMatrixEntries_PrivateDestinationIsLastWithinIssuer(
 		"1.1.1.1": {"one.one.one.one"},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		nil,
 		edges,
 		nil,
@@ -1112,17 +1153,18 @@ func TestBuildNetworkTopologyMatrixEntries_PrivateDestinationIsLastWithinIssuer(
 }
 
 func TestBuildNetworkTopologyMatrixEntries_StrongDNSSuppressesCSVConnSameTuple(t *testing.T) {
+	hostnames := NewHostnames()
+
 	p3000 := uint16(3000)
 	txTime := time.Date(2026, 3, 3, 10, 0, 1, 0, time.UTC)
 
 	txs := []*DNSTransaction{
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: txTime,
-			IssuerIP:    net.ParseIP("100.84.31.44"),
-			DNSName:     "mpush3.whatspos.com",
-
+			RequestTime:     wireTime(txTime),
+			wireEndpoints:   makeEndpoints(net.ParseIP("100.84.31.44"), nil),
+			DNSNameID:       hostnames.intern("mpush3.whatspos.com"),
 			DestinationPort: &p3000,
-			ProtocolL4:      L4ProtoTCP,
+			ProtocolL4:      wireTCP,
 			NameEvidence:    EvDNSAnswer,
 		}, []net.IP{net.ParseIP("54.154.187.160")}, map[string]Evidence{
 			"54.154.187.160": EvDNSAnswer,
@@ -1152,7 +1194,7 @@ func TestBuildNetworkTopologyMatrixEntries_StrongDNSSuppressesCSVConnSameTuple(t
 		"54.154.187.160": {"mpush3.whatspos.com"},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		txs,
 		edges,
 		nil,
@@ -1174,17 +1216,18 @@ func TestBuildNetworkTopologyMatrixEntries_StrongDNSSuppressesCSVConnSameTuple(t
 }
 
 func TestBuildNetworkTopologyMatrixEntries_UniqueCSVMidSurvivesConflictingStrongDNSCrossPort(t *testing.T) {
+	hostnames := NewHostnames()
+
 	p9999 := uint16(9999)
 	txTime := time.Date(2026, 3, 4, 10, 0, 1, 0, time.UTC)
 
 	txs := []*DNSTransaction{
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: txTime,
-			IssuerIP:    net.ParseIP("10.93.3.28"),
-			DNSName:     "different.example.com",
-
+			RequestTime:     wireTime(txTime),
+			wireEndpoints:   makeEndpoints(net.ParseIP("10.93.3.28"), nil),
+			DNSNameID:       hostnames.intern("different.example.com"),
 			DestinationPort: &p9999,
-			ProtocolL4:      L4ProtoTCP,
+			ProtocolL4:      wireTCP,
 			NameEvidence:    EvDNSAnswer,
 		}, []net.IP{net.ParseIP("63.184.210.25")}, map[string]Evidence{
 			"63.184.210.25": EvDNSAnswer,
@@ -1212,7 +1255,7 @@ func TestBuildNetworkTopologyMatrixEntries_UniqueCSVMidSurvivesConflictingStrong
 		"63.184.210.25": {"EVSE.Total-EV-Charge.COM."},
 	}
 
-	out := BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		txs,
 		edges,
 		nil,
@@ -1531,17 +1574,18 @@ func TestCompleteTopologyWithDNSDonationRejectsUnsafeSources(t *testing.T) {
 }
 
 func TestCompleteTopologyWithDNSDonationUsesUniqueDirectDonor(t *testing.T) {
+	hostnames := NewHostnames()
+
 	p8883 := uint16(8883)
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
 	txs := []*DNSTransaction{
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: txTime,
-			IssuerIP:    net.ParseIP("10.116.12.67"),
-			DNSName:     "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c",
-
+			RequestTime:     wireTime(txTime),
+			wireEndpoints:   makeEndpoints(net.ParseIP("10.116.12.67"), nil),
+			DNSNameID:       hostnames.intern("a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c"),
 			DestinationPort: &p8883,
-			ProtocolL4:      L4ProtoTCP,
+			ProtocolL4:      wireTCP,
 			NameEvidence:    EvDNSAnswer,
 		}, []net.IP{net.ParseIP("13.55.209.128")}, map[string]Evidence{
 			"13.55.209.128": EvDNSAnswer,
@@ -1565,7 +1609,7 @@ func TestCompleteTopologyWithDNSDonationUsesUniqueDirectDonor(t *testing.T) {
 		},
 	}
 
-	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		txs,
 		edges,
 		nil,
@@ -1595,16 +1639,17 @@ func TestCompleteTopologyWithDNSDonationUsesUniqueDirectDonor(t *testing.T) {
 }
 
 func TestCompleteTopologyWithDNSDonationDoesNotCrossDestinationIP(t *testing.T) {
+	hostnames := NewHostnames()
+
 	p443 := uint16(443)
 	txTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	txs := []*DNSTransaction{
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: txTime,
-			IssuerIP:    net.ParseIP("10.116.12.67"),
-			DNSName:     "direct.example.com",
-
+			RequestTime:     wireTime(txTime),
+			wireEndpoints:   makeEndpoints(net.ParseIP("10.116.12.67"), nil),
+			DNSNameID:       hostnames.intern("direct.example.com"),
 			DestinationPort: &p443,
-			ProtocolL4:      L4ProtoTCP,
+			ProtocolL4:      wireTCP,
 			NameEvidence:    EvDNSAnswer,
 		}, []net.IP{net.ParseIP("13.55.209.128")}, map[string]Evidence{
 			"13.55.209.128": EvDNSAnswer,
@@ -1627,7 +1672,7 @@ func TestCompleteTopologyWithDNSDonationDoesNotCrossDestinationIP(t *testing.T) 
 		},
 	}
 
-	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, DefaultTopologyBuildOptions()))
+	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, txs, edges, nil, nil, DefaultTopologyBuildOptions()))
 	if len(out) != 2 {
 		t.Fatalf("expected 2 rows, got %d: %#v", len(out), out)
 	}
@@ -1648,17 +1693,18 @@ func TestCompleteTopologyWithDNSDonationDoesNotCrossDestinationIP(t *testing.T) 
 }
 
 func TestCompleteTopologyWithDNSDonationDoesNotUseUniqueInferredDonor(t *testing.T) {
+	hostnames := NewHostnames()
+
 	p8883 := uint16(8883)
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
 	txs := []*DNSTransaction{
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: txTime,
-			IssuerIP:    net.ParseIP("10.116.12.67"),
-			DNSName:     "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c",
-
+			RequestTime:     wireTime(txTime),
+			wireEndpoints:   makeEndpoints(net.ParseIP("10.116.12.67"), nil),
+			DNSNameID:       hostnames.intern("a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c"),
 			DestinationPort: &p8883,
-			ProtocolL4:      L4ProtoTCP,
+			ProtocolL4:      wireTCP,
 			NameEvidence:    EvDNSAnswer,
 		}, []net.IP{net.ParseIP("13.55.209.128")}, map[string]Evidence{
 			"13.55.209.128": EvDNSAnswer | EvConnInferred,
@@ -1682,7 +1728,7 @@ func TestCompleteTopologyWithDNSDonationDoesNotUseUniqueInferredDonor(t *testing
 		},
 	}
 
-	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		txs,
 		edges,
 		nil,
@@ -1715,27 +1761,27 @@ func TestCompleteTopologyWithDNSDonationDoesNotUseUniqueInferredDonor(t *testing
 }
 
 func TestCompleteTopologyWithDNSDonationRejectsInferredDonationOnExactDestination(t *testing.T) {
+	hostnames := NewHostnames()
+
 	p443 := uint16(443)
 	txTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	txs := []*DNSTransaction{
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: txTime,
-			IssuerIP:    net.ParseIP("10.245.200.86"),
-			DNSName:     "www.cisco.com",
-
+			RequestTime:     wireTime(txTime),
+			wireEndpoints:   makeEndpoints(net.ParseIP("10.245.200.86"), nil),
+			DNSNameID:       hostnames.intern("www.cisco.com"),
 			DestinationPort: &p443,
-			ProtocolL4:      L4ProtoTCP,
+			ProtocolL4:      wireTCP,
 			NameEvidence:    EvDNSAnswer,
 		}, []net.IP{net.ParseIP("3.5.120.27")}, map[string]Evidence{
 			"3.5.120.27": EvDNSAnswer | EvConnInferred,
 		}),
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: txTime.Add(time.Second),
-			IssuerIP:    net.ParseIP("10.118.217.9"),
-			DNSName:     "www.cisco.com",
-
+			RequestTime:     wireTime(txTime.Add(time.Second)),
+			wireEndpoints:   makeEndpoints(net.ParseIP("10.118.217.9"), nil),
+			DNSNameID:       hostnames.intern("www.cisco.com"),
 			DestinationPort: &p443,
-			ProtocolL4:      L4ProtoTCP,
+			ProtocolL4:      wireTCP,
 			NameEvidence:    EvDNSAnswer,
 		}, []net.IP{net.ParseIP("52.219.170.186")}, map[string]Evidence{
 			"52.219.170.186": EvDNSAnswer | EvConnInferred,
@@ -1748,7 +1794,7 @@ func TestCompleteTopologyWithDNSDonationRejectsInferredDonationOnExactDestinatio
 		{IssuerIP: "10.118.216.36", DstIP: "52.219.170.186", Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: txTime.Add(5 * time.Second)},
 	}
 
-	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, DefaultTopologyBuildOptions()))
+	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, txs, edges, nil, nil, DefaultTopologyBuildOptions()))
 	if len(out) != 4 {
 		t.Fatalf("expected 4 rows, got %d: %#v", len(out), out)
 	}
@@ -1794,28 +1840,28 @@ func TestCompleteTopologyWithDNSDonationDirectDonorStillDonatesWhenInferredPrese
 }
 
 func TestCompleteTopologyWithDNSDonationSkipsAmbiguousDonors(t *testing.T) {
+	hostnames := NewHostnames()
+
 	p8883 := uint16(8883)
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
 	txs := []*DNSTransaction{
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: txTime,
-			IssuerIP:    net.ParseIP("10.116.12.67"),
-			DNSName:     "one.example",
-
+			RequestTime:     wireTime(txTime),
+			wireEndpoints:   makeEndpoints(net.ParseIP("10.116.12.67"), nil),
+			DNSNameID:       hostnames.intern("one.example"),
 			DestinationPort: &p8883,
-			ProtocolL4:      L4ProtoTCP,
+			ProtocolL4:      wireTCP,
 			NameEvidence:    EvDNSAnswer,
 		}, []net.IP{net.ParseIP("13.55.209.128")}, map[string]Evidence{
 			"13.55.209.128": EvDNSAnswer,
 		}),
 		withTestResolvedAnswers(&DNSTransaction{
-			RequestTime: txTime.Add(1 * time.Second),
-			IssuerIP:    net.ParseIP("10.116.12.68"),
-			DNSName:     "two.example",
-
+			RequestTime:     wireTime(txTime.Add(1 * time.Second)),
+			wireEndpoints:   makeEndpoints(net.ParseIP("10.116.12.68"), nil),
+			DNSNameID:       hostnames.intern("two.example"),
 			DestinationPort: &p8883,
-			ProtocolL4:      L4ProtoTCP,
+			ProtocolL4:      wireTCP,
 			NameEvidence:    EvDNSAnswer,
 		}, []net.IP{net.ParseIP("13.55.209.128")}, map[string]Evidence{
 			"13.55.209.128": EvDNSAnswer,
@@ -1846,7 +1892,7 @@ func TestCompleteTopologyWithDNSDonationSkipsAmbiguousDonors(t *testing.T) {
 		},
 	}
 
-	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(
+	out := CompleteTopologyWithDNSDonation(BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		txs,
 		edges,
 		nil,

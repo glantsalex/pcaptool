@@ -59,13 +59,13 @@ func DefaultTopologyBuildOptions() TopologyBuildOptions {
 }
 
 // BuildNetworkTopologyMatrixEntries joins connectivity edges with DNS/SNI attribution.
-func BuildNetworkTopologyMatrixEntries(
+func BuildNetworkTopologyMatrixEntries(hostnames *Hostnames,
 	txs []*DNSTransaction,
 	edges []connectivity.Edge,
 	issuerLabel func(issuerIP string, ts time.Time) string,
 	ipToDNS map[string][]string, // last-resort attribution (CSV)
 ) []TopologyEntry {
-	return BuildNetworkTopologyMatrixEntriesWithOptions(
+	return BuildNetworkTopologyMatrixEntriesWithOptions(hostnames,
 		txs,
 		edges,
 		issuerLabel,
@@ -76,7 +76,7 @@ func BuildNetworkTopologyMatrixEntries(
 
 // BuildNetworkTopologyMatrixEntriesWithOptions joins connectivity edges with DNS/SNI
 // attribution using conservative time-scoped matching.
-func BuildNetworkTopologyMatrixEntriesWithOptions(
+func BuildNetworkTopologyMatrixEntriesWithOptions(hostnames *Hostnames,
 	txs []*DNSTransaction,
 	edges []connectivity.Edge,
 	issuerLabel func(issuerIP string, ts time.Time) string,
@@ -111,10 +111,10 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	// ------------------------------------------------------------
 	dnsResolvers := make(map[string]struct{}, 64)
 	for _, tx := range txs {
-		if tx == nil || tx.ResolverIP == nil {
+		if tx == nil || tx.resolverIP() == nil {
 			continue
 		}
-		if ip4 := tx.ResolverIP.To4(); ip4 != nil {
+		if ip4 := tx.resolverIP().To4(); ip4 != nil {
 			dnsResolvers[ip4.String()] = struct{}{}
 		}
 	}
@@ -137,16 +137,16 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	// own timed identity so a previous owner's SNI cannot label a new owner.
 	txByIssuerDst := make(map[joinKey][]*DNSTransaction, 4096)
 	for _, tx := range txs {
-		if tx == nil || tx.IssuerIP == nil || tx.DNSName == "" {
+		if tx == nil || tx.issuerIP() == nil || tx.DNSNameID == 0 {
 			continue
 		}
-		issuerRaw := strings.TrimSpace(tx.IssuerIP.String())
+		issuerRaw := strings.TrimSpace(tx.issuerIP().String())
 		if issuerRaw == "" {
 			continue
 		}
 		identity := issuerRaw
 		if scoped && issuerLabel != nil {
-			if label := strings.TrimSpace(issuerLabel(issuerRaw, tx.RequestTime)); label != "" {
+			if label := strings.TrimSpace(issuerLabel(issuerRaw, tx.RequestTime.utc())); label != "" {
 				identity = label
 			}
 		}
@@ -172,10 +172,10 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 	for k := range txByIssuerDst {
 		sort.Slice(txByIssuerDst[k], func(i, j int) bool {
 			a, b := txByIssuerDst[k][i], txByIssuerDst[k][j]
-			if a.RequestTime.Equal(b.RequestTime) {
-				return transactionTieLess(a, b)
+			if a.RequestTime == b.RequestTime {
+				return transactionTieLess(hostnames, a, b)
 			}
-			return a.RequestTime.Before(b.RequestTime)
+			return a.RequestTime.compare(b.RequestTime) < 0
 		})
 	}
 
@@ -214,8 +214,8 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		}
 
 		// If tx already has protocol selected, require it to match.
-		if tx.ProtocolL4 != L4ProtoUnknown {
-			if p == L4ProtoUnknown || tx.ProtocolL4 != p {
+		if tx.ProtocolL4.protocol() != L4ProtoUnknown {
+			if p == L4ProtoUnknown || tx.ProtocolL4.protocol() != p {
 				return 0, false
 			}
 			score += 2
@@ -256,12 +256,12 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			if !edgeTS.IsZero() {
 				// Only txs observed at/before this edge observation.
 				hi = sort.Search(len(bucket), func(i int) bool {
-					return bucket[i].RequestTime.After(edgeTS)
+					return bucket[i].RequestTime.utc().After(edgeTS)
 				})
 				if opt.MaxDNSAge > 0 {
 					start := edgeTS.Add(-opt.MaxDNSAge)
 					lo = sort.Search(len(bucket), func(i int) bool {
-						return !bucket[i].RequestTime.Before(start)
+						return !bucket[i].RequestTime.utc().Before(start)
 					})
 				}
 			}
@@ -279,16 +279,16 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 
 				dt := time.Duration(0)
 				if !edgeTS.IsZero() {
-					if tx.RequestTime.After(edgeTS) {
+					if tx.RequestTime.utc().After(edgeTS) {
 						continue
 					}
-					dt = edgeTS.Sub(tx.RequestTime)
+					dt = edgeTS.Sub(tx.RequestTime.utc())
 				}
 
 				if best == nil ||
 					score > bestScore ||
 					(score == bestScore && dt < bestDT) ||
-					(score == bestScore && dt == bestDT && tx.RequestTime.After(best.RequestTime)) {
+					(score == bestScore && dt == bestDT && tx.RequestTime.compare(best.RequestTime) > 0) {
 					best = tx
 					bestObservedAt = edgeTS
 					bestScore = score
@@ -381,7 +381,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			}
 		}
 		if bestTx != nil {
-			dnsName := normalize(bestTx.DNSName)
+			dnsName := normalize(hostnames.name(bestTx.DNSNameID))
 			cnameChain := append([]string(nil), bestTx.CNAMETargets...)
 			src := ""
 			if dnsName != "" {

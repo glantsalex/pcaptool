@@ -9,12 +9,14 @@ import (
 )
 
 func TestTopologyIdentityUsesSelectedObservationTime(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const issuer = "10.180.1.10"
 	const destination = "203.0.113.10"
 	first := time.Date(2026, 11, 15, 2, 41, 0, 0, time.UTC)
 	query := first.Add(2 * time.Minute)
 	later := query.Add(500 * time.Millisecond)
-	tx := &DNSTransaction{RequestTime: query, IssuerIP: net.ParseIP(issuer), DNSName: "device.example.test", NameEvidence: EvDNSAnswer}
+	tx := &DNSTransaction{RequestTime: wireTime(query), wireEndpoints: makeEndpoints(net.ParseIP(issuer), nil), DNSNameID: hostnames.intern("device.example.test"), NameEvidence: EvDNSAnswer}
 	tx.AddResolvedIP(net.ParseIP(destination), EvDNSAnswer)
 	edges := []connectivity.Edge{{IssuerIP: issuer, DstIP: destination, Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: first, ObservedTimes: connectivity.NewObservationHistory(first, later)}}
 	for _, tc := range []struct {
@@ -44,7 +46,7 @@ func TestTopologyIdentityUsesSelectedObservationTime(t *testing.T) {
 				txs = []*DNSTransaction{tx}
 				expectedTime = later
 			}
-			got := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, label, nil, DefaultTopologyBuildOptions())
+			got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, txs, edges, label, nil, DefaultTopologyBuildOptions())
 			if len(got) != 1 {
 				t.Fatalf("rows=%+v", got)
 			}

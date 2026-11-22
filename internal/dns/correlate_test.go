@@ -9,10 +9,12 @@ import (
 )
 
 func TestBuildTransactionsFromEventsSetsDNSAnswerEvidence(t *testing.T) {
+	hostnames := NewHostnames()
+
 	queryTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	answerIP := net.ParseIP("8.8.8.8")
 
-	txs, err := BuildTransactionsFromEvents([]pce.Event{
+	txs, err := BuildTransactionsFromEvents(hostnames, []pce.Event{
 		{
 			Timestamp: queryTime,
 			Type:      pce.EventDNSQuery,

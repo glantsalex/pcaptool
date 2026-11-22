@@ -8,7 +8,6 @@
 package dns
 
 import (
-	"net"
 	"sort"
 	"sync"
 	"time"
@@ -25,16 +24,13 @@ const (
 )
 
 type DNSTransaction struct {
-	mu              sync.RWMutex
-	RequestTime     time.Time
-	IssuerIP        net.IP
-	DNSName         string
+	mu          sync.RWMutex
+	RequestTime captureTime
+	wireEndpoints
+	DNSNameID       uint64
 	answers         resolvedAnswers
 	CNAMETargets    []string
-	ResolverIP      net.IP
 	DestinationPort *uint16
-
-	ProtocolL4 L4Proto // tcp/udp once correlation has chosen a candidate
 
 	PCAPFile   string          // for table output
 	Candidates []ConnCandidate // filled in AttachConnectionsFromPCAPs
@@ -53,6 +49,7 @@ type DNSTransaction struct {
 	// For normal DNS transactions: EvDNSAnswer.
 	// For synthetic SNI transactions: EvSNI.
 	NameEvidence Evidence
+	ProtocolL4   wireProtocol
 }
 
 // Used during pass 1 to match queries/responses
@@ -63,7 +60,7 @@ type TxKey struct {
 	Resolver string
 	Proto    L4Proto
 	ID       uint16
-	Name     string
+	NameID   uint64
 }
 
 // txLookupKey is the primary request/response correlation key:
@@ -193,7 +190,7 @@ func BuildTxnIndex(txs []*DNSTransaction) TxIndex {
 			continue
 		}
 
-		issuer := tx.IssuerIP.String()
+		issuer := tx.issuerIP().String()
 		if issuer == "" {
 			continue
 		}
@@ -213,7 +210,7 @@ func BuildTxnIndex(txs []*DNSTransaction) TxIndex {
 	for k := range idx {
 		slice := idx[k]
 		sort.Slice(slice, func(i, j int) bool {
-			return slice[i].RequestTime.Before(slice[j].RequestTime)
+			return slice[i].RequestTime.compare(slice[j].RequestTime) < 0
 		})
 	}
 

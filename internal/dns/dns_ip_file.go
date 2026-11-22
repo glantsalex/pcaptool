@@ -276,7 +276,7 @@ func MergeIPToDNSMaps(base, extra map[string][]string) (map[string][]string, []I
 //
 // Private destination IPv4s are excluded because topology fallback never attributes
 // private destinations from CSV anyway.
-func StrongObservedIPDNSPairsFromTransactions(txs []*DNSTransaction) map[string][]string {
+func StrongObservedIPDNSPairsFromTransactions(hostnames *Hostnames, txs []*DNSTransaction) map[string][]string {
 	out := make(map[string][]string, 1024)
 	seen := make(map[string]map[string]struct{}, 1024)
 
@@ -306,7 +306,7 @@ func StrongObservedIPDNSPairsFromTransactions(txs []*DNSTransaction) map[string]
 	}
 
 	for _, tx := range txs {
-		if tx == nil || tx.DNSName == "" || tx.resolvedIPLen() == 0 {
+		if tx == nil || tx.DNSNameID == 0 || tx.resolvedIPLen() == 0 {
 			continue
 		}
 		for i := 0; i < tx.resolvedIPLen(); i++ {
@@ -337,7 +337,7 @@ func StrongObservedIPDNSPairsFromTransactions(txs []*DNSTransaction) map[string]
 			if ev&EvConnInferred != 0 {
 				continue
 			}
-			add(ipStr, tx.DNSName)
+			add(ipStr, hostnames.name(tx.DNSNameID))
 		}
 	}
 

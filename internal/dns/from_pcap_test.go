@@ -20,6 +20,8 @@ import (
 )
 
 func TestDNSAnswerCanAttributeMultipleObservedPorts(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.245.214.104"
 		dst    = "23.97.174.104"
@@ -30,16 +32,15 @@ func TestDNSAnswerCanAttributeMultipleObservedPorts(t *testing.T) {
 	t80 := dnsTime.Add(183 * time.Millisecond)
 
 	tx := &DNSTransaction{
-		RequestTime:  dnsTime,
-		IssuerIP:     net.ParseIP(issuer),
-		DNSName:      name,
-		NameEvidence: EvDNSAnswer,
+		RequestTime:   wireTime(dnsTime),
+		wireEndpoints: makeEndpoints(net.ParseIP(issuer), nil),
+		DNSNameID:     hostnames.intern(name),
+		NameEvidence:  EvDNSAnswer,
 	}
 	tx.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer)
 
 	pcapPath := writeMultiPortBindingPCAP(t, issuer, dst, t443, t80)
-	edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(
-		context.Background(),
+	edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(context.Background(), hostnames,
 		[]string{pcapPath},
 		[]*DNSTransaction{tx},
 		false,
@@ -57,8 +58,8 @@ func TestDNSAnswerCanAttributeMultipleObservedPorts(t *testing.T) {
 	if tx.DestinationPort == nil || *tx.DestinationPort != 443 {
 		t.Fatalf("legacy DestinationPort = %#v, want 443", tx.DestinationPort)
 	}
-	if tx.ProtocolL4 != L4ProtoTCP {
-		t.Fatalf("legacy ProtocolL4 = %q, want tcp", tx.ProtocolL4)
+	if tx.ProtocolL4.protocol() != L4ProtoTCP {
+		t.Fatalf("legacy ProtocolL4 = %q, want tcp", tx.ProtocolL4.protocol())
 	}
 	if got := len(tx.ObservedEndpointBindings); got != 2 {
 		t.Fatalf("observed endpoint bindings len = %d, want 2: %#v", got, tx.ObservedEndpointBindings)
@@ -74,7 +75,7 @@ func TestDNSAnswerCanAttributeMultipleObservedPorts(t *testing.T) {
 
 	opt := DefaultTopologyBuildOptions()
 	opt.MaxDNSAge = time.Second
-	matrix := BuildNetworkTopologyMatrixEntriesWithOptions([]*DNSTransaction{tx}, edges, nil, nil, opt)
+	matrix := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, []*DNSTransaction{tx}, edges, nil, nil, opt)
 	for _, port := range []uint16{443, 80} {
 		row, ok := findTopologyRow(matrix, issuer, dst, "tcp", port)
 		if !ok {
@@ -87,6 +88,8 @@ func TestDNSAnswerCanAttributeMultipleObservedPorts(t *testing.T) {
 }
 
 func TestAttachConnectionsPacketAdmissionFiltersEdgesAndEarliest(t *testing.T) {
+	hostnames := NewHostnames()
+
 	base := time.Date(2026, 9, 8, 8, 0, 0, 0, time.UTC)
 	retainedTS := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "fleet-filtered-connections.pcap")
@@ -102,15 +105,13 @@ func TestAttachConnectionsPacketAdmissionFiltersEdgesAndEarliest(t *testing.T) {
 	})
 
 	unfilteredTx := &DNSTransaction{
-		RequestTime:  base.Add(-time.Second),
-		IssuerIP:     net.ParseIP("192.168.1.10"),
-		DNSName:      "correlation.example",
-		NameEvidence: EvDNSAnswer,
+		RequestTime:   wireTime(base.Add(-time.Second)),
+		wireEndpoints: makeEndpoints(net.ParseIP("192.168.1.10"), nil),
+		DNSNameID:     hostnames.intern("correlation.example"),
+		NameEvidence:  EvDNSAnswer,
 	}
 	unfilteredTx.AddResolvedIP(net.ParseIP("198.51.100.10"), EvDNSAnswer)
-	unfiltered, unfilteredFirst, err := AttachConnectionsAndCollectEdgesFromPCAPs(
-		context.Background(), []string{path}, []*DNSTransaction{unfilteredTx}, false, false, nil, false, nil, nil, 0,
-	)
+	unfiltered, unfilteredFirst, err := AttachConnectionsAndCollectEdgesFromPCAPs(context.Background(), hostnames, []string{path}, []*DNSTransaction{unfilteredTx}, false, false, nil, false, nil, nil, 0)
 	if err != nil {
 		t.Fatalf("unfiltered connection scan: %v", err)
 	}
@@ -130,14 +131,13 @@ func TestAttachConnectionsPacketAdmissionFiltersEdgesAndEarliest(t *testing.T) {
 		return ok
 	})
 	filteredTx := &DNSTransaction{
-		RequestTime:  base.Add(-time.Second),
-		IssuerIP:     net.ParseIP("192.168.1.10"),
-		DNSName:      "correlation.example",
-		NameEvidence: EvDNSAnswer,
+		RequestTime:   wireTime(base.Add(-time.Second)),
+		wireEndpoints: makeEndpoints(net.ParseIP("192.168.1.10"), nil),
+		DNSNameID:     hostnames.intern("correlation.example"),
+		NameEvidence:  EvDNSAnswer,
 	}
 	filteredTx.AddResolvedIP(net.ParseIP("198.51.100.10"), EvDNSAnswer)
-	filtered, filteredFirst, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-		context.Background(),
+	filtered, filteredFirst, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames,
 		[]string{path},
 		[]*DNSTransaction{filteredTx},
 		false,
@@ -178,8 +178,7 @@ func TestAttachConnectionsPacketAdmissionFiltersEdgesAndEarliest(t *testing.T) {
 	}
 
 	noMatch := pcaputil.IPv4EndpointAdmission(func(netip.Addr) bool { return false })
-	noEdges, noFirst, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-		context.Background(), []string{path}, nil, false, false, nil, false, nil, nil, 0,
+	noEdges, noFirst, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames, []string{path}, nil, false, false, nil, false, nil, nil, 0,
 		PacketScanOptions{PacketAdmission: noMatch},
 	)
 	if err != nil {
@@ -191,6 +190,8 @@ func TestAttachConnectionsPacketAdmissionFiltersEdgesAndEarliest(t *testing.T) {
 }
 
 func TestAttachConnectionsFirstFilePacketTimestamp(t *testing.T) {
+	hostnames := NewHostnames()
+
 	first := time.Date(2026, 10, 2, 15, 30, 45, 123000000, time.UTC)
 	earlier := first.Add(-48 * time.Hour)
 	for _, shared := range []bool{false, true} {
@@ -217,9 +218,7 @@ func TestAttachConnectionsFirstFilePacketTimestamp(t *testing.T) {
 				if shared {
 					opt.NewFileObserver = func(_ int, _ string) PacketFileObserver { return PacketFileObserver{} }
 				}
-				_, got, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-					context.Background(), files, nil, false, false, nil, false, nil, nil, 0, opt,
-				)
+				_, got, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames, files, nil, false, false, nil, false, nil, nil, 0, opt)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -472,6 +471,8 @@ func TestSuppressMergedFTPPassiveEdgesZeroMinimumUsesDefault(t *testing.T) {
 }
 
 func TestDNSScanCollectsTruncatedQueryAndContinues(t *testing.T) {
+	hostnames := NewHostnames()
+
 	header := make([]byte, 12)
 	binary.BigEndian.PutUint16(header[0:2], 0x090a)
 	binary.BigEndian.PutUint16(header[2:4], 0x0100)
@@ -510,8 +511,7 @@ func TestDNSScanCollectsTruncatedQueryAndContinues(t *testing.T) {
 		t.Fatalf("close pcap: %v", err)
 	}
 
-	txs, _, rows, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
-		context.Background(),
+	txs, _, rows, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(context.Background(), hostnames,
 		[]string{path},
 		false,
 		true,
@@ -525,12 +525,11 @@ func TestDNSScanCollectsTruncatedQueryAndContinues(t *testing.T) {
 	if rows[0].PCAPFile != filepath.Base(path) || rows[0].IssuerIP != "10.0.0.10" || rows[0].TruncatedDNSName != "api.ex" {
 		t.Fatalf("unexpected truncated diagnostic: %+v", rows[0])
 	}
-	if len(txs) != 1 || txs[0].DNSName != "complete.example" {
+	if len(txs) != 1 || hostnames.name(txs[0].DNSNameID) != "complete.example" {
 		t.Fatalf("scan did not continue to complete DNS query: %+v", txs)
 	}
 
-	disabledTxs, _, disabledRows, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
-		context.Background(),
+	disabledTxs, _, disabledRows, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(context.Background(), hostnames,
 		[]string{path},
 		false,
 		false,
@@ -541,12 +540,14 @@ func TestDNSScanCollectsTruncatedQueryAndContinues(t *testing.T) {
 	if len(disabledRows) != 0 {
 		t.Fatalf("diagnostics disabled returned rows: %+v", disabledRows)
 	}
-	if len(disabledTxs) != 1 || disabledTxs[0].DNSName != "complete.example" {
+	if len(disabledTxs) != 1 || hostnames.name(disabledTxs[0].DNSNameID) != "complete.example" {
 		t.Fatalf("diagnostics-disabled scan created a truncated transaction: %+v", disabledTxs)
 	}
 }
 
 func TestBuildTransactionsWithSNIFromPCAPsPacketAdmissionFiltersEvidenceAndEarliest(t *testing.T) {
+	hostnames := NewHostnames()
+
 	header := make([]byte, 12)
 	binary.BigEndian.PutUint16(header[0:2], 0x090a)
 	binary.BigEndian.PutUint16(header[2:4], 0x0100)
@@ -564,9 +565,7 @@ func TestBuildTransactionsWithSNIFromPCAPsPacketAdmissionFiltersEvidenceAndEarli
 		{ts: retainedTS.Add(time.Second), data: buildSNIAdmissionPacket(t, "retained-sni.example", "10.0.0.1", "203.0.113.20")},
 	})
 
-	unfiltered, unfilteredEarliest, unfilteredDiagnostics, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
-		context.Background(), []string{path}, true, true,
-	)
+	unfiltered, unfilteredEarliest, unfilteredDiagnostics, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(context.Background(), hostnames, []string{path}, true, true)
 	if err != nil {
 		t.Fatalf("unfiltered DNS scan: %v", err)
 	}
@@ -579,8 +578,7 @@ func TestBuildTransactionsWithSNIFromPCAPsPacketAdmissionFiltersEvidenceAndEarli
 		_, ok := fleet[ip]
 		return ok
 	})
-	filtered, filteredEarliest, filteredDiagnostics, err := BuildTransactionsWithSNIFromPCAPsWithOptions(
-		context.Background(),
+	filtered, filteredEarliest, filteredDiagnostics, err := BuildTransactionsWithSNIFromPCAPsWithOptions(context.Background(), hostnames,
 		[]string{path},
 		true,
 		true,
@@ -594,7 +592,7 @@ func TestBuildTransactionsWithSNIFromPCAPsPacketAdmissionFiltersEvidenceAndEarli
 	}
 	filteredNames := map[string]Evidence{}
 	for _, tx := range filtered {
-		filteredNames[tx.DNSName] = tx.NameEvidence
+		filteredNames[hostnames.name(tx.DNSNameID)] = tx.NameEvidence
 	}
 	if _, ok := filteredNames["retained.example"]; !ok || filteredNames["retained-sni.example"]&EvSNI == 0 {
 		t.Fatalf("filtered transactions = %+v, want retained DNS and SNI evidence", filtered)

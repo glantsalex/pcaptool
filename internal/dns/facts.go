@@ -26,8 +26,13 @@ type captureTime struct {
 	nano int32
 }
 
-func wireTime(t time.Time) captureTime { return captureTime{t.Unix(), int32(t.Nanosecond())} }
-func (t captureTime) utc() time.Time   { return time.Unix(t.sec, int64(t.nano)).UTC() }
+// Seconds since year one give the Go zero time its natural all-zero encoding.
+const unixEpochSeconds = 62135596800
+
+func wireTime(t time.Time) captureTime {
+	return captureTime{t.Unix() + unixEpochSeconds, int32(t.Nanosecond())}
+}
+func (t captureTime) utc() time.Time { return time.Unix(t.sec-unixEpochSeconds, int64(t.nano)).UTC() }
 func (t captureTime) compare(u captureTime) int {
 	if t.sec != u.sec {
 		return cmp.Compare(t.sec, u.sec)
@@ -79,6 +84,7 @@ type binding struct {
 // DNS answer ingestion is concurrent. Prepare freezes the temporal lookup;
 // file workers subsequently merge their facts on the ordered coordinator.
 type FactCollection struct {
+	hostnames   *Hostnames
 	resolve     DeviceResolver
 	sni         bool
 	window      time.Duration
@@ -95,8 +101,8 @@ type FactCollection struct {
 }
 
 // NewFactCollection initializes the device facts for one run.
-func NewFactCollection(resolve DeviceResolver, sni bool, window time.Duration) *FactCollection {
-	return &FactCollection{resolve: resolve, sni: sni, window: window, answers: make(map[answerSeries][]captureTime), facts: make(factSet)}
+func NewFactCollection(hostnames *Hostnames, resolve DeviceResolver, sni bool, window time.Duration) *FactCollection {
+	return &FactCollection{hostnames: hostnames, resolve: resolve, sni: sni, window: window, answers: make(map[answerSeries][]captureTime), facts: make(factSet)}
 }
 
 func (c *FactCollection) resolveWire(raw string, ts time.Time) string {
@@ -146,7 +152,7 @@ func (c *FactCollection) Prepare(txs []*DNSTransaction, csv map[string][]string,
 	c.resolvers = make(map[netip.Addr]bool)
 	c.unanswered = make(map[string][]*DNSTransaction)
 	for _, tx := range txs {
-		if ip, ok := netip.AddrFromSlice(tx.ResolverIP); ok {
+		if ip, ok := netip.AddrFromSlice(tx.resolverIP()); ok {
 			c.resolvers[ip.Unmap()] = true
 		}
 		for i := 0; i < tx.resolvedIPLen(); i++ {
@@ -155,10 +161,10 @@ func (c *FactCollection) Prepare(txs []*DNSTransaction, csv map[string][]string,
 				continue
 			}
 			ip := netip.AddrFrom4([4]byte(raw[:4]))
-			k := answerLookup{destinationKey{tx.IssuerLabel, ip}, tx.DNSName}
+			k := answerLookup{destinationKey{tx.IssuerLabel, ip}, c.hostnames.name(tx.DNSNameID)}
 			c.queries[k] = append(c.queries[k], tx)
 		}
-		if infer && tx.ResolvedIPCount() == 0 && LooksLikeResolvableDNSName(tx.DNSName) {
+		if infer && tx.ResolvedIPCount() == 0 && LooksLikeResolvableDNSName(c.hostnames.name(tx.DNSNameID)) {
 			c.unanswered[tx.IssuerLabel] = append(c.unanswered[tx.IssuerLabel], tx)
 		}
 	}
@@ -365,8 +371,8 @@ func blockedService(port uint16) bool { return port == 0 || port == 53 || port =
 func (c *FactCollection) pendingQuery(device string, ts time.Time) (*DNSTransaction, int) {
 	list := c.unanswered[device]
 	start := ts.Add(-maxConnDelay)
-	lo := sort.Search(len(list), func(i int) bool { return !list[i].RequestTime.Before(start) })
-	hi := sort.Search(len(list), func(i int) bool { return list[i].RequestTime.After(ts) })
+	lo := sort.Search(len(list), func(i int) bool { return !list[i].RequestTime.utc().Before(start) })
+	hi := sort.Search(len(list), func(i int) bool { return list[i].RequestTime.utc().After(ts) })
 	if hi == lo+1 {
 		return list[lo], 1
 	}
@@ -384,7 +390,7 @@ func (c *FactCollection) matchingAnswer(k destinationKey, ts time.Time) (binding
 	}
 	b := bs[i-1]
 	txs := c.queries[answerLookup{k, b.name}]
-	j := sort.Search(len(txs), func(j int) bool { return txs[j].RequestTime.After(ts) })
+	j := sort.Search(len(txs), func(j int) bool { return txs[j].RequestTime.compare(at) > 0 })
 	if j == 0 {
 		return b, nil, true
 	}
@@ -407,7 +413,7 @@ func (c *FactCollection) contact(s factSet, pending provisionalFacts, device, wi
 	if b.name != "" {
 		v := factValue{at, "dns+synack", b.chain}
 		key := factKey{tuple, b.name}
-		if query == nil || (confirmed && ts.Sub(query.RequestTime) <= maxConnDelay) {
+		if query == nil || (confirmed && ts.Sub(query.RequestTime.utc()) <= maxConnDelay) {
 			s.add(key, v)
 			return
 		}
@@ -417,8 +423,8 @@ func (c *FactCollection) contact(s factSet, pending provisionalFacts, device, wi
 	}
 	if !history && confirmed && p == connectivity.ProtoTCP {
 		if tx, _ := c.pendingQuery(device, ts); tx != nil {
-			if allow, _ := allowConnectionInferredDNSBackfill(tx.DNSName, dst, c.csv); allow {
-				name, source = tx.DNSName, "dns+conn+synack"
+			if allow, _ := allowConnectionInferredDNSBackfill(c.hostnames.name(tx.DNSNameID), dst, c.csv); allow {
+				name, source = c.hostnames.name(tx.DNSNameID), "dns+conn+synack"
 			}
 		}
 	}
@@ -559,7 +565,7 @@ func UniqueFacts(rows []TopologyEntry) []TopologyEntry {
 
 // CompleteFactsWithActiveDNS decorates an existing contact only if the same
 // device had queried the selected name by the time of that contact.
-func CompleteFactsWithActiveDNS(rows []TopologyEntry, resolutions []DNSNameIPv4Resolution, txs []*DNSTransaction, window time.Duration) []TopologyEntry {
+func CompleteFactsWithActiveDNS(hostnames *Hostnames, rows []TopologyEntry, resolutions []DNSNameIPv4Resolution, txs []*DNSTransaction, window time.Duration) []TopologyEntry {
 	if len(resolutions) == 0 || len(rows) == 0 {
 		return rows
 	}
@@ -571,9 +577,9 @@ func CompleteFactsWithActiveDNS(rows []TopologyEntry, resolutions []DNSNameIPv4R
 		}
 	}
 	for _, tx := range txs {
-		k := nameKey{tx.IssuerLabel, tx.DNSName}
+		k := nameKey{tx.IssuerLabel, hostnames.name(tx.DNSNameID)}
 		if _, needed := queries[k]; needed {
-			queries[k] = append(queries[k], tx.RequestTime)
+			queries[k] = append(queries[k], tx.RequestTime.utc())
 		}
 	}
 	for i, row := range out {

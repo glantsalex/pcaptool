@@ -271,25 +271,25 @@ func TestRunBoundedOrderedEdgeScansCancelsWorkersOnError(t *testing.T) {
 }
 
 func TestAttachConnectionsCancellationAndOpenErrorReturn(t *testing.T) {
+	hostnames := NewHostnames()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(
-		ctx, []string{"not-opened-after-cancellation.pcap"}, nil, false, false, nil, false, nil, nil, 0,
-	)
+	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, hostnames, []string{"not-opened-after-cancellation.pcap"}, nil, false, false, nil, false, nil, nil, 0)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("pre-canceled connection scan error = %v, want context.Canceled", err)
 	}
 
 	missing := filepath.Join(t.TempDir(), "missing.pcap")
-	_, _, err = AttachConnectionsAndCollectEdgesFromPCAPs(
-		context.Background(), []string{missing}, nil, false, false, nil, false, nil, nil, 0,
-	)
+	_, _, err = AttachConnectionsAndCollectEdgesFromPCAPs(context.Background(), hostnames, []string{missing}, nil, false, false, nil, false, nil, nil, 0)
 	if err == nil || !strings.Contains(err.Error(), "open pcap "+missing) {
 		t.Fatalf("missing capture error = %v, want path-specific open error", err)
 	}
 }
 
 func TestAttachConnectionsCancellationJoinsPacketReader(t *testing.T) {
+	hostnames := NewHostnames()
+
 	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	packet := buildConnectionInferenceTestTCPPacket(t, "10.0.0.1", "198.51.100.1", 41000, 443, true, false)
 	packets := make([]dnsAdmissionPacket, 1100)
@@ -317,8 +317,7 @@ func TestAttachConnectionsCancellationJoinsPacketReader(t *testing.T) {
 				}
 				return true
 			}
-			edges, first, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-				ctx, []string{path}, nil, false, false, nil, false, nil, nil, 0,
+			edges, first, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(ctx, hostnames, []string{path}, nil, false, false, nil, false, nil, nil, 0,
 				PacketScanOptions{PacketAdmission: admit},
 			)
 			resultCh <- scanResult{edges: edges, first: first, err: err, calls: admissionCalls}
@@ -344,6 +343,8 @@ func TestAttachConnectionsCancellationJoinsPacketReader(t *testing.T) {
 }
 
 func TestAttachConnectionsPreservesFirstEightCandidateCap(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		issuer = "10.0.0.1"
 		dst    = "198.51.100.1"
@@ -378,12 +379,10 @@ func TestAttachConnectionsPreservesFirstEightCandidateCap(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &DNSTransaction{
-				RequestTime: requestTime, IssuerIP: net.ParseIP(issuer), DNSName: "candidate-cap.example", NameEvidence: EvDNSAnswer,
+				RequestTime: wireTime(requestTime), wireEndpoints: makeEndpoints(net.ParseIP(issuer), nil), DNSNameID: hostnames.intern("candidate-cap.example"), NameEvidence: EvDNSAnswer,
 			}
 			tx.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer)
-			_, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-				context.Background(), []string{path}, []*DNSTransaction{tx}, false, false, nil, false, nil, nil, 0, tc.opt,
-			)
+			_, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames, []string{path}, []*DNSTransaction{tx}, false, false, nil, false, nil, nil, 0, tc.opt)
 			if err != nil {
 				t.Fatal(err)
 			}

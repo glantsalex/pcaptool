@@ -8,11 +8,13 @@ import (
 )
 
 func TestDNSTransactionResolvedIPAccessConcurrent(t *testing.T) {
+	hostnames := NewHostnames()
+
 	tx := &DNSTransaction{
-		RequestTime:  time.Now(),
-		IssuerIP:     net.ParseIP("10.0.0.1"),
-		DNSName:      "example.com",
-		NameEvidence: EvDNSAnswer,
+		RequestTime:   wireTime(time.Now()),
+		wireEndpoints: makeEndpoints(net.ParseIP("10.0.0.1"), nil),
+		DNSNameID:     hostnames.intern("example.com"),
+		NameEvidence:  EvDNSAnswer,
 	}
 
 	ips := []net.IP{

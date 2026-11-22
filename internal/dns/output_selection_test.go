@@ -10,17 +10,19 @@ import (
 )
 
 func TestConnectedOutputRecordsMatchesLegacy(t *testing.T) {
+	hostnames := NewHostnames()
+
 	p443, p0 := uint16(443), uint16(0)
 	txs := []*DNSTransaction{
-		{IssuerIP: net.ParseIP("10.0.0.1"), DNSName: "same", DestinationPort: &p443, RequestTime: time.Unix(100, 999999)},
-		{IssuerIP: net.ParseIP("10.0.0.1"), DNSName: "same", DestinationPort: &p443, RequestTime: time.Unix(0, 0)}, // earlier duplicate must not replace first
-		{IssuerLabel: "a|b", DNSName: "c", DestinationPort: &p443},
-		{IssuerLabel: "a", DNSName: "b|c", DestinationPort: &p443}, // preserve concatenated-key collision
-		{IssuerIP: net.ParseIP("2001:db8::1"), DNSName: "v6", DestinationPort: &p0, RequestTime: time.Unix(-1, 123)},
-		{IssuerIP: net.IP{}, DNSName: "empty", DestinationPort: &p443},
-		{DNSName: "nil", DestinationPort: &p443},
-		{IssuerLabel: "imsi", DNSName: "no connection"},
-		{IssuerLabel: "imsi", IssuerIP: net.ParseIP("10.0.0.2"), ResolverIP: net.ParseIP("2001:db8::2"), DNSName: "evidence", DestinationPort: &p443, PCAPFile: "one.cap", NameEvidence: EvDNSAnswer},
+		{wireEndpoints: makeEndpoints(net.ParseIP("10.0.0.1"), nil), DNSNameID: hostnames.intern("same"), DestinationPort: &p443, RequestTime: wireTime(time.Unix(100, 999999))},
+		{wireEndpoints: makeEndpoints(net.ParseIP("10.0.0.1"), nil), DNSNameID: hostnames.intern("same"), DestinationPort: &p443, RequestTime: wireTime(time.Unix(0, 0))}, // earlier duplicate must not replace first
+		{IssuerLabel: "a|b", DNSNameID: hostnames.intern("c"), DestinationPort: &p443},
+		{IssuerLabel: "a", DNSNameID: hostnames.intern("b|c"), DestinationPort: &p443}, // preserve concatenated-key collision
+		{wireEndpoints: makeEndpoints(net.ParseIP("2001:db8::1"), nil), DNSNameID: hostnames.intern("v6"), DestinationPort: &p0, RequestTime: wireTime(time.Unix(-1, 123))},
+		{wireEndpoints: makeEndpoints(net.IP{}, nil), DNSNameID: hostnames.intern("empty"), DestinationPort: &p443},
+		{DNSNameID: hostnames.intern("nil"), DestinationPort: &p443},
+		{IssuerLabel: "imsi", DNSNameID: hostnames.intern("no connection")},
+		{IssuerLabel: "imsi", wireEndpoints: makeEndpoints(net.ParseIP("10.0.0.2"), net.ParseIP("2001:db8::2")), DNSNameID: hostnames.intern("evidence"), DestinationPort: &p443, PCAPFile: "one.cap", NameEvidence: EvDNSAnswer},
 	}
 	txs[0].AddResolvedIP(net.ParseIP("8.8.8.8"), EvDNSAnswer)
 	txs[1].AddResolvedIP(net.ParseIP("1.1.1.1"), EvDNSAnswer)
@@ -32,9 +34,9 @@ func TestConnectedOutputRecordsMatchesLegacy(t *testing.T) {
 		if seed > 0 {
 			rand.New(rand.NewSource(seed)).Shuffle(len(input), func(i, j int) { input[i], input[j] = input[j], input[i] })
 		}
-		all := ToOutputRecords(input)
+		all := ToOutputRecords(hostnames, input)
 		want := FilterAndDedupRecords(all)
-		got := ConnectedOutputRecords(input)
+		got := ConnectedOutputRecords(hostnames, input)
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("seed %d: output fields/winner/order differ", seed)
 		}
@@ -45,22 +47,24 @@ func TestConnectedOutputRecordsMatchesLegacy(t *testing.T) {
 		if string(a) != string(b) {
 			t.Fatal("JSON bytes differ")
 		}
-		if !reflect.DeepEqual(ToOutputRecords(input), all) {
+		if !reflect.DeepEqual(ToOutputRecords(hostnames, input), all) {
 			t.Fatal("mutated transactions")
 		}
 	}
-	for _, input := range [][]*DNSTransaction{nil, {}, {{DNSName: "no port"}}} {
-		if got, want := ConnectedOutputRecords(input), FilterAndDedupRecords(ToOutputRecords(input)); !reflect.DeepEqual(got, want) {
+	for _, input := range [][]*DNSTransaction{nil, {}, {{DNSNameID: hostnames.intern("no port")}}} {
+		if got, want := ConnectedOutputRecords(hostnames, input), FilterAndDedupRecords(ToOutputRecords(hostnames, input)); !reflect.DeepEqual(got, want) {
 			t.Fatal("empty contract differs")
 		}
 	}
 }
 
 func BenchmarkConnectedOutputSelection(b *testing.B) {
+	hostnames := NewHostnames()
+
 	p := uint16(443)
 	txs := make([]*DNSTransaction, 100000)
 	for i := range txs {
-		tx := &DNSTransaction{IssuerLabel: "device", DNSName: "name", RequestTime: time.Unix(int64(i), 123), ResolverIP: net.ParseIP("10.0.0.1"), DestinationPort: &p}
+		tx := &DNSTransaction{IssuerLabel: "device", DNSNameID: hostnames.intern("name"), RequestTime: wireTime(time.Unix(int64(i), 123)), wireEndpoints: makeEndpoints(nil, net.ParseIP("10.0.0.1")), DestinationPort: &p}
 		if i%2 == 0 {
 			tx.DestinationPort = nil
 		}
@@ -77,9 +81,9 @@ func BenchmarkConnectedOutputSelection(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				var rows []OutputRecord
 				if early {
-					rows = ConnectedOutputRecords(txs)
+					rows = ConnectedOutputRecords(hostnames, txs)
 				} else {
-					rows = FilterAndDedupRecords(ToOutputRecords(txs))
+					rows = FilterAndDedupRecords(ToOutputRecords(hostnames, txs))
 				}
 				if len(rows) != 1 {
 					b.Fatal("unexpected winners")

@@ -17,6 +17,8 @@ import (
 )
 
 func TestRecord48PCAPNGTimestampPresenceByReader(t *testing.T) {
+	hostnames := NewHostnames()
+
 	path := filepath.Join(t.TempDir(), "missing-and-epoch.pcapng")
 	writeRecord48PCAPNG(t, path, []record48Packet{
 		{simple: true, data: buildConnectionInferenceTestTCPPacket(t, "10.0.0.1", "203.0.113.10", 40000, 443, true, false)},
@@ -40,8 +42,7 @@ func TestRecord48PCAPNGTimestampPresenceByReader(t *testing.T) {
 
 	var rawTimes []time.Time
 	var shared []syntrail.Record
-	_, _, err = AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-		context.Background(), []string{path}, nil, false, false, nil, false, nil, nil, 0,
+	_, _, err = AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames, []string{path}, nil, false, false, nil, false, nil, nil, 0,
 		PacketScanOptions{NewFileObserver: func(_ int, _ string) PacketFileObserver {
 			collector := syntrail.NewCollector()
 			return PacketFileObserver{
@@ -75,6 +76,8 @@ func TestRecord48PCAPNGTimestampPresenceByReader(t *testing.T) {
 }
 
 func TestRecord48TimestampErrorRejectsFileBeforeCommit(t *testing.T) {
+	hostnames := NewHostnames()
+
 	path := filepath.Join(t.TempDir(), "out-of-range.pcapng")
 	writeRecord48PCAPNG(t, path, []record48Packet{
 		{nanos: 1, data: buildConnectionInferenceTestTCPPacket(t, "10.0.0.1", "203.0.113.10", 40000, 443, true, false)},
@@ -93,8 +96,7 @@ func TestRecord48TimestampErrorRejectsFileBeforeCommit(t *testing.T) {
 	}
 	t.Run("shared", func(t *testing.T) {
 		committed, readErrors := false, 0
-		edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-			context.Background(), []string{path}, nil, false, false, nil, false, nil, nil, 0,
+		edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames, []string{path}, nil, false, false, nil, false, nil, nil, 0,
 			PacketScanOptions{PacketAdmission: admit, NewFileObserver: func(_ int, _ string) PacketFileObserver {
 				collector := syntrail.NewCollector()
 				return PacketFileObserver{
@@ -132,6 +134,8 @@ type record48Packet struct {
 }
 
 func TestRecord48UDPTimestampErrorRejectsFile(t *testing.T) {
+	hostnames := NewHostnames()
+
 	path := filepath.Join(t.TempDir(), "udp-invalid-time.pcapng")
 	writeRecord48PCAPNG(t, path, []record48Packet{
 		{nanos: 1, data: buildSharedObserverUDP(t, "10.0.0.1", "203.0.113.10", 40000, 514)},
@@ -142,8 +146,7 @@ func TestRecord48UDPTimestampErrorRejectsFile(t *testing.T) {
 		t.Fatalf("strict UDP records=%v error=%v", records, err)
 	}
 	committed := false
-	edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-		context.Background(), []string{path}, nil, false, false, nil, false, nil, nil, 0,
+	edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames, []string{path}, nil, false, false, nil, false, nil, nil, 0,
 		PacketScanOptions{NewFileObserver: func(_ int, _ string) PacketFileObserver {
 			collector := syntrail.NewCollector()
 			return PacketFileObserver{Observe: collector.Observe, Commit: func() { committed = true }}

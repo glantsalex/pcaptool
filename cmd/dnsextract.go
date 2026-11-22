@@ -225,6 +225,8 @@ func runDNSExtractWithExecutor(cmd *cobra.Command, _ []string, opts DNSExtractOp
 }
 
 func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr error) {
+	hostnames := dns.NewHostnames()
+
 	diagnostic, err := diagnostics.Start(os.Getenv(diagnostics.Environment))
 	if err != nil {
 		return fmt.Errorf("start diagnostics: %w", err)
@@ -349,8 +351,8 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 		}
 		return ""
 	}
-	facts := dns.NewFactCollection(resolveDevice, !opts.DisableSNI, opts.TopologyDNSWindow)
-	txs, pass2Earliest, truncatedDNSPackets, err := dns.CollectDNS(ctx, files, packetAdmission, facts)
+	facts := dns.NewFactCollection(hostnames, resolveDevice, !opts.DisableSNI, opts.TopologyDNSWindow)
+	txs, pass2Earliest, truncatedDNSPackets, err := dns.CollectDNS(ctx, hostnames, files, packetAdmission, facts)
 	if err != nil {
 		return err
 	}
@@ -445,6 +447,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	diagnostic.Checkpoint("connection_scan", nil, false)
 	_, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		ctx,
+		hostnames,
 		files,
 		txs,
 		opts.OnlyTCP,
@@ -525,7 +528,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	progress.SetStage("Preparing records for output...")
 
 	// Select connected first-winning rows before allocating their rendered fields.
-	records := dns.ConnectedOutputRecords(txs)
+	records := dns.ConnectedOutputRecords(hostnames, txs)
 	dns.SortOutputRecords(records)
 
 	progress.SetStage(fmt.Sprintf("Writing output to %s...", om.RunDir()))
@@ -550,7 +553,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 
 	switch opts.Format {
 	case "table":
-		stats := dns.ComputeTableStatsFromTx(txs, records)
+		stats := dns.ComputeTableStatsFromTx(hostnames, txs, records)
 		if err := output.WriteTableWithStats(mainOut, records, stats); err != nil {
 			return err
 		}
@@ -617,7 +620,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 
 	// Compute packet/topology unresolved names before optional active matrix
 	// completion so every packet-unresolved name remains eligible for lookup.
-	unresolvedFinal := dns.ComputeUnresolvedDNSFirstSeen(txs)
+	unresolvedFinal := dns.ComputeUnresolvedDNSFirstSeen(hostnames, txs)
 	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
 	unresolvedFinal = dns.FilterUnresolvedByTruncatedDNSPackets(unresolvedFinal, truncatedDNSPackets)
 
@@ -635,7 +638,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 				return fmt.Errorf("active resolve for matrix completion: %w", err)
 			}
 			beforeActive := topo
-			topo = dns.CompleteFactsWithActiveDNS(topo, resolvedNames, txs, opts.TopologyDNSWindow)
+			topo = dns.CompleteFactsWithActiveDNS(hostnames, topo, resolvedNames, txs, opts.TopologyDNSWindow)
 			activeResolveRecords = annotateActiveResolveRecords(records, beforeActive, topo)
 		}
 		activeResolveLogPath, err = writeActiveResolveLog(om, activeResolveRecords, activeResolveOpt)

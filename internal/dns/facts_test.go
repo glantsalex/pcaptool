@@ -15,8 +15,10 @@ import (
 )
 
 func TestFactAnswerValidityAndOwnership(t *testing.T) {
+	hostnames := NewHostnames()
+
 	base := time.Unix(1700000000, 0)
-	c := NewFactCollection(nil, false, 3*time.Second)
+	c := NewFactCollection(hostnames, nil, false, 3*time.Second)
 	first := net.IP{203, 0, 113, 1}
 	second := net.IP{203, 0, 113, 2}
 	event := func(sec int, name string, ip net.IP) {
@@ -55,10 +57,12 @@ func TestFactAnswerValidityAndOwnership(t *testing.T) {
 }
 
 func TestClientHelloFactOwnsPacketData(t *testing.T) {
+	hostnames := NewHostnames()
+
 	raw := buildSNIAdmissionPacket(t, "Owned.Example.", "10.0.0.1", "203.0.113.10")
 	packet := gopacket.NewPacket(raw, layers.LayerTypeEthernet, gopacket.NoCopy)
 	packet.Metadata().Timestamp = time.Date(2399, 1, 1, 1, 0, 0, 123, time.UTC)
-	c := NewFactCollection(func(netip.Addr, time.Time) string { return "A" }, true, 0)
+	c := NewFactCollection(hostnames, func(netip.Addr, time.Time) string { return "A" }, true, 0)
 	collector := connectivity.NewCollector(connectivity.DefaultOptions())
 	if !c.hello(c.facts, packet, nil, collector) {
 		t.Fatal("missing direct ClientHello")
@@ -97,7 +101,9 @@ func TestDNSCorroborationSurvivesDirectHello(t *testing.T) {
 }
 
 func TestNegativeAndPartialAnswers(t *testing.T) {
-	c := NewFactCollection(nil, false, 0)
+	hostnames := NewHostnames()
+
+	c := NewFactCollection(hostnames, nil, false, 0)
 	ip := net.IPv4(8, 8, 8, 8)
 	event := func(sec int64, ips []net.IP, complete bool) {
 		c.answer("A", "dns.example", time.Unix(sec, 0), ips, nil, complete)
@@ -117,15 +123,17 @@ func TestNegativeAndPartialAnswers(t *testing.T) {
 }
 
 func TestFactScanFailureReleasesPartialState(t *testing.T) {
+	hostnames := NewHostnames()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	for _, tc := range []struct {
 		ctx      context.Context
 		canceled bool
 	}{{ctx, true}, {context.Background(), false}} {
-		c := NewFactCollection(nil, true, 0)
+		c := NewFactCollection(hostnames, nil, true, 0)
 		c.Prepare(nil, nil, false)
-		_, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(tc.ctx, []string{filepath.Join(t.TempDir(), "missing.pcap")}, nil, false, false, nil, true, nil, nil, 0, PacketScanOptions{Facts: c})
+		_, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(tc.ctx, hostnames, []string{filepath.Join(t.TempDir(), "missing.pcap")}, nil, false, false, nil, true, nil, nil, 0, PacketScanOptions{Facts: c})
 		if err == nil || errors.Is(err, context.Canceled) != tc.canceled || c.bindings != nil || c.facts != nil {
 			t.Fatalf("invalid partial result on failure: %+v %v", c, err)
 		}
@@ -133,24 +141,28 @@ func TestFactScanFailureReleasesPartialState(t *testing.T) {
 }
 
 func TestActiveNameRequiresQueryByContactingDevice(t *testing.T) {
+	hostnames := NewHostnames()
+
 	rows := []TopologyEntry{}
 	for _, id := range []string{"A", "B", "C", "D"} {
 		rows = append(rows, TopologyEntry{IssuerIP: id, DestinationIP: "8.8.8.8", Port: 443, Protocol: "tcp", ObservedAt: time.Unix(100, 0)})
 	}
-	txs := []*DNSTransaction{{IssuerLabel: "D", DNSName: "a.example", RequestTime: time.Unix(1, 0)}, {IssuerLabel: "A", DNSName: "a.example", RequestTime: time.Unix(97, 0)}, {IssuerLabel: "C", DNSName: "a.example", RequestTime: time.Unix(101, 0)}}
-	got := CompleteFactsWithActiveDNS(rows, []DNSNameIPv4Resolution{{DNSName: "a.example", IPv4s: []string{"8.8.8.8"}}}, txs, 10*time.Second)
+	txs := []*DNSTransaction{{IssuerLabel: "D", DNSNameID: hostnames.intern("a.example"), RequestTime: wireTime(time.Unix(1, 0))}, {IssuerLabel: "A", DNSNameID: hostnames.intern("a.example"), RequestTime: wireTime(time.Unix(97, 0))}, {IssuerLabel: "C", DNSNameID: hostnames.intern("a.example"), RequestTime: wireTime(time.Unix(101, 0))}}
+	got := CompleteFactsWithActiveDNS(hostnames, rows, []DNSNameIPv4Resolution{{DNSName: "a.example", IPv4s: []string{"8.8.8.8"}}}, txs, 10*time.Second)
 	if got[0].DNSName != "a.example" || got[1].DNSName != "" || got[2].DNSName != "" || got[3].DNSName != "" {
 		t.Fatalf("active attribution escaped temporal device scope: %+v", got)
 	}
 }
 
 func TestAmbiguousDNSBlocksIssuerOnlyInference(t *testing.T) {
-	c := NewFactCollection(nil, false, time.Minute)
+	hostnames := NewHostnames()
+
+	c := NewFactCollection(hostnames, nil, false, time.Minute)
 	ts := time.Unix(100, 0)
 	for _, name := range []string{"one.example", "two.example"} {
 		c.answer("A", name, ts, []net.IP{net.IPv4(8, 8, 8, 8)}, nil, true)
 	}
-	c.Prepare([]*DNSTransaction{{IssuerLabel: "A", DNSName: "wrong.example", RequestTime: ts}}, nil, true)
+	c.Prepare([]*DNSTransaction{{IssuerLabel: "A", DNSNameID: hostnames.intern("wrong.example"), RequestTime: wireTime(ts)}}, nil, true)
 	s := make(factSet)
 	c.contact(s, make(provisionalFacts), "A", "10.0.0.1", "8.8.8.8", connectivity.ProtoTCP, 443, ts, true)
 	if group := s[transportFact{"A", netip.MustParseAddr("8.8.8.8"), connectivity.ProtoTCP, 443}]; group.name != "" {

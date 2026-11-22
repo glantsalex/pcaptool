@@ -11,34 +11,36 @@ import (
 )
 
 func TestStrongObservedIPDNSPairsFromTransactions(t *testing.T) {
+	hostnames := NewHostnames()
+
 	txStrong := withTestResolvedAnswers(&DNSTransaction{
-		DNSName: "Api.Example.COM.",
+		DNSNameID: hostnames.intern("Api.Example.COM."),
 	}, mustIPs(t, "34.120.10.1"), map[string]Evidence{
 		"34.120.10.1": EvDNSAnswer | EvObservedConn,
 	})
 	txStrongConn := withTestResolvedAnswers(&DNSTransaction{
-		DNSName: "api.example.com",
+		DNSNameID: hostnames.intern("api.example.com"),
 	}, mustIPs(t, "34.120.10.2"), map[string]Evidence{
 		"34.120.10.2": EvDNSAnswer | EvConnInferred | EvObservedConn,
 	})
 	txWeakNoObserved := withTestResolvedAnswers(&DNSTransaction{
-		DNSName: "weak.example.com",
+		DNSNameID: hostnames.intern("weak.example.com"),
 	}, mustIPs(t, "34.120.10.3"), map[string]Evidence{
 		"34.120.10.3": EvDNSAnswer,
 	})
 	txWeakSNI := withTestResolvedAnswers(&DNSTransaction{
-		DNSName:      "sni.example.com",
+		DNSNameID:    hostnames.intern("sni.example.com"),
 		NameEvidence: EvSNI,
 	}, mustIPs(t, "34.120.10.4"), map[string]Evidence{
 		"34.120.10.4": EvSNI | EvObservedConn,
 	})
 	txPrivate := withTestResolvedAnswers(&DNSTransaction{
-		DNSName: "private.example.com",
+		DNSNameID: hostnames.intern("private.example.com"),
 	}, mustIPs(t, "10.10.10.10"), map[string]Evidence{
 		"10.10.10.10": EvDNSAnswer | EvObservedConn,
 	})
 
-	got := StrongObservedIPDNSPairsFromTransactions([]*DNSTransaction{
+	got := StrongObservedIPDNSPairsFromTransactions(hostnames, []*DNSTransaction{
 		txStrong,
 		txStrongConn,
 		txWeakNoObserved,
@@ -266,6 +268,8 @@ func TestLoadIPToDNSWithTopologyOverlay_ReturnsOverlayScanError(t *testing.T) {
 }
 
 func TestLoadIPToDNSWithTopologyOverlay_FeedsCSVMidAttribution(t *testing.T) {
+	hostnames := NewHostnames()
+
 	dir := t.TempDir()
 	basePath := filepath.Join(dir, "dns-ip.csv")
 	if err := os.WriteFile(basePath, nil, 0o644); err != nil {
@@ -289,7 +293,7 @@ func TestLoadIPToDNSWithTopologyOverlay_FeedsCSVMidAttribution(t *testing.T) {
 		Protocol: connectivity.ProtoTCP,
 		Port:     443,
 	}}
-	got := BuildNetworkTopologyMatrixEntriesWithOptions(nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
+	got := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, nil, edges, nil, ipToDNS, DefaultTopologyBuildOptions())
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1: %#v", len(got), got)
 	}

@@ -28,7 +28,7 @@ type ConnectivityEntry struct {
 //
 // The "issuer" column uses tx.IssuerLabel when set (e.g. IMSI in
 // --radius-imsi mode) and falls back to the issuer IP string otherwise.
-func ComputeConnectivityMatrix(txs []*DNSTransaction) []ConnectivityEntry {
+func ComputeConnectivityMatrix(hostnames *Hostnames, txs []*DNSTransaction) []ConnectivityEntry {
 	type key struct {
 		issuer string
 		name   string
@@ -50,8 +50,8 @@ func ComputeConnectivityMatrix(txs []*DNSTransaction) []ConnectivityEntry {
 		}
 
 		issuer := tx.IssuerLabel
-		if issuer == "" && tx.IssuerIP != nil {
-			issuer = tx.IssuerIP.String()
+		if issuer == "" && tx.issuerIP() != nil {
+			issuer = tx.issuerIP().String()
 		}
 		if issuer == "" {
 			continue
@@ -68,7 +68,7 @@ func ComputeConnectivityMatrix(txs []*DNSTransaction) []ConnectivityEntry {
 
 			k := key{
 				issuer: issuer,
-				name:   tx.DNSName,
+				name:   hostnames.name(tx.DNSNameID),
 				ip:     ipStr,
 				port:   port,
 			}
@@ -79,7 +79,7 @@ func ComputeConnectivityMatrix(txs []*DNSTransaction) []ConnectivityEntry {
 
 			out = append(out, ConnectivityEntry{
 				IssuerIP:   issuer,
-				DNSName:    tx.DNSName,
+				DNSName:    hostnames.name(tx.DNSNameID),
 				ResolvedIP: ipStr,
 				Port:       port,
 			})

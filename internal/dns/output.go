@@ -63,10 +63,10 @@ func FilterAndDedupRecords(records []OutputRecord) []OutputRecord {
 
 // ToOutputRecords converts DNSTransaction objects into OutputRecords.
 // It also deduplicates ResolvedIPs per transaction.
-func ToOutputRecords(txs []*DNSTransaction) []OutputRecord {
+func ToOutputRecords(hostnames *Hostnames, txs []*DNSTransaction) []OutputRecord {
 	records := make([]OutputRecord, 0, len(txs))
 	for _, tx := range txs {
-		records = append(records, toOutputRecord(tx))
+		records = append(records, toOutputRecord(hostnames, tx))
 	}
 	return records
 }
@@ -75,8 +75,8 @@ func outputIssuer(tx *DNSTransaction) string {
 	if tx.IssuerLabel != "" {
 		return tx.IssuerLabel
 	}
-	if tx.IssuerIP != nil {
-		return tx.IssuerIP.String()
+	if tx.issuerIP() != nil {
+		return tx.issuerIP().String()
 	}
 	return ""
 }
@@ -85,30 +85,30 @@ func outputIssuer(tx *DNSTransaction) string {
 // but rejects missing ports and later duplicate keys before formatting answers,
 // timestamps, and resolver addresses. It preserves first encounter wins, including
 // the historical concatenated-key behavior. Callers retain txs for other reports.
-func ConnectedOutputRecords(txs []*DNSTransaction) []OutputRecord {
+func ConnectedOutputRecords(hostnames *Hostnames, txs []*DNSTransaction) []OutputRecord {
 	records := make([]OutputRecord, 0)
 	seen := make(map[string]struct{})
 	for _, tx := range txs {
 		if tx.DestinationPort == nil {
 			continue
 		}
-		key := outputIssuer(tx) + "|" + tx.DNSName + "|" + strconv.Itoa(int(*tx.DestinationPort))
+		key := outputIssuer(tx) + "|" + hostnames.name(tx.DNSNameID) + "|" + strconv.Itoa(int(*tx.DestinationPort))
 		if _, exists := seen[key]; exists {
 			continue
 		}
 		seen[key] = struct{}{}
-		records = append(records, toOutputRecord(tx))
+		records = append(records, toOutputRecord(hostnames, tx))
 	}
 	return records
 }
 
-func toOutputRecord(tx *DNSTransaction) OutputRecord {
+func toOutputRecord(hostnames *Hostnames, tx *DNSTransaction) OutputRecord {
 	issuer := outputIssuer(tx)
 
 	rec := OutputRecord{
-		RequestTimeStr: tx.RequestTime.UTC().Format("2006-01-02 15:04:05.000"),
+		RequestTimeStr: tx.RequestTime.utc().Format("2006-01-02 15:04:05.000"),
 		IssuerIP:       issuer,
-		DNSName:        tx.DNSName,
+		DNSName:        hostnames.name(tx.DNSNameID),
 		PCAPFile:       tx.PCAPFile,
 	}
 
@@ -160,8 +160,8 @@ func toOutputRecord(tx *DNSTransaction) OutputRecord {
 	}
 
 	// Resolver IP (optional)
-	if tx.ResolverIP != nil && !tx.ResolverIP.Equal(net.IP{}) {
-		s := tx.ResolverIP.String()
+	if tx.resolverIP() != nil && !tx.resolverIP().Equal(net.IP{}) {
+		s := tx.resolverIP().String()
 		rec.ResolverIP = &s
 	}
 

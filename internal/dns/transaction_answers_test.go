@@ -174,6 +174,8 @@ func TestAnswerMergePreservesOrderAndFallback(t *testing.T) {
 // These consumers intentionally have different fallback policies. Storage must
 // preserve raw evidence and presence instead of choosing one policy for them.
 func TestAnswerConsumerEvidenceFallbacks(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const ip = "34.120.10.1"
 	const name = "api.example.com"
 	nameEvidence := EvDNSAnswer | EvObservedConn
@@ -191,18 +193,18 @@ func TestAnswerConsumerEvidenceFallbacks(t *testing.T) {
 		{"sni", map[string]Evidence{ip: EvSNI}, EvSNI, EvNone, nameEvidence | EvSNI, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			tx := withTestResolvedAnswers(&DNSTransaction{DNSName: name, NameEvidence: nameEvidence}, []net.IP{net.ParseIP(ip)}, tt.evidence)
+			tx := withTestResolvedAnswers(&DNSTransaction{DNSNameID: hostnames.intern(name), NameEvidence: nameEvidence}, []net.IP{net.ParseIP(ip)}, tt.evidence)
 			txs := []*DNSTransaction{tx}
-			if got := ToOutputRecords(txs)[0].ResolvedIPSources[ip]; got != EvidenceString(tt.output) {
+			if got := ToOutputRecords(hostnames, txs)[0].ResolvedIPSources[ip]; got != EvidenceString(tt.output) {
 				t.Fatalf("output=%q want %q", got, EvidenceString(tt.output))
 			}
-			if got := BuildIPDNSAppendAuditRecords(txs, []IPDNSPair{{DNS: name, IP: ip}})[0].Evidence; got != EvidenceString(tt.audit) {
+			if got := BuildIPDNSAppendAuditRecords(hostnames, txs, []IPDNSPair{{DNS: name, IP: ip}})[0].Evidence; got != EvidenceString(tt.audit) {
 				t.Fatalf("audit=%q want %q", got, EvidenceString(tt.audit))
 			}
-			if got := BuildNameIPEvidenceIndex(txs)[nameIPKey(name, ip)]; got != tt.index {
+			if got := BuildNameIPEvidenceIndex(hostnames, txs)[nameIPKey(name, ip)]; got != tt.index {
 				t.Fatalf("index=%v want %v", got, tt.index)
 			}
-			if got := len(StrongObservedIPDNSPairsFromTransactions(txs)[ip]) > 0; got != tt.learn {
+			if got := len(StrongObservedIPDNSPairsFromTransactions(hostnames, txs)[ip]) > 0; got != tt.learn {
 				t.Fatalf("learn=%v want %v", got, tt.learn)
 			}
 		})
@@ -213,8 +215,8 @@ func TestAnswerCompactTransactionLayout(t *testing.T) {
 	if runtime.GOARCH != "amd64" {
 		t.Skip("saved layout baseline is amd64")
 	}
-	if got := unsafe.Sizeof(DNSTransaction{}); got != 280 {
-		t.Fatalf("transaction size=%d want 280", got)
+	if got := unsafe.Sizeof(DNSTransaction{}); got != 224 {
+		t.Fatalf("transaction size=%d want 224", got)
 	}
 	if got := unsafe.Sizeof(resolvedAnswer{}); got != 8 {
 		t.Fatalf("answer size=%d want 8", got)

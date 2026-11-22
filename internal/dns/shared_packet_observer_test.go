@@ -69,6 +69,8 @@ func TestLibpcapMixedInterfaceReadErrorAdvancesToNextCompatiblePacket(t *testing
 }
 
 func TestSharedPacketObserverMatchesLegacyFleetScanAcrossClassicPCAPPrecisionsAndFilters(t *testing.T) {
+	hostnames := NewHostnames()
+
 	base := time.Date(2026, 10, 7, 12, 0, 0, 123456789, time.UTC)
 	pcapPath := filepath.Join(t.TempDir(), "first.pcap")
 	writeConnectionAdmissionPCAP(t, pcapPath, []dnsAdmissionPacket{
@@ -105,8 +107,7 @@ func TestSharedPacketObserverMatchesLegacyFleetScanAcrossClassicPCAPPrecisionsAn
 	}
 
 	accumulator := syntrail.NewAccumulator()
-	_, _, err = AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-		context.Background(),
+	_, _, err = AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames,
 		files,
 		nil,
 		true,
@@ -140,6 +141,8 @@ func TestSharedPacketObserverMatchesLegacyFleetScanAcrossClassicPCAPPrecisionsAn
 }
 
 func TestSharedPacketObserverMatchesLegacySingleInterfacePCAPNGWithoutRecovery(t *testing.T) {
+	hostnames := NewHostnames()
+
 	base := time.Date(2026, 10, 7, 12, 0, 0, 123456789, time.UTC)
 	path := filepath.Join(t.TempDir(), "capture.pcapng")
 	writeSharedObserverPCAPNG(t, path, []dnsAdmissionPacket{
@@ -153,8 +156,7 @@ func TestSharedPacketObserverMatchesLegacySingleInterfacePCAPNGWithoutRecovery(t
 
 	accumulator := syntrail.NewAccumulator()
 	readErrors := 0
-	_, _, err = AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-		context.Background(), []string{path}, nil, false, false, nil, false, nil, nil, 0,
+	_, _, err = AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames, []string{path}, nil, false, false, nil, false, nil, nil, 0,
 		PacketScanOptions{NewFileObserver: func(_ int, _ string) PacketFileObserver {
 			collector := syntrail.NewCollector()
 			return PacketFileObserver{
@@ -179,6 +181,8 @@ func TestSharedPacketObserverMatchesLegacySingleInterfacePCAPNGWithoutRecovery(t
 }
 
 func TestSharedPacketObserverReturnsTruncatedCaptureReadErrorWithoutCommit(t *testing.T) {
+	hostnames := NewHostnames()
+
 	path := filepath.Join(t.TempDir(), "truncated.pcap")
 	writeConnectionAdmissionPCAP(t, path, []dnsAdmissionPacket{{
 		ts:   time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC),
@@ -193,8 +197,7 @@ func TestSharedPacketObserverReturnsTruncatedCaptureReadErrorWithoutCommit(t *te
 	}
 
 	committed := false
-	_, _, err = AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-		context.Background(), []string{path}, nil, false, false, nil, false, nil, nil, 0,
+	_, _, err = AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames, []string{path}, nil, false, false, nil, false, nil, nil, 0,
 		PacketScanOptions{NewFileObserver: func(_ int, _ string) PacketFileObserver {
 			return PacketFileObserver{Commit: func() { committed = true }}
 		}},
@@ -208,6 +211,8 @@ func TestSharedPacketObserverReturnsTruncatedCaptureReadErrorWithoutCommit(t *te
 }
 
 func TestSharedPacketObserverCancellationDoesNotCommitPartialRecords(t *testing.T) {
+	hostnames := NewHostnames()
+
 	path := filepath.Join(t.TempDir(), "cancel.pcap")
 	packet := buildConnectionInferenceTestTCPPacket(t, "10.0.0.1", "203.0.113.10", 40000, 443, true, false)
 	packets := make([]dnsAdmissionPacket, 100)
@@ -220,8 +225,7 @@ func TestSharedPacketObserverCancellationDoesNotCommitPartialRecords(t *testing.
 	ctx, cancel := context.WithCancel(context.Background())
 	committed := false
 	seen := 0
-	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
-		ctx, []string{path}, nil, false, false, nil, false, nil, nil, 0,
+	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(ctx, hostnames, []string{path}, nil, false, false, nil, false, nil, nil, 0,
 		PacketScanOptions{NewFileObserver: func(_ int, _ string) PacketFileObserver {
 			return PacketFileObserver{
 				Observe: func(gopacket.Packet) error {

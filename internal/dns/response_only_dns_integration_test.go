@@ -10,6 +10,8 @@ import (
 )
 
 func TestResponseOnlyDNSAnswerDrivesTopologyAttribution(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		wantIssuer = "10.245.214.104"
 		wantDst    = "23.48.23.56"
@@ -23,7 +25,7 @@ func TestResponseOnlyDNSAnswerDrivesTopologyAttribution(t *testing.T) {
 	files := []string{path}
 	ctx := context.Background()
 
-	txs, _, _, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(ctx, files, false, true)
+	txs, _, _, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(ctx, hostnames, files, false, true)
 	if err != nil {
 		t.Fatalf("build DNS transactions from response-only fixture: %v", err)
 	}
@@ -35,15 +37,15 @@ func TestResponseOnlyDNSAnswerDrivesTopologyAttribution(t *testing.T) {
 		}
 		t.Logf(
 			"tx issuer=%s name=%q resolver=%s resolved=%v name_evidence=%s ip_evidence=%v",
-			tx.IssuerIP,
-			tx.DNSName,
-			tx.ResolverIP,
+			tx.issuerIP(),
+			hostnames.name(tx.DNSNameID),
+			tx.resolverIP(),
 			testResolvedIPs(tx),
 			EvidenceString(tx.NameEvidence),
 			testResolvedEvidence(tx),
 		)
-		if tx.IssuerIP.String() == wantIssuer &&
-			tx.DNSName == wantName &&
+		if tx.issuerIP().String() == wantIssuer &&
+			hostnames.name(tx.DNSNameID) == wantName &&
 			responseOnlyContainsIPString(testResolvedIPs(tx), wantDst) &&
 			tx.NameEvidence == EvDNSAnswer &&
 			tx.resolvedIPEvidenceValue(wantDst) == EvDNSAnswer {
@@ -56,6 +58,7 @@ func TestResponseOnlyDNSAnswerDrivesTopologyAttribution(t *testing.T) {
 
 	edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(
 		ctx,
+		hostnames,
 		files,
 		txs,
 		true,
@@ -75,7 +78,7 @@ func TestResponseOnlyDNSAnswerDrivesTopologyAttribution(t *testing.T) {
 
 	opt := DefaultTopologyBuildOptions()
 	opt.MaxDNSAge = 5 * time.Minute
-	matrix := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, opt)
+	matrix := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, txs, edges, nil, nil, opt)
 
 	var matching []TopologyEntry
 	var foundStrong bool

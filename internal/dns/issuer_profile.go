@@ -23,7 +23,7 @@ type IssuerProfile struct {
 func ComputeIssuerProfile(txs []*DNSTransaction) []IssuerProfile {
 	type agg struct {
 		totalDNS  int
-		names     map[string]struct{}
+		names     map[uint64]struct{}
 		ips       map[string]struct{}
 		ports     map[uint16]struct{}
 		connected int
@@ -33,8 +33,8 @@ func ComputeIssuerProfile(txs []*DNSTransaction) []IssuerProfile {
 
 	for _, tx := range txs {
 		issuer := tx.IssuerLabel
-		if issuer == "" && tx.IssuerIP != nil {
-			issuer = tx.IssuerIP.String()
+		if issuer == "" && tx.issuerIP() != nil {
+			issuer = tx.issuerIP().String()
 		}
 		if issuer == "" {
 			continue
@@ -42,7 +42,7 @@ func ComputeIssuerProfile(txs []*DNSTransaction) []IssuerProfile {
 		a, ok := m[issuer]
 		if !ok {
 			a = &agg{
-				names: make(map[string]struct{}),
+				names: make(map[uint64]struct{}),
 				ips:   make(map[string]struct{}),
 				ports: make(map[uint16]struct{}),
 			}
@@ -50,7 +50,7 @@ func ComputeIssuerProfile(txs []*DNSTransaction) []IssuerProfile {
 		}
 
 		a.totalDNS++
-		a.names[tx.DNSName] = struct{}{}
+		a.names[tx.DNSNameID] = struct{}{}
 
 		// Resolved IPs
 		for i := 0; i < tx.resolvedIPLen(); i++ {

@@ -99,6 +99,8 @@ func TestExtractTruncatedDNSQueryDiagnostic(t *testing.T) {
 }
 
 func TestDNSExtractorCollectsTruncatedUDPQueryDiagnosticWithoutCreatingTransaction(t *testing.T) {
+	hostnames := NewHostnames()
+
 	raw := make([]byte, 12)
 	binary.BigEndian.PutUint16(raw[0:2], 0x4321)
 	binary.BigEndian.PutUint16(raw[2:4], 0x0100)
@@ -113,7 +115,7 @@ func TestDNSExtractorCollectsTruncatedUDPQueryDiagnosticWithoutCreatingTransacti
 	packet.Metadata().Timestamp = time.Date(2026, 6, 28, 10, 11, 12, 123, time.UTC)
 	packet.Metadata().Truncated = true
 
-	extractor := newDNSExtractorWithDiagnostics(true)
+	extractor := newDNSExtractorWithDiagnostics(hostnames, true)
 	extractor.OnPacket(packet, "captures/truncated.pcap")
 
 	rows := extractor.TruncatedDNSPackets()
@@ -130,6 +132,8 @@ func TestDNSExtractorCollectsTruncatedUDPQueryDiagnosticWithoutCreatingTransacti
 }
 
 func TestDNSExtractorDoesNotCreateTransactionFromTruncatedQueryWhenDiagnosticsDisabled(t *testing.T) {
+	hostnames := NewHostnames()
+
 	raw := make([]byte, 12)
 	binary.BigEndian.PutUint16(raw[0:2], 0x4321)
 	binary.BigEndian.PutUint16(raw[2:4], 0x0100)
@@ -143,7 +147,7 @@ func TestDNSExtractorDoesNotCreateTransactionFromTruncatedQueryWhenDiagnosticsDi
 	)
 	packet.Metadata().Truncated = true
 
-	extractor := newDNSExtractorWithDiagnostics(false)
+	extractor := newDNSExtractorWithDiagnostics(hostnames, false)
 	extractor.OnPacket(packet, "captures/truncated.pcap")
 
 	if len(extractor.TruncatedDNSPackets()) != 0 {

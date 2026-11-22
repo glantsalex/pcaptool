@@ -20,7 +20,7 @@ type IPDNSAppendAuditRecord struct {
 
 // BuildIPDNSAppendAuditRecords returns earliest strong packet-backed provenance
 // for each newly appended DNS,IP pair.
-func BuildIPDNSAppendAuditRecords(txs []*DNSTransaction, pairs []IPDNSPair) []IPDNSAppendAuditRecord {
+func BuildIPDNSAppendAuditRecords(hostnames *Hostnames, txs []*DNSTransaction, pairs []IPDNSPair) []IPDNSAppendAuditRecord {
 	if len(pairs) == 0 {
 		return nil
 	}
@@ -53,35 +53,35 @@ func BuildIPDNSAppendAuditRecords(txs []*DNSTransaction, pairs []IPDNSPair) []IP
 
 	best := make(map[pairKey]candidate, len(want))
 	for _, tx := range txs {
-		if tx == nil || tx.DNSName == "" || tx.resolvedIPLen() == 0 {
+		if tx == nil || tx.DNSNameID == 0 || tx.resolvedIPLen() == 0 {
 			continue
 		}
 
-		dnsName := canonicalDNSName(tx.DNSName)
+		dnsName := canonicalDNSName(hostnames.name(tx.DNSNameID))
 		if dnsName == "" {
 			continue
 		}
 
 		issuerIP := ""
-		if tx.IssuerIP != nil {
-			issuerIP = tx.IssuerIP.String()
+		if tx.issuerIP() != nil {
+			issuerIP = tx.issuerIP().String()
 		}
 		resolverIP := ""
-		if tx.ResolverIP != nil {
-			if ip4 := tx.ResolverIP.To4(); ip4 != nil {
+		if tx.resolverIP() != nil {
+			if ip4 := tx.resolverIP().To4(); ip4 != nil {
 				resolverIP = ip4.String()
 			} else {
-				resolverIP = tx.ResolverIP.String()
+				resolverIP = tx.resolverIP().String()
 			}
 		}
 		port := uint16(0)
 		if tx.DestinationPort != nil {
 			port = *tx.DestinationPort
 		}
-		proto := string(tx.ProtocolL4)
+		proto := string(tx.ProtocolL4.protocol())
 		observedAt := ""
-		if !tx.RequestTime.IsZero() {
-			observedAt = tx.RequestTime.UTC().Format("2006-01-02 15:04:05.000000000Z07:00")
+		if !tx.RequestTime.utc().IsZero() {
+			observedAt = tx.RequestTime.utc().Format("2006-01-02 15:04:05.000000000Z07:00")
 		}
 
 		for i := 0; i < tx.resolvedIPLen(); i++ {
@@ -120,7 +120,7 @@ func BuildIPDNSAppendAuditRecords(txs []*DNSTransaction, pairs []IPDNSPair) []IP
 				Port:       port,
 				PCAPFile:   tx.PCAPFile,
 			}
-			ts := tx.RequestTime.UTC().UnixNano()
+			ts := tx.RequestTime.utc().UnixNano()
 			cur, ok := best[k]
 			if !ok || ts < cur.ts || (ts == cur.ts && rec.PCAPFile < cur.rec.PCAPFile) {
 				best[k] = candidate{ts: ts, rec: rec}

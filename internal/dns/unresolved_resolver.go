@@ -385,6 +385,7 @@ func WriteActiveResolveAuditCSV(w io.Writer, records []ActiveResolveAuditRecord,
 //   - unresolved stats for output file (only those that are still unresolved or skipped)
 func ResolveUnresolvedDNSTransactions(
 	ctx context.Context,
+	hostnames *Hostnames,
 	txs []*DNSTransaction,
 	opt ResolveUnresolvedOptions,
 ) ([]*DNSTransaction, []DNSUnresolvedStat, error) {
@@ -404,14 +405,14 @@ func ResolveUnresolvedDNSTransactions(
 	nameToTxs := make(map[string][]*DNSTransaction)
 
 	for _, tx := range txs {
-		if tx == nil || tx.DNSName == "" {
+		if tx == nil || tx.DNSNameID == 0 {
 			continue
 		}
 		if tx.resolvedIPLen() > 0 {
 			continue
 		}
 
-		name := strings.TrimSuffix(strings.TrimSpace(tx.DNSName), ".")
+		name := strings.TrimSuffix(strings.TrimSpace(hostnames.name(tx.DNSNameID)), ".")
 		if name == "" {
 			continue
 		}
@@ -427,7 +428,7 @@ func ResolveUnresolvedDNSTransactions(
 
 	// If nothing to resolve, still emit unresolved list (existing behavior).
 	if len(nameToTxs) == 0 {
-		return txs, buildUnresolvedStatsFromTxs(txs), nil
+		return txs, buildUnresolvedStatsFromTxs(hostnames, txs), nil
 	}
 
 	names := make([]string, 0, len(nameToTxs))
@@ -554,10 +555,10 @@ func ResolveUnresolvedDNSTransactions(
 	}
 
 	// Return unresolved stats AFTER attempt (including “skipped” ones).
-	return txs, buildUnresolvedStatsFromTxs(txs), nil
+	return txs, buildUnresolvedStatsFromTxs(hostnames, txs), nil
 }
 
-func buildUnresolvedStatsFromTxs(txs []*DNSTransaction) []DNSUnresolvedStat {
+func buildUnresolvedStatsFromTxs(hostnames *Hostnames, txs []*DNSTransaction) []DNSUnresolvedStat {
 	type key struct {
 		name   string
 		issuer string
@@ -566,19 +567,19 @@ func buildUnresolvedStatsFromTxs(txs []*DNSTransaction) []DNSUnresolvedStat {
 	firstFile := make(map[key]string)
 
 	for _, tx := range txs {
-		if tx == nil || tx.DNSName == "" {
+		if tx == nil || tx.DNSNameID == 0 {
 			continue
 		}
 		if tx.resolvedIPLen() > 0 {
 			continue
 		}
-		name := strings.TrimSuffix(strings.TrimSpace(tx.DNSName), ".")
+		name := strings.TrimSuffix(strings.TrimSpace(hostnames.name(tx.DNSNameID)), ".")
 		if name == "" {
 			continue
 		}
 		issuer := ""
-		if tx.IssuerIP != nil {
-			issuer = tx.IssuerIP.String()
+		if tx.issuerIP() != nil {
+			issuer = tx.issuerIP().String()
 		}
 
 		k := key{name: name, issuer: issuer}

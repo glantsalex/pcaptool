@@ -37,14 +37,14 @@ func normalizeEvidence(ev Evidence) Evidence {
 //
 // Important: we normalize evidence per (name,ip) so that connection-inference
 // cannot override a stronger primary source for the same pair.
-func BuildNameIPEvidenceIndex(txs []*DNSTransaction) map[string]Evidence {
+func BuildNameIPEvidenceIndex(hostnames *Hostnames, txs []*DNSTransaction) map[string]Evidence {
 	idx := make(map[string]Evidence, 4096)
 
 	for _, tx := range txs {
 		if tx == nil {
 			continue
 		}
-		if tx.DNSName == "" {
+		if tx.DNSNameID == 0 {
 			continue
 		}
 
@@ -69,7 +69,7 @@ func BuildNameIPEvidenceIndex(txs []*DNSTransaction) map[string]Evidence {
 			// (Older transactions may not populate ResolvedIPEvidence.)
 			ev |= tx.NameEvidence
 
-			k := nameIPKey(tx.DNSName, ipStr)
+			k := nameIPKey(hostnames.name(tx.DNSNameID), ipStr)
 			idx[k] = normalizeEvidence(idx[k] | ev)
 		}
 	}

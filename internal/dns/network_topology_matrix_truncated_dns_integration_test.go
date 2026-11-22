@@ -17,6 +17,8 @@ const (
 )
 
 func TestNetworkTopologyMatrixUsesCaptureTruncatedDNSResponseARecord(t *testing.T) {
+	hostnames := NewHostnames()
+
 	const (
 		wantIssuer = samsungClientIP
 		wantDst    = samsungResolvedIP
@@ -30,7 +32,7 @@ func TestNetworkTopologyMatrixUsesCaptureTruncatedDNSResponseARecord(t *testing.
 	files := []string{path}
 	ctx := context.Background()
 
-	txs, _, truncatedDNSPackets, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(ctx, files, false, true)
+	txs, _, truncatedDNSPackets, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(ctx, hostnames, files, false, true)
 	if err != nil {
 		t.Fatalf("build DNS transactions from fixture: %v", err)
 	}
@@ -43,14 +45,14 @@ func TestNetworkTopologyMatrixUsesCaptureTruncatedDNSResponseARecord(t *testing.
 		}
 		t.Logf(
 			"tx issuer=%s name=%q resolver=%s resolved=%v name_evidence=%s ip_evidence=%v",
-			tx.IssuerIP,
-			tx.DNSName,
-			tx.ResolverIP,
+			tx.issuerIP(),
+			hostnames.name(tx.DNSNameID),
+			tx.resolverIP(),
 			testResolvedIPs(tx),
 			EvidenceString(tx.NameEvidence),
 			testResolvedEvidence(tx),
 		)
-		if tx.IssuerIP.String() == wantIssuer && tx.DNSName == wantName && containsIPString(testResolvedIPs(tx), wantDst) {
+		if tx.issuerIP().String() == wantIssuer && hostnames.name(tx.DNSNameID) == wantName && containsIPString(testResolvedIPs(tx), wantDst) {
 			sawRecoveredDNSAnswer = true
 		}
 	}
@@ -60,6 +62,7 @@ func TestNetworkTopologyMatrixUsesCaptureTruncatedDNSResponseARecord(t *testing.
 
 	edges, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(
 		ctx,
+		hostnames,
 		files,
 		txs,
 		true,
@@ -79,7 +82,7 @@ func TestNetworkTopologyMatrixUsesCaptureTruncatedDNSResponseARecord(t *testing.
 
 	opt := DefaultTopologyBuildOptions()
 	opt.MaxDNSAge = 5 * time.Minute
-	matrix := BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, nil, nil, opt)
+	matrix := BuildNetworkTopologyMatrixEntriesWithOptions(hostnames, txs, edges, nil, nil, opt)
 
 	var matching []TopologyEntry
 	var foundStrong bool

@@ -55,7 +55,7 @@ func LooksLikeNTPDNSName(name string) bool {
 
 // FilterOutNTPDNSTransactions removes DNS transactions whose names look NTP-related.
 // Synthetic SNI transactions are kept even when their names match these patterns.
-func FilterOutNTPDNSTransactions(txs []*DNSTransaction) ([]*DNSTransaction, int) {
+func FilterOutNTPDNSTransactions(hostnames *Hostnames, txs []*DNSTransaction) ([]*DNSTransaction, int) {
 	if len(txs) == 0 {
 		return txs, 0
 	}
@@ -71,7 +71,7 @@ func FilterOutNTPDNSTransactions(txs []*DNSTransaction) ([]*DNSTransaction, int)
 			out = append(out, tx)
 			continue
 		}
-		if LooksLikeNTPDNSName(tx.DNSName) {
+		if LooksLikeNTPDNSName(hostnames.name(tx.DNSNameID)) {
 			dropped++
 			continue
 		}

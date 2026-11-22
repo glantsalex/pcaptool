@@ -98,7 +98,7 @@ type PacketScanOptions struct {
 // Pass 1 – scan all PCAPs for DNS A queries/responses and build DNSTransactions.
 // Returns slice of transactions and earliest packet timestamp (for filename).
 // BuildTransactionsFromPCAPs runs Pass 1 (DNS) in parallel over files.
-func BuildTransactionsFromPCAPs(ctx context.Context, files []string) ([]*DNSTransaction, time.Time, error) {
+func BuildTransactionsFromPCAPs(ctx context.Context, hostnames *Hostnames, files []string) ([]*DNSTransaction, time.Time, error) {
 	type fileResult struct {
 		txMap    map[TxKey][]*DNSTransaction
 		earliest time.Time
@@ -124,7 +124,7 @@ func BuildTransactionsFromPCAPs(ctx context.Context, files []string) ([]*DNSTran
 			defer wg.Done()
 
 			for path := range fileCh {
-				txMap, earliest, err := scanDNSInFile(ctx, path)
+				txMap, earliest, err := scanDNSInFile(ctx, hostnames, path)
 				resCh <- fileResult{
 					txMap:    txMap,
 					earliest: earliest,
@@ -190,7 +190,7 @@ func BuildTransactionsFromPCAPs(ctx context.Context, files []string) ([]*DNSTran
 
 	// Sort by request time
 	sort.Slice(txs, func(i, j int) bool {
-		return txs[i].RequestTime.Before(txs[j].RequestTime)
+		return txs[i].RequestTime.compare(txs[j].RequestTime) < 0
 	})
 
 	// Final bar to 100%
@@ -205,7 +205,7 @@ func findLatestTxBefore(txs []*DNSTransaction, ts time.Time) *DNSTransaction {
 		return nil
 	}
 	i := sort.Search(len(txs), func(i int) bool {
-		return !txs[i].RequestTime.Before(ts) // RequestTime >= ts
+		return !txs[i].RequestTime.utc().Before(ts) // RequestTime >= ts
 	})
 	if i == 0 {
 		return nil
@@ -220,17 +220,17 @@ func findLatestTxBefore(txs []*DNSTransaction, ts time.Time) *DNSTransaction {
 //   - Any ambiguity (0 or >1 unresolved eligible txs) returns nil.
 //
 // Returns (chosenTx, eligibleCount, unresolvedCount) for debug visibility.
-func pickFallbackTxUniq(txs []*DNSTransaction, ts time.Time, win time.Duration) (*DNSTransaction, int, int) {
+func pickFallbackTxUniq(hostnames *Hostnames, txs []*DNSTransaction, ts time.Time, win time.Duration) (*DNSTransaction, int, int) {
 	if len(txs) == 0 {
 		return nil, 0, 0
 	}
 	start := ts.Add(-win)
 
 	lo := sort.Search(len(txs), func(i int) bool {
-		return !txs[i].RequestTime.Before(start)
+		return !txs[i].RequestTime.utc().Before(start)
 	})
 	hi := sort.Search(len(txs), func(i int) bool {
-		return txs[i].RequestTime.After(ts)
+		return txs[i].RequestTime.utc().After(ts)
 	})
 	if lo >= hi {
 		return nil, 0, 0
@@ -254,7 +254,7 @@ func pickFallbackTxUniq(txs []*DNSTransaction, ts time.Time, win time.Duration) 
 			continue
 		}
 		// Defensive: only allow resolvable-looking names.
-		if !LooksLikeResolvableDNSName(tx.DNSName) {
+		if !LooksLikeResolvableDNSName(hostnames.name(tx.DNSNameID)) {
 			continue
 		}
 
@@ -295,6 +295,7 @@ func pickFallbackTxUniq(txs []*DNSTransaction, ts time.Time, win time.Duration) 
 // per-file edge slices.
 func AttachConnectionsAndCollectEdgesFromPCAPs(
 	ctx context.Context,
+	hostnames *Hostnames,
 	files []string,
 	txs []*DNSTransaction,
 	onlyTCP bool,
@@ -307,6 +308,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 ) ([]connectivity.Edge, FirstPacketInfo, error) {
 	return AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		ctx,
+		hostnames,
 		files,
 		txs,
 		onlyTCP,
@@ -324,6 +326,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPs(
 // admission before earliest-packet tracking, edge collection, or correlation.
 func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 	ctx context.Context,
+	hostnames *Hostnames,
 	files []string,
 	txs []*DNSTransaction,
 	onlyTCP bool,
@@ -335,6 +338,9 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 	ftpPassiveMinPort uint16,
 	scanOpt PacketScanOptions,
 ) ([]connectivity.Edge, FirstPacketInfo, error) {
+	if hostnames == nil || (scanOpt.Facts != nil && scanOpt.Facts.hostnames != hostnames) {
+		return nil, FirstPacketInfo{}, fmt.Errorf("DNS scan requires the run hostname dictionary")
+	}
 	if scanOpt.Facts != nil {
 		scanOpt.IssuerIdentity = scanOpt.Facts.resolveWire
 	}
@@ -355,10 +361,10 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 			if tx.DestinationPort != nil && *tx.DestinationPort > 0 {
 				continue
 			}
-			if !LooksLikeResolvableDNSName(tx.DNSName) {
+			if !LooksLikeResolvableDNSName(hostnames.name(tx.DNSNameID)) {
 				continue
 			}
-			issuer := tx.IssuerIP.String()
+			issuer := tx.issuerIP().String()
 			if issuer == "" {
 				continue
 			}
@@ -366,7 +372,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		}
 		for k := range issuerTxs {
 			sort.Slice(issuerTxs[k], func(i, j int) bool {
-				return issuerTxs[k][i].RequestTime.Before(issuerTxs[k][j].RequestTime)
+				return issuerTxs[k][i].RequestTime.compare(issuerTxs[k][j].RequestTime) < 0
 			})
 		}
 	}
@@ -428,7 +434,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 					if u.tx.hasResolvedIPEvidence() {
 						evBefore = u.tx.resolvedIPEvidenceValue(s)
 					}
-					debugDNSFallbackf("before-mark issuer=%s name=%q dst=%s had=%v ev=%s", u.tx.IssuerIP, u.tx.DNSName, s, had, EvidenceString(evBefore))
+					debugDNSFallbackf("before-mark issuer=%s name=%q dst=%s had=%v ev=%s", u.tx.issuerIP(), hostnames.name(u.tx.DNSNameID), s, had, EvidenceString(evBefore))
 				}
 				ip4 := u.usedDst4.To4()
 				if ip4 != nil {
@@ -445,7 +451,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 							_, now = u.tx.resolvedIPEvidenceFor(key)
 						}
 						if !had && now {
-							debugDNSFallbackf("backfilled-ip issuer=%s name=%q ip=%s ev=%s", u.tx.IssuerIP, u.tx.DNSName, key, EvidenceString(u.tx.resolvedIPEvidenceValue(key)))
+							debugDNSFallbackf("backfilled-ip issuer=%s name=%q ip=%s ev=%s", u.tx.issuerIP(), hostnames.name(u.tx.DNSNameID), key, EvidenceString(u.tx.resolvedIPEvidenceValue(key)))
 						}
 					}
 					if scanOpt.Facts == nil && !u.fromFallback && u.tx.hasResolvedIPEvidence() && u.tx.resolvedIPEvidenceValue(key)&EvDNSAnswer != 0 {
@@ -733,7 +739,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 					tx, unresCnt = facts.pendingQuery(facts.resolveWire(srcIPStr, ts), ts)
 					eligibleCnt = unresCnt
 				} else {
-					tx, eligibleCnt, unresCnt = pickFallbackTxUniq(issuerTxs[srcIPStr], ts, maxConnDelay)
+					tx, eligibleCnt, unresCnt = pickFallbackTxUniq(hostnames, issuerTxs[srcIPStr], ts, maxConnDelay)
 				}
 				if tx == nil {
 					// Ambiguous issuer-only window -> do not backfill conn IP into any DNS name.
@@ -746,7 +752,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 				fromFallback = true
 				if debugDNSFallback {
 					debugDNSFallbackf("fallback-selected issuer=%s name=%q resolver=%v dst=%s:%d proto=%s dt=%s eligible=%d unresolved=%d",
-						srcIPStr, tx.DNSName, tx.ResolverIP, dstIPStr, dstPort, proto, ts.Sub(tx.RequestTime), eligibleCnt, unresCnt)
+						srcIPStr, hostnames.name(tx.DNSNameID), tx.resolverIP(), dstIPStr, dstPort, proto, ts.Sub(tx.RequestTime.utc()), eligibleCnt, unresCnt)
 				}
 			}
 
@@ -754,11 +760,11 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 				continue
 			}
 
-			dt := ts.Sub(tx.RequestTime)
+			dt := ts.Sub(tx.RequestTime.utc())
 			if dt < 0 || dt > maxConnDelay {
 				if fromFallback && debugDNSFallback {
 					debugDNSFallbackf("fallback-outside-window issuer=%s name=%q dst=%s dt=%s max=%s",
-						srcIPStr, tx.DNSName, dstIPStr, dt, maxConnDelay)
+						srcIPStr, hostnames.name(tx.DNSNameID), dstIPStr, dt, maxConnDelay)
 				}
 				continue
 			}
@@ -777,7 +783,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 					}
 					return srcIPStr
 				}
-				if identityAt(tx.RequestTime) != identityAt(ts) {
+				if identityAt(tx.RequestTime.utc()) != identityAt(ts) {
 					continue
 				}
 			}
@@ -789,11 +795,11 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 			}
 
 			if fromFallback && usedDst4 != nil {
-				allow, csvDNS := allowConnectionInferredDNSBackfill(tx.DNSName, usedDst4.String(), ipToDNS)
+				allow, csvDNS := allowConnectionInferredDNSBackfill(hostnames.name(tx.DNSNameID), usedDst4.String(), ipToDNS)
 				if !allow {
 					if debugDNSFallback {
 						debugDNSFallbackf("fallback-suppressed-by-csv issuer=%s candidate_name=%q dst=%s:%d proto=%s csv_dns=%q",
-							srcIPStr, tx.DNSName, dstIPStr, dstPort, proto, csvDNS)
+							srcIPStr, hostnames.name(tx.DNSNameID), dstIPStr, dstPort, proto, csvDNS)
 					}
 					continue
 				}
@@ -892,7 +898,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 
 		p := best.Port
 		tx.DestinationPort = &p
-		tx.ProtocolL4 = best.Proto
+		tx.ProtocolL4 = protocolNumber(best.Proto)
 		tx.Candidates = nil
 	}
 
@@ -1055,8 +1061,8 @@ func allowConnectionInferredDNSBackfill(candidateDNS string, ipStr string, ipToD
 	return false, ""
 }
 
-func AttachConnectionsFromPCAPs(ctx context.Context, files []string, txs []*DNSTransaction, onlyTCP bool) error {
-	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, files, txs, onlyTCP, true, nil, false, nil, nil, 0)
+func AttachConnectionsFromPCAPs(ctx context.Context, hostnames *Hostnames, files []string, txs []*DNSTransaction, onlyTCP bool) error {
+	_, _, err := AttachConnectionsAndCollectEdgesFromPCAPs(ctx, hostnames, files, txs, onlyTCP, true, nil, false, nil, nil, 0)
 	return err
 }
 
@@ -1089,7 +1095,7 @@ func pickBestCandidate(cands []ConnCandidate, onlyTCP bool) (ConnCandidate, bool
 //   - Uses pcapgo for BOTH pcap and pcapng (avoids libpcap/cgo stalls under Delve).
 //   - Cancellable receive loop: ctx cancellation works even if packet decoding stalls.
 //   - In-code filtering (instead of BPF): only processes packets that actually contain DNS.
-func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransaction, time.Time, error) {
+func scanDNSInFile(ctx context.Context, hostnames *Hostnames, path string) (map[TxKey][]*DNSTransaction, time.Time, error) {
 	txMap := make(map[TxKey][]*DNSTransaction)
 	byLookup := make(map[txLookupKey][]*DNSTransaction)
 
@@ -1232,16 +1238,15 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 					Resolver: dstIP.String(),
 					Proto:    proto,
 					ID:       d.ID,
-					Name:     dnsName,
+					NameID:   hostnames.intern(dnsName),
 				}
 
 				tx := &DNSTransaction{
-					RequestTime:  ts.UTC(),
-					IssuerIP:     append(net.IP(nil), srcIP...),
-					DNSName:      dnsName,
-					ResolverIP:   append(net.IP(nil), dstIP...),
-					NameEvidence: EvDNSAnswer, // NEW
-					PCAPFile:     filepath.Base(path),
+					RequestTime:   wireTime(ts),
+					wireEndpoints: makeEndpoints(srcIP, dstIP),
+					DNSNameID:     key.NameID,
+					NameEvidence:  EvDNSAnswer, // NEW
+					PCAPFile:      filepath.Base(path),
 				}
 				txMap[key] = append(txMap[key], tx)
 				lk := makeTxLookupKey(key.Issuer, key.SrcPort, key.Resolver, key.Proto, key.ID)
@@ -1302,12 +1307,12 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 					respID,
 				)
 				cands := byLookup[lk]
-				tx := pickResponseTx(cands, respName, ts.UTC())
+				tx := pickResponseTx(hostnames, cands, respName, ts.UTC())
 				if tx == nil {
 					if !canCreateResponseOnly {
 						continue
 					}
-					tx = newResponseOnlyDNSTransaction(ts, dstIP, srcIP, respName, path, answers, cnames)
+					tx = newResponseOnlyDNSTransaction(hostnames, ts, dstIP, srcIP, respName, path, answers, cnames)
 					if tx == nil {
 						continue
 					}
@@ -1317,7 +1322,7 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 						Resolver: srcIP.String(),
 						Proto:    proto,
 						ID:       respID,
-						Name:     respName,
+						NameID:   tx.DNSNameID,
 					}
 					addDNSTransaction(txMap, byLookup, key, tx)
 					continue
@@ -1331,7 +1336,7 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 					tx.AddCNAMETarget(cname)
 				}
 				if tx.resolvedIPLen() > 0 {
-					tx.ResolverIP = append(net.IP(nil), srcIP...)
+					tx.setResolver(srcIP)
 				}
 			}
 		}

@@ -7,10 +7,7 @@
 
 package dns
 
-import (
-	"net"
-	"sort"
-)
+import "sort"
 
 // mergeDNSTransactionIntoBucket keeps distinct per-key query instances while
 // still coalescing exact duplicate instances (same request timestamp).
@@ -24,7 +21,7 @@ func mergeDNSTransactionIntoBucket(bucket []*DNSTransaction, in *DNSTransaction)
 			continue
 		}
 		// Same key + same request timestamp => same logical transaction instance.
-		if cur.RequestTime.Equal(in.RequestTime) {
+		if cur.RequestTime == in.RequestTime {
 			mergeDNSTransaction(cur, in)
 			return bucket
 		}
@@ -35,7 +32,7 @@ func mergeDNSTransactionIntoBucket(bucket []*DNSTransaction, in *DNSTransaction)
 
 func sortTxBucketByTime(bucket []*DNSTransaction) {
 	sort.Slice(bucket, func(i, j int) bool {
-		return bucket[i].RequestTime.Before(bucket[j].RequestTime)
+		return bucket[i].RequestTime.compare(bucket[j].RequestTime) < 0
 	})
 }
 
@@ -44,7 +41,7 @@ func mergeDNSTransaction(dst, src *DNSTransaction) {
 		return
 	}
 
-	if dst.RequestTime.IsZero() || (!src.RequestTime.IsZero() && src.RequestTime.Before(dst.RequestTime)) {
+	if dst.RequestTime == (captureTime{}) || (src.RequestTime != (captureTime{}) && src.RequestTime.compare(dst.RequestTime) < 0) {
 		dst.RequestTime = src.RequestTime
 	}
 	if src.PCAPFile < dst.PCAPFile {
@@ -80,7 +77,7 @@ func mergeDNSTransaction(dst, src *DNSTransaction) {
 		dst.AddObservedEndpointBinding(binding)
 	}
 
-	if dst.ResolverIP == nil && src.ResolverIP != nil {
-		dst.ResolverIP = append(net.IP(nil), src.ResolverIP...)
+	if dst.resolverIP() == nil && src.resolverIP() != nil {
+		dst.setResolver(src.resolverIP())
 	}
 }

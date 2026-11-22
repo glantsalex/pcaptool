@@ -8,7 +8,6 @@
 package dns
 
 import (
-	"net"
 	"sort"
 
 	pce "github.com/aglants/pcaptool/internal/pcap"
@@ -19,10 +18,10 @@ type txKey struct {
 	Issuer   string
 	Resolver string
 	ID       uint16
-	Name     string
+	NameID   uint64
 }
 
-func BuildTransactionsFromEvents(events []pce.Event) ([]*DNSTransaction, error) {
+func BuildTransactionsFromEvents(hostnames *Hostnames, events []pce.Event) ([]*DNSTransaction, error) {
 	txMap := make(map[txKey]*DNSTransaction)
 
 	for _, ev := range events {
@@ -35,14 +34,14 @@ func BuildTransactionsFromEvents(events []pce.Event) ([]*DNSTransaction, error) 
 				Issuer:   ev.SrcIP.String(),
 				Resolver: ev.DstIP.String(),
 				ID:       ev.DNSID,
-				Name:     ev.DNSQName,
+				NameID:   hostnames.intern(canonicalDNSName(ev.DNSQName)),
 			}
 			if _, exists := txMap[key]; !exists {
 				txMap[key] = &DNSTransaction{
-					RequestTime:  ev.Timestamp.UTC(),
-					IssuerIP:     append([]byte{}, ev.SrcIP...),
-					DNSName:      ev.DNSQName,
-					NameEvidence: EvDNSAnswer,
+					RequestTime:   wireTime(ev.Timestamp),
+					wireEndpoints: makeEndpoints(append([]byte{}, ev.SrcIP...), nil),
+					DNSNameID:     key.NameID,
+					NameEvidence:  EvDNSAnswer,
 				}
 			}
 		case pce.EventDNSResponse:
@@ -76,7 +75,7 @@ func BuildTransactionsFromEvents(events []pce.Event) ([]*DNSTransaction, error) 
 				found.AddResolvedIP(ip, EvDNSAnswer)
 			}
 			if found.resolvedIPLen() > 0 {
-				found.ResolverIP = append(net.IP{}, ev.SrcIP...)
+				found.setResolver(append([]byte{}, ev.SrcIP...))
 			}
 		}
 	}
@@ -88,7 +87,7 @@ func BuildTransactionsFromEvents(events []pce.Event) ([]*DNSTransaction, error) 
 
 	// Sort by RequestTime
 	sort.Slice(txs, func(i, j int) bool {
-		return txs[i].RequestTime.Before(txs[j].RequestTime)
+		return txs[i].RequestTime.compare(txs[j].RequestTime) < 0
 	})
 
 	return txs, nil

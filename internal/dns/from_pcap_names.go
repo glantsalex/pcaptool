@@ -25,25 +25,10 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
-// A hostnamePool belongs to the file-result coordinator for one extraction pass.
-// Names arriving from DNS and SNI retain their existing spelling.
-type hostnamePool map[string]string
-
-func (p hostnamePool) share(name string) string {
-	if name == "" {
-		return ""
-	}
-	if stored, ok := p[name]; ok {
-		return stored
-	}
-	p[name] = name
-	return name
-}
-
 // CollectDNS reads device DNS transactions and the answer evidence used by the
 // following connection pass. TCP DNS is independent of ClientHello extraction.
-func CollectDNS(ctx context.Context, files []string, admit pcaputil.PacketAdmission, facts *FactCollection) ([]*DNSTransaction, time.Time, []TruncatedDNSPacket, error) {
-	txs, earliest, truncated, err := BuildTransactionsWithSNIFromPCAPsWithOptions(ctx, files, false, true, PacketScanOptions{Facts: facts, PacketAdmission: admit})
+func CollectDNS(ctx context.Context, hostnames *Hostnames, files []string, admit pcaputil.PacketAdmission, facts *FactCollection) ([]*DNSTransaction, time.Time, []TruncatedDNSPacket, error) {
+	txs, earliest, truncated, err := BuildTransactionsWithSNIFromPCAPsWithOptions(ctx, hostnames, files, false, true, PacketScanOptions{Facts: facts, PacketAdmission: admit})
 	if err != nil && facts != nil {
 		facts.answers = nil
 	}
@@ -59,8 +44,8 @@ func CollectDNS(ctx context.Context, files []string, admit pcaputil.PacketAdmiss
 // It returns a single slice of *DNSTransaction containing DNS txs plus SNI txs
 // when includeSNI is true. SNI synthetic txs already have DestinationPort set
 // and are skipped by correlation index build.
-func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string, includeSNI bool) ([]*DNSTransaction, time.Time, error) {
-	txs, earliest, _, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(ctx, files, includeSNI, false)
+func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, hostnames *Hostnames, files []string, includeSNI bool) ([]*DNSTransaction, time.Time, error) {
+	txs, earliest, _, err := BuildTransactionsWithSNIFromPCAPsWithDiagnostics(ctx, hostnames, files, includeSNI, false)
 	return txs, earliest, err
 }
 
@@ -68,12 +53,14 @@ func BuildTransactionsWithSNIFromPCAPs(ctx context.Context, files []string, incl
 // scan and optionally collects diagnostic-only truncated UDP DNS query records.
 func BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
 	ctx context.Context,
+	hostnames *Hostnames,
 	files []string,
 	includeSNI bool,
 	collectTruncatedDNS bool,
 ) ([]*DNSTransaction, time.Time, []TruncatedDNSPacket, error) {
 	return BuildTransactionsWithSNIFromPCAPsWithOptions(
 		ctx,
+		hostnames,
 		files,
 		includeSNI,
 		collectTruncatedDNS,
@@ -85,11 +72,15 @@ func BuildTransactionsWithSNIFromPCAPsWithDiagnostics(
 // optional packet admission applied before any extractor sees a packet.
 func BuildTransactionsWithSNIFromPCAPsWithOptions(
 	ctx context.Context,
+	hostnames *Hostnames,
 	files []string,
 	includeSNI bool,
 	collectTruncatedDNS bool,
 	opt PacketScanOptions,
 ) ([]*DNSTransaction, time.Time, []TruncatedDNSPacket, error) {
+	if hostnames == nil || (opt.Facts != nil && opt.Facts.hostnames != hostnames) {
+		return nil, time.Time{}, nil, fmt.Errorf("DNS scan requires the run hostname dictionary")
+	}
 	type fileResult struct {
 		txMap               map[TxKey][]*DNSTransaction
 		sniTxs              []*DNSTransaction
@@ -115,6 +106,7 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 			for path := range fileCh {
 				txMap, sniTxs, truncatedDNSPackets, earliest, err := scanDNSAndSNIInFile(
 					ctx,
+					hostnames,
 					path,
 					includeSNI,
 					collectTruncatedDNS,
@@ -150,7 +142,6 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 	}()
 
 	// Global merge state (single goroutine consumer => no locks needed)
-	names := make(hostnamePool, 10_000)
 	globalMap := make(map[TxKey][]*DNSTransaction)
 	var globalSNI []*DNSTransaction
 	var truncatedDNSPackets []TruncatedDNSPacket
@@ -192,12 +183,8 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 			if len(localList) == 0 {
 				continue
 			}
-			k.Name = names.share(k.Name)
 			bucket := globalMap[k]
 			for _, localTx := range localList {
-				if localTx != nil {
-					localTx.DNSName = names.share(localTx.DNSName)
-				}
 				bucket = mergeDNSTransactionIntoBucket(bucket, localTx)
 			}
 			sortTxBucketByTime(bucket)
@@ -206,20 +193,19 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 
 		// Merge SNI synthetic txs with global dedup
 		for _, tx := range res.sniTxs {
-			if tx == nil || tx.IssuerIP == nil || tx.resolvedIPLen() == 0 || tx.DestinationPort == nil {
+			if tx == nil || tx.issuerIP() == nil || tx.resolvedIPLen() == 0 || tx.DestinationPort == nil {
 				continue
 			}
 			ip0 := tx.resolvedIPAt(0)
 			if ip0.isNil() {
 				continue
 			}
-			tx.DNSName = names.share(tx.DNSName)
 			k := sniKey{
-				observedAt: tx.RequestTime.UTC(),
-				issuer:     tx.IssuerIP.String(),
+				observedAt: tx.RequestTime.utc(),
+				issuer:     tx.issuerIP().String(),
 				dstIP:      ip0.String(),
 				port:       *tx.DestinationPort,
-				sni:        tx.DNSName,
+				sni:        hostnames.name(tx.DNSNameID),
 			}
 			if idx, exists := seenSNI[k]; exists {
 				// Duplicate capture copies choose stable provenance, independent
@@ -257,10 +243,10 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 	sort.Slice(txs, func(i, j int) bool {
 		ti := txs[i].RequestTime
 		tj := txs[j].RequestTime
-		if ti.Equal(tj) {
-			return transactionTieLess(txs[i], txs[j])
+		if ti == tj {
+			return transactionTieLess(hostnames, txs[i], txs[j])
 		}
-		return ti.Before(tj)
+		return ti.compare(tj) < 0
 	})
 	sort.Slice(truncatedDNSPackets, func(i, j int) bool {
 		a, b := truncatedDNSPackets[i], truncatedDNSPackets[j]
@@ -297,6 +283,7 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 
 func scanDNSAndSNIInFile(
 	ctx context.Context,
+	hostnames *Hostnames,
 	path string,
 	includeSNI bool,
 	collectTruncatedDNS bool,
@@ -314,11 +301,11 @@ func scanDNSAndSNIInFile(
 	src := gopacket.NewPacketSource(handle, handle.LinkType())
 	src.NoCopy = true
 
-	dnsEx := newDNSExtractorWithDiagnostics(collectTruncatedDNS)
+	dnsEx := newDNSExtractorWithDiagnostics(hostnames, collectTruncatedDNS)
 	dnsEx.facts = opt.Facts
 	var sniEx *sniExtractor
 	if includeSNI {
-		sniEx = newSNIExtractor()
+		sniEx = newSNIExtractor(hostnames)
 	}
 
 	base := filepath.Base(path)

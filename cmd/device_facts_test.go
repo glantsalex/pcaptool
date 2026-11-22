@@ -16,6 +16,8 @@ import (
 // Exercise the actual Ethernet/file decoders, both passes and the ordered
 // worker merge. The timed resolver models address rotation and reassignment.
 func TestDeviceFactsAcrossCaptureAndLeaseBoundaries(t *testing.T) {
+	hostnames := dns.NewHostnames()
+
 	base := time.Unix(1700000000, 0).UTC()
 	const first, second, unknown = "10.0.0.1", "10.0.0.2", "10.0.0.9"
 	const server, other = "203.0.113.10", "203.0.113.11"
@@ -84,9 +86,9 @@ func TestDeviceFactsAcrossCaptureAndLeaseBoundaries(t *testing.T) {
 		files   []string
 	}{{1, []string{a, b}}, {4, []string{b, a, b, a}}} {
 		runtime.GOMAXPROCS(mode.workers)
-		facts := dns.NewFactCollection(resolve, true, time.Minute)
+		facts := dns.NewFactCollection(hostnames, resolve, true, time.Minute)
 		opt := dns.PacketScanOptions{Facts: facts, IssuerIdentity: func(ip string, ts time.Time) string { return resolve(netip.MustParseAddr(ip), ts) }}
-		txs, _, _, err := dns.CollectDNS(context.Background(), mode.files, nil, facts)
+		txs, _, _, err := dns.CollectDNS(context.Background(), hostnames, mode.files, nil, facts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +96,7 @@ func TestDeviceFactsAcrossCaptureAndLeaseBoundaries(t *testing.T) {
 			t.Fatalf("DNS transactions=%d, want 3 TCP responses", len(txs))
 		}
 		facts.Prepare(txs, nil, false)
-		_, _, err = dns.AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), mode.files, txs, false, false, map[uint16]struct{}{123: {}}, true, nil, nil, 0, opt)
+		_, _, err = dns.AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(context.Background(), hostnames, mode.files, txs, false, false, map[uint16]struct{}{123: {}}, true, nil, nil, 0, opt)
 		if err != nil {
 			t.Fatal(err)
 		}

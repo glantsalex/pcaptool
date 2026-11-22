@@ -16,6 +16,8 @@ import (
 )
 
 func TestDNSAndSNIVLANAdmission(t *testing.T) {
+	hostnames := NewHostnames()
+
 	base := time.Date(2026, 11, 15, 2, 41, 40, 0, time.UTC)
 	fleet, err := syntrail.ParseFleetSubnets([]string{"10.181.0.0/16"})
 	if err != nil {
@@ -80,13 +82,13 @@ func TestDNSAndSNIVLANAdmission(t *testing.T) {
 					}
 				}
 				for _, sni := range []bool{false, true} {
-					txs, earliest, _, err := BuildTransactionsWithSNIFromPCAPsWithOptions(context.Background(), []string{path}, sni, false, PacketScanOptions{PacketAdmission: pcaputil.IPv4EndpointAdmission(fleet.Contains)})
+					txs, earliest, _, err := BuildTransactionsWithSNIFromPCAPsWithOptions(context.Background(), hostnames, []string{path}, sni, false, PacketScanOptions{PacketAdmission: pcaputil.IPv4EndpointAdmission(fleet.Contains)})
 					if err != nil {
 						t.Fatal(err)
 					}
 					names := make(map[string]Evidence)
 					for _, tx := range txs {
-						names[tx.DNSName] = tx.NameEvidence
+						names[hostnames.name(tx.DNSNameID)] = tx.NameEvidence
 					}
 					want := 1
 					if sni {

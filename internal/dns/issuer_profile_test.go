@@ -6,12 +6,14 @@ import (
 )
 
 func TestComputeIssuerProfile_SortByTotalDNSThenIssuer(t *testing.T) {
+	hostnames := NewHostnames()
+
 	mk := func(issuer string, n int) []*DNSTransaction {
 		out := make([]*DNSTransaction, 0, n)
 		for i := 0; i < n; i++ {
 			out = append(out, &DNSTransaction{
-				IssuerIP: net.ParseIP(issuer),
-				DNSName:  "x.example",
+				wireEndpoints: makeEndpoints(net.ParseIP(issuer), nil),
+				DNSNameID:     hostnames.intern("x.example"),
 			})
 		}
 		return out
