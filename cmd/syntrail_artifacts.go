@@ -32,6 +32,14 @@ var (
 	scanSYNTrailFilesWithOptions = syntrail.ScanFilesWithOptions
 )
 
+func (opt synTrailArtifactOptions) synSummaryPolicy(fleet syntrail.FleetSet) *syntrail.SYNSummaryPolicy {
+	if opt.Debug {
+		return nil
+	}
+	opt = normalizeSYNTrailArtifactOptions(opt)
+	return &syntrail.SYNSummaryPolicy{Fleet: fleet, CountIMSI: opt.CountIMSI, FTPControlPorts: opt.FTPControlPorts, FTPPassiveMinPort: opt.FTPPassiveMinPort}
+}
+
 func runSYNTrailSidecar(
 	ctx context.Context,
 	om *OutputManager,
@@ -49,6 +57,7 @@ func runSYNTrailSidecar(
 		return nil, err
 	}
 	opt.Diagnostics.Checkpoint("fleet_sidecar_scan", map[string]int{"capture_files": len(files), "workers": opt.ScanOptions.Workers}, false)
+	opt.ScanOptions.SYNSummary = opt.synSummaryPolicy(*fleet)
 	records, err := scanSYNTrailFilesWithOptions(ctx, files, opt.ScanOptions)
 	if err != nil {
 		return nil, fmt.Errorf("scan SYN trail packet captures: %w", err)

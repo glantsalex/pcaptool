@@ -1,6 +1,9 @@
 package syntrail
 
-// RecordCount reports the retained observation count without materializing it.
+// SYNSummaryCount reports retained TCP summary keys to the owning coordinator.
+func (a *Accumulator) SYNSummaryCount() int { return len(a.summary.seen) }
+
+// RecordCount reports the retained record count without materializing it.
 // Like Add and consuming methods, it requires exclusive accumulator ownership.
 func (a *Accumulator) RecordCount() int {
 	return len(a.tcpChunks)*accumulatorChunkRecords + len(a.tail.slots) + len(a.udpOrder)
@@ -12,6 +15,7 @@ func (a *Accumulator) RecordCount() int {
 // is supplied. A nil cache preserves existing flags. The accumulator must not
 // be used afterward.
 func (a *Accumulator) TakeClassifiedRecords(fleet FleetSet, cache *SyslogCache) BucketedRecords {
+	a.summary.seen = nil
 	a.seenSYNs = nil // Release retry keys before allocating destination buckets.
 	counts := make(map[Bucket]int)
 	count := func(r Record) {

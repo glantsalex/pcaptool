@@ -404,12 +404,22 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	var sharedFleetAccumulator *syntrail.Accumulator
 	var sharedFleetOptions syntrail.ScanOptions
 	var fleetCompatibilityRereads atomic.Int64
+	artifactOpt := synTrailArtifactOptions{
+		CountIMSI:                    opts.RadiusIMSI,
+		Diagnostics:                  diagnostic,
+		DirectionRegistry:            opts.DirectionRegistry,
+		FTPControlPorts:              ftpControlPorts,
+		FTPPassiveMinPort:            ftpPassiveMinPort,
+		ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
+		Debug:                        opts.Debug,
+	}
 	if useSharedFleetScan {
 		sharedFleetOptions, err = directionScanOptions(fleet, opts.DirectionRegistry, opts.NetID, syntrail.ScanOptions{PacketAdmission: packetAdmission, FleetIdentity: fleetIdentity})
 		if err != nil {
 			return err
 		}
-		sharedFleetAccumulator = syntrail.NewAccumulator()
+		sharedFleetOptions.SYNSummary = artifactOpt.synSummaryPolicy(*fleet)
+		sharedFleetAccumulator = syntrail.NewAccumulatorWithSummary(sharedFleetOptions.SYNSummary)
 		connectionScanOpt.NewFileObserver = func(_ int, path string) dns.PacketFileObserver {
 			collector := syntrail.NewCollectorWithOptions(sharedFleetOptions)
 			var replacement []syntrail.Record
@@ -479,16 +489,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	var synTrailArtifacts map[string]string
 	if fleet != nil {
 		synTrailStartedAt := time.Now()
-		artifactOpt := synTrailArtifactOptions{
-			CountIMSI:                    opts.RadiusIMSI,
-			Diagnostics:                  diagnostic,
-			DirectionRegistry:            opts.DirectionRegistry,
-			FTPControlPorts:              ftpControlPorts,
-			FTPPassiveMinPort:            ftpPassiveMinPort,
-			ServerSummaryExcludeUDPPorts: serverSummaryExcludeUDPPorts,
-			Debug:                        opts.Debug,
-			FirstFilePacketTimestamp:     firstPktInfo.FirstFilePacketTimestamp,
-		}
+		artifactOpt.FirstFilePacketTimestamp = firstPktInfo.FirstFilePacketTimestamp
 		if !useSharedFleetScan {
 			progress.SetStage("Running fleet trail sidecar...")
 			artifactOpt.ScanOptions = syntrail.ScanOptions{
@@ -509,7 +510,11 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 			// Transfer and classification now share one allocation phase. There is
 			// no intermediate record slice (and therefore no records_cap).
 			if diagnostic != nil {
-				diagnostic.Checkpoint("fleet_classify", map[string]int{"records_len": sharedFleetAccumulator.RecordCount()}, true)
+				counts := map[string]int{"records_len": sharedFleetAccumulator.RecordCount()}
+				if sharedFleetOptions.SYNSummary != nil {
+					counts["tcp_summary_keys"] = sharedFleetAccumulator.SYNSummaryCount()
+				}
+				diagnostic.Checkpoint("fleet_classify", counts, true)
 			}
 			buckets := sharedFleetAccumulator.TakeClassifiedRecords(*fleet, sharedFleetOptions.SyslogCache)
 			synTrailArtifacts, err = writeClassifiedSYNTrailArtifacts(om, buckets, artifactOpt)

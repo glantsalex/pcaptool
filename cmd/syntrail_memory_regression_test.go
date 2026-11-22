@@ -505,3 +505,57 @@ func legacyFleetArtifactBytes(t *testing.T, buckets syntrail.BucketedRecords, op
 	}
 	return files
 }
+
+// The same IMSI uses two addresses. Only the first pair supplies FTP control,
+// so its high-port candidate must not hide the second pair's surviving row.
+func TestSYNSummaryMatchesAttemptArtifactsAfterLateFTPControl(t *testing.T) {
+	fleet, err := syntrail.ParseFleetIPv4List(strings.NewReader("10.0.0.1\n10.0.0.2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, countIMSI := range []bool{true, false} {
+		opt := fleetMemoryArtifactOptions(false)
+		opt.CountIMSI = countIMSI
+		raw := syntrail.NewAccumulator()
+		summary := syntrail.NewAccumulatorWithSummary(opt.synSummaryPolicy(fleet))
+		add := func(from, to, id string, port uint16) {
+			r := syntrail.Record{SrcIP: netip.MustParseAddr(from).As4(), DstIP: netip.MustParseAddr(to).As4(), FleetIdentity: id, DstPort: port, Protocol: syntrail.ProtocolTCP}
+			raw.Add([]syntrail.Record{r})
+			summary.Add([]syntrail.Record{r})
+		}
+		for _, server := range []string{"203.0.113.10", "192.168.1.20"} {
+			for _, dev := range []string{"10.0.0.1", "10.0.0.2"} {
+				add(dev, server, "A", 40000)
+				add(dev, server, "A", 443)
+			}
+			add("10.0.0.2", server, "B", 443)
+			add("10.0.0.1", server, "A", 21)
+		}
+		add("192.168.1.20", "10.0.0.1", "A", 22)
+		add("192.168.1.20", "10.0.0.2", "A", 22)
+		add("192.168.1.20", "10.0.0.2", "B", 22)
+		wantOM := newSYNTrailTestOutputManagerForNet(t, "late-control")
+		gotOM := newSYNTrailTestOutputManagerForNet(t, "late-control")
+		wantFiles, err := writeClassifiedSYNTrailArtifacts(wantOM, raw.TakeClassifiedRecords(fleet, nil), opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotFiles, err := writeClassifiedSYNTrailArtifacts(gotOM, summary.TakeClassifiedRecords(fleet, nil), opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for key, wantFile := range wantFiles {
+			want, err := os.ReadFile(wantFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(gotFiles[key])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(want, got) {
+				t.Fatalf("countIMSI=%v: artifact %s differs", countIMSI, key)
+			}
+		}
+	}
+}

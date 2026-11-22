@@ -22,6 +22,8 @@ type ScanProgressFunc func(done, total int, file string)
 
 // ScanOptions controls packet capture scanning behavior.
 type ScanOptions struct {
+	// SYNSummary enables set-based TCP evidence for non-debug fleet reports.
+	SYNSummary *SYNSummaryPolicy
 	// FleetIdentity resolves the fleet-side IMSI before observations are aggregated.
 	FleetIdentity func(Record) string
 	// Workers is the maximum number of capture files scanned concurrently.
@@ -55,15 +57,14 @@ func ScanFilesWithOptions(ctx context.Context, files []string, opts ScanOptions)
 	if len(files) == 0 {
 		return nil, nil
 	}
-	cache := opts.SyslogCache
-	if cache == nil {
-		cache = NewSyslogCache()
+	if opts.SyslogCache == nil {
+		opts.SyslogCache = NewSyslogCache()
 	}
-	scanner := func(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
-		return ScanPacketBatch(ctx, path, ScanOptions{PacketAdmission: admit, SyslogCache: cache, SyslogEligible: opts.SyslogEligible, FleetIdentity: opts.FleetIdentity})
+	scanner := func(ctx context.Context, path string, _ pcaputil.PacketAdmission) ([]Record, error) {
+		return ScanPacketBatch(ctx, path, opts)
 	}
-	records, err := scanFilesConcurrentWithScanner(ctx, files, opts.Workers, opts.Progress, opts.PacketAdmission, scanner)
-	ApplySyslogQualifications(records, cache)
+	records, err := scanFilesWithAccumulator(ctx, files, opts.Workers, opts.Progress, opts.PacketAdmission, scanner, NewAccumulatorWithSummary(opts.SYNSummary))
+	ApplySyslogQualifications(records, opts.SyslogCache)
 	return records, err
 }
 
@@ -112,6 +113,10 @@ func scanFilesConcurrentWithScanner(
 	admit pcaputil.PacketAdmission,
 	scanner scanFileFunc,
 ) ([]Record, error) {
+	return scanFilesWithAccumulator(ctx, files, workers, progress, admit, scanner, NewAccumulator())
+}
+
+func scanFilesWithAccumulator(ctx context.Context, files []string, workers int, progress ScanProgressFunc, admit pcaputil.PacketAdmission, scanner scanFileFunc, accumulator *Accumulator) ([]Record, error) {
 	if workers < 1 {
 		workers = 1
 	}
@@ -155,7 +160,6 @@ func scanFilesConcurrentWithScanner(
 		close(resultsCh)
 	}()
 
-	accumulator := NewAccumulator()
 	pending := make(map[int]scanFileResult, workers)
 	nextDispatch := 0
 	nextCommit := 0
@@ -263,6 +267,7 @@ type scanFileResult struct {
 // retaining the first packet for each TCP SYN attempt and the earliest UDP per tuple.
 // Accumulator is not safe for concurrent use; the scan coordinator owns it.
 type Accumulator struct {
+	summary    synSummary
 	seenSYNs   synAttempts
 	tcpChunks  []tcpChunk // Completed chunks, in file/packet order.
 	tail       tcpChunk   // Active chunk; the first one grows lazily.
@@ -272,7 +277,14 @@ type Accumulator struct {
 
 // NewAccumulator returns an empty trail record accumulator.
 func NewAccumulator() *Accumulator {
+	return NewAccumulatorWithSummary(nil)
+}
+
+// NewAccumulatorWithSummary uses summary keys in place of attempt keys when a
+// policy is supplied. Retained TCP slots then contain one representative per key.
+func NewAccumulatorWithSummary(policy *SYNSummaryPolicy) *Accumulator {
 	return &Accumulator{
+		summary:    synSummary{policy: policy},
 		udpRecords: make(map[observedRecordKey]Record),
 	}
 }
@@ -286,7 +298,11 @@ func (a *Accumulator) Add(records []Record) {
 	// still be replaced by an earlier observation from a later file.
 	for _, record := range records {
 		if record.Protocol != ProtocolUDP {
-			if !a.seenSYNs.keep(&record) {
+			if a.summary.policy != nil {
+				if !a.summary.keep(record) {
+					continue
+				}
+			} else if !a.seenSYNs.keep(&record) {
 				continue
 			}
 			if len(a.tail.slots) == accumulatorChunkRecords {
@@ -311,6 +327,7 @@ func (a *Accumulator) Add(records []Record) {
 // TakeRecords returns the accumulated records and transfers ownership of the
 // returned slice to the caller. The accumulator must not be used afterward.
 func (a *Accumulator) TakeRecords() []Record {
+	a.summary.seen = nil
 	a.seenSYNs = nil // The destination allocation can trigger GC.
 	tcpCount := len(a.tcpChunks)*accumulatorChunkRecords + len(a.tail.slots)
 	var records []Record
@@ -336,6 +353,7 @@ func (a *Accumulator) TakeRecords() []Record {
 // Collector extracts trail evidence from one decoded capture file. Collector
 // is owned by one file worker and is not safe for concurrent use.
 type Collector struct {
+	summary        synSummary
 	fleetIdentity  func(Record) string
 	syslogCache    *SyslogCache
 	syslogEligible func(netip.Addr, netip.Addr) bool
@@ -356,7 +374,13 @@ func NewCollectorWithOptions(opts ScanOptions) *Collector {
 	if cache == nil {
 		cache = NewSyslogCache()
 	}
-	return &Collector{fleetIdentity: opts.FleetIdentity, udpRecords: make(map[observedRecordKey]Record), syslogCache: cache, syslogEligible: opts.SyslogEligible}
+	return &Collector{
+		summary:        synSummary{policy: opts.SYNSummary},
+		fleetIdentity:  opts.FleetIdentity,
+		udpRecords:     make(map[observedRecordKey]Record),
+		syslogCache:    cache,
+		syslogEligible: opts.SyslogEligible,
+	}
 }
 
 // Observe records eligible raw TCP SYN and UDP evidence from packet. All
@@ -374,8 +398,12 @@ func (c *Collector) Observe(packet gopacket.Packet) error {
 				return nil
 			}
 		}
-		record.hasSYNHeader, record.synSrcPort, record.synSeq = true, uint16(tcp.SrcPort), tcp.Seq
-		c.tcpRecords = append(c.tcpRecords, record)
+		if c.summary.policy == nil {
+			record.hasSYNHeader, record.synSrcPort, record.synSeq = true, uint16(tcp.SrcPort), tcp.Seq
+			c.tcpRecords = append(c.tcpRecords, record)
+		} else if c.summary.keep(record) {
+			c.tcpRecords = append(c.tcpRecords, record)
+		}
 	}
 	record, ok, err := udpRecord(packet)
 	if err != nil {
