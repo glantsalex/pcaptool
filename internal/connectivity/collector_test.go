@@ -137,10 +137,10 @@ func TestCollector_EdgesRetainBoundedRepeatedObservations(t *testing.T) {
 	if !edges[0].FirstSeen.Equal(ts) {
 		t.Fatalf("expected first seen %s, got %s", ts, edges[0].FirstSeen)
 	}
-	if len(edges[0].ObservedTimes) != 2 {
+	if edges[0].ObservedTimes.Len() != 2 {
 		t.Fatalf("expected two observed times, got %#v", edges[0].ObservedTimes)
 	}
-	if !edges[0].ObservedTimes[0].Equal(ts) || !edges[0].ObservedTimes[1].Equal(later) {
+	if !edges[0].ObservedTimes.At(0).Equal(ts) || !edges[0].ObservedTimes.At(1).Equal(later) {
 		t.Fatalf("unexpected observed times: %#v", edges[0].ObservedTimes)
 	}
 }

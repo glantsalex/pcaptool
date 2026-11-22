@@ -3,7 +3,6 @@ package dns
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/aglants/pcaptool/internal/connectivity"
 )
@@ -39,17 +38,17 @@ func (a *edgeAccumulator) merge(batch []connectivity.Edge) {
 		}
 		if idx, ok := a.seen[key]; ok {
 			times := e.ObservedTimes
-			if len(times) == 0 && !e.FirstSeen.IsZero() {
-				times = []time.Time{e.FirstSeen}
+			if times.Len() == 0 && !e.FirstSeen.IsZero() {
+				times = connectivity.NewObservationHistory(e.FirstSeen)
 			}
-			a.out[idx].ObservedTimes = connectivity.MergeEdgeObservedTimes(a.out[idx].ObservedTimes, times...)
-			if len(a.out[idx].ObservedTimes) > 0 {
-				a.out[idx].FirstSeen = a.out[idx].ObservedTimes[0]
+			a.out[idx].ObservedTimes = a.out[idx].ObservedTimes.Merged(times)
+			if a.out[idx].ObservedTimes.Len() > 0 {
+				a.out[idx].FirstSeen = a.out[idx].ObservedTimes.At(0)
 			}
 			continue
 		}
-		if len(e.ObservedTimes) == 0 && !e.FirstSeen.IsZero() {
-			e.ObservedTimes = []time.Time{e.FirstSeen.UTC()}
+		if e.ObservedTimes.Len() == 0 && !e.FirstSeen.IsZero() {
+			e.ObservedTimes = connectivity.NewObservationHistory(e.FirstSeen)
 		}
 		a.seen[key] = len(a.out)
 		a.out = append(a.out, e)

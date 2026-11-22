@@ -35,7 +35,7 @@ type Edge struct {
 	Protocol       L4Proto
 	Port           uint16
 	FirstSeen      time.Time
-	ObservedTimes  []time.Time
+	ObservedTimes  ObservationHistory
 }
 
 const maxEdgeObservedTimes = 128
@@ -78,7 +78,7 @@ type Collector struct {
 	tcpSyn   map[tcpKey]time.Time
 	udpFirst map[udpKey]time.Time
 
-	edges map[edgeKey][]time.Time
+	edges map[edgeKey]ObservationHistory
 
 	lastSweep time.Time
 
@@ -127,7 +127,7 @@ func NewCollector(opt Options) *Collector {
 		opt:            opt,
 		tcpSyn:         make(map[tcpKey]time.Time, 8192),
 		udpFirst:       make(map[udpKey]time.Time, 8192),
-		edges:          make(map[edgeKey][]time.Time, 32768),
+		edges:          make(map[edgeKey]ObservationHistory, 32768),
 		ftpControlSeen: make(map[pairKey]struct{}, 1024),
 		ftpPassivePend: make(map[pairKey]time.Time, 256),
 		ftpPassivePort: make(map[edgeKey]time.Time, 512),
@@ -171,7 +171,7 @@ func (c *Collector) OnPacket(pkt gopacket.Packet, ts time.Time) {
 func (c *Collector) Edges() []Edge {
 	out := make([]Edge, 0, len(c.edges))
 	for k, times := range c.edges {
-		if len(times) == 0 {
+		if times.Len() == 0 {
 			continue
 		}
 		out = append(out, Edge{
@@ -180,8 +180,8 @@ func (c *Collector) Edges() []Edge {
 			DstIP:          k.dst,
 			Protocol:       k.proto,
 			Port:           k.port,
-			FirstSeen:      times[0],
-			ObservedTimes:  append([]time.Time(nil), times...),
+			FirstSeen:      times.At(0),
+			ObservedTimes:  times.Clone(),
 		})
 	}
 
@@ -207,7 +207,7 @@ func (c *Collector) Edges() []Edge {
 func (c *Collector) EdgesByFirstSeen() []Edge {
 	out := make([]Edge, 0, len(c.edges))
 	for k, times := range c.edges {
-		if len(times) == 0 {
+		if times.Len() == 0 {
 			continue
 		}
 		out = append(out, Edge{
@@ -216,8 +216,8 @@ func (c *Collector) EdgesByFirstSeen() []Edge {
 			DstIP:          k.dst,
 			Protocol:       k.proto,
 			Port:           k.port,
-			FirstSeen:      times[0],
-			ObservedTimes:  append([]time.Time(nil), times...),
+			FirstSeen:      times.At(0),
+			ObservedTimes:  times.Clone(),
 		})
 	}
 
@@ -289,7 +289,9 @@ func (c *Collector) recordEdgeObservation(ek edgeKey, ts time.Time) {
 			ek.identity = ek.issuer
 		}
 	}
-	c.edges[ek] = appendEdgeObservedTime(c.edges[ek], ts)
+	history := c.edges[ek]
+	history.add(ts)
+	c.edges[ek] = history
 }
 
 // appendEdgeObservedTime updates a collector-owned, canonical timestamp slice
@@ -310,17 +312,23 @@ func appendEdgeObservedTime(times []time.Time, ts time.Time) []time.Time {
 		return times
 	}
 
+	return insertDistinctTime(times, insertAt, utc)
+}
+
+// insertDistinctTime inserts at a known position in an owned sorted history.
+// The caller has already checked for duplicates.
+func insertDistinctTime[T any](times []T, insertAt int, value T) []T {
 	if len(times) < maxEdgeObservedTimes {
-		times = append(times, time.Time{})
+		times = append(times, value)
 		copy(times[insertAt+1:], times[insertAt:len(times)-1])
-		times[insertAt] = utc
+		times[insertAt] = value
 		return times
 	}
 
 	if insertAt == 0 {
 		// A new true earliest observation displaces the previous earliest;
 		// the existing latest observations already occupy indexes 1..127.
-		times[0] = utc
+		times[0] = value
 		return times
 	}
 	if insertAt == 1 {
@@ -332,7 +340,7 @@ func appendEdgeObservedTime(times []time.Time, ts time.Time) []time.Time {
 	// Drop the oldest non-earliest observation, shift only the affected
 	// prefix, and insert the new timestamp at its resulting sorted position.
 	copy(times[1:insertAt-1], times[2:insertAt])
-	times[insertAt-1] = utc
+	times[insertAt-1] = value
 	return times
 }
 

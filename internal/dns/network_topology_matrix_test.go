@@ -620,7 +620,7 @@ func TestNetworkTopologyMatrixCanAttributeEndpointSeenBeforeDNSWhenLaterObservat
 			Protocol:      connectivity.ProtoTCP,
 			Port:          443,
 			FirstSeen:     firstSeen,
-			ObservedTimes: []time.Time{firstSeen, laterSyn},
+			ObservedTimes: connectivity.NewObservationHistory(firstSeen, laterSyn),
 		},
 	}
 
@@ -674,7 +674,7 @@ func TestNetworkTopologyMatrixUsesLaterObservationForMultiAResponse(t *testing.T
 			Protocol:      connectivity.ProtoTCP,
 			Port:          9999,
 			FirstSeen:     firstSeen,
-			ObservedTimes: []time.Time{firstSeen, laterSyn},
+			ObservedTimes: connectivity.NewObservationHistory(firstSeen, laterSyn),
 		},
 	}
 
@@ -720,8 +720,8 @@ func TestDNSAnswerDoesNotAttributeUnobservedPort(t *testing.T) {
 	tx.AddObservedEndpointBinding(ObservedEndpointBinding{DstIP: dst, Protocol: L4ProtoTCP, Port: 443, ObservedAt: t443})
 
 	edges := []connectivity.Edge{
-		{IssuerIP: issuer, DstIP: dst, Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: t443, ObservedTimes: []time.Time{t443}},
-		{IssuerIP: issuer, DstIP: dst, Protocol: connectivity.ProtoTCP, Port: 80, FirstSeen: t80, ObservedTimes: []time.Time{t80}},
+		{IssuerIP: issuer, DstIP: dst, Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: t443, ObservedTimes: connectivity.NewObservationHistory(t443)},
+		{IssuerIP: issuer, DstIP: dst, Protocol: connectivity.ProtoTCP, Port: 80, FirstSeen: t80, ObservedTimes: connectivity.NewObservationHistory(t80)},
 	}
 
 	got := BuildNetworkTopologyMatrixEntriesWithOptions([]*DNSTransaction{tx}, edges, nil, nil, DefaultTopologyBuildOptions())
@@ -768,7 +768,7 @@ func TestObservedBindingMustMatchEdgeObservationTime(t *testing.T) {
 			Protocol:      connectivity.ProtoTCP,
 			Port:          443,
 			FirstSeen:     edgeTime,
-			ObservedTimes: []time.Time{edgeTime},
+			ObservedTimes: connectivity.NewObservationHistory(edgeTime),
 		}},
 		nil,
 		nil,
@@ -823,8 +823,8 @@ func TestMultipleDNSNamesSameIPDoNotCrossAttributePortsWithoutEvidence(t *testin
 	got := BuildNetworkTopologyMatrixEntriesWithOptions(
 		[]*DNSTransaction{txA, txB},
 		[]connectivity.Edge{
-			{IssuerIP: issuer, DstIP: dst, Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: t1, ObservedTimes: []time.Time{t1}},
-			{IssuerIP: issuer, DstIP: dst, Protocol: connectivity.ProtoTCP, Port: 80, FirstSeen: t3, ObservedTimes: []time.Time{t3}},
+			{IssuerIP: issuer, DstIP: dst, Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: t1, ObservedTimes: connectivity.NewObservationHistory(t1)},
+			{IssuerIP: issuer, DstIP: dst, Protocol: connectivity.ProtoTCP, Port: 80, FirstSeen: t3, ObservedTimes: connectivity.NewObservationHistory(t3)},
 		},
 		nil,
 		nil,

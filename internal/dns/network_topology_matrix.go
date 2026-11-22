@@ -190,35 +190,6 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 		}
 	}
 
-	edgeObservedTimes := func(e connectivity.Edge) []time.Time {
-		if len(e.ObservedTimes) == 0 {
-			if e.FirstSeen.IsZero() {
-				return nil
-			}
-			return []time.Time{e.FirstSeen.UTC()}
-		}
-		out := make([]time.Time, 0, len(e.ObservedTimes))
-		seen := make(map[time.Time]struct{}, len(e.ObservedTimes))
-		for _, ts := range e.ObservedTimes {
-			if ts.IsZero() {
-				continue
-			}
-			ts = ts.UTC()
-			if _, ok := seen[ts]; ok {
-				continue
-			}
-			seen[ts] = struct{}{}
-			out = append(out, ts)
-		}
-		if len(out) == 0 && !e.FirstSeen.IsZero() {
-			out = append(out, e.FirstSeen.UTC())
-		}
-		sort.Slice(out, func(i, j int) bool {
-			return out[i].Before(out[j])
-		})
-		return out
-	}
-
 	compatScore := func(tx *DNSTransaction, e connectivity.Edge, edgeTS time.Time, dstIP string) (int, bool) {
 		if tx == nil {
 			return 0, false
@@ -278,7 +249,7 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			bestDT         = time.Duration(1<<63 - 1)
 		)
 
-		for _, edgeTS := range edgeObservedTimes(e) {
+		for edgeTS := range e.ObservationTimes() {
 			lo := 0
 			hi := len(bucket)
 
@@ -365,10 +336,8 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 
 		issuer := issuerRaw
 		observedAt := e.FirstSeen.UTC()
-		if observedAt.IsZero() {
-			if times := edgeObservedTimes(e); len(times) > 0 {
-				observedAt = times[0]
-			}
+		if observedAt.IsZero() && e.ObservedTimes.Len() > 0 {
+			observedAt = e.ObservedTimes.At(0)
 		}
 
 		proto := string(e.Protocol)

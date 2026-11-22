@@ -3,6 +3,7 @@ package connectivity
 import (
 	"math/rand"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"testing"
@@ -85,7 +86,7 @@ func TestCollectorRecordEdgeObservationMatchesLegacyAtEveryStep(t *testing.T) {
 			for step, ts := range observations {
 				want = legacyMergeEdgeObservedTimes(want, ts)
 				c.recordEdgeObservation(key, ts)
-				got := c.edges[key]
+				got := slices.Collect((Edge{ObservedTimes: c.edges[key]}).ObservationTimes())
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("step %d timestamp %s: collector differs from legacy\n got: %#v\nwant: %#v", step, ts, got, want)
 				}
@@ -146,13 +147,13 @@ func TestCollectorExportedEdgesDoNotAliasOwnedTimestamps(t *testing.T) {
 	if len(edgesSnapshot) != 1 || len(firstSeenSnapshot) != 1 {
 		t.Fatalf("expected one edge in both snapshots, got %d and %d", len(edgesSnapshot), len(firstSeenSnapshot))
 	}
-	edgesBefore := append([]time.Time(nil), edgesSnapshot[0].ObservedTimes...)
-	firstSeenBefore := append([]time.Time(nil), firstSeenSnapshot[0].ObservedTimes...)
+	edgesBefore := edgesSnapshot[0].ObservedTimes.Clone()
+	firstSeenBefore := firstSeenSnapshot[0].ObservedTimes.Clone()
 
 	mutationSnapshot := c.EdgesByFirstSeen()
-	mutationSnapshot[0].ObservedTimes[0] = base.Add(-24 * time.Hour)
-	if !c.edges[key][0].Equal(base) {
-		t.Fatalf("mutating exported snapshot changed collector-owned first timestamp to %s", c.edges[key][0])
+	mutationSnapshot[0].ObservedTimes.add(base.Add(-24 * time.Hour))
+	if !c.edges[key].At(0).Equal(base) {
+		t.Fatalf("mutating exported snapshot changed collector-owned first timestamp to %s", c.edges[key].At(0))
 	}
 
 	c.recordEdgeObservation(key, base.Add(-time.Second))
@@ -164,10 +165,10 @@ func TestCollectorExportedEdgesDoNotAliasOwnedTimestamps(t *testing.T) {
 	if !reflect.DeepEqual(firstSeenSnapshot[0].ObservedTimes, firstSeenBefore) {
 		t.Fatalf("collector updates mutated EdgesByFirstSeen snapshot\n got: %#v\nwant: %#v", firstSeenSnapshot[0].ObservedTimes, firstSeenBefore)
 	}
-	if c.edges[key][0].Equal(edgesBefore[0]) {
+	if c.edges[key].At(0).Equal(edgesBefore.At(0)) {
 		t.Fatalf("collector did not retain the new earliest timestamp")
 	}
-	if !c.edges[key][len(c.edges[key])-1].Equal(base.Add(500 * time.Second)) {
+	if !c.edges[key].At(c.edges[key].Len() - 1).Equal(base.Add(500 * time.Second)) {
 		t.Fatalf("collector did not retain the new latest timestamp")
 	}
 }

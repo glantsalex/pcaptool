@@ -40,10 +40,10 @@ func TestCollectorPartitionsIdentityBeforeTimestampCap(t *testing.T) {
 		seen := map[string]bool{}
 		for _, e := range edges {
 			seen[e.IssuerIdentity] = true
-			if len(e.ObservedTimes) != 128 {
-				t.Fatalf("group %s timestamps=%d", e.IssuerIdentity, len(e.ObservedTimes))
+			if e.ObservedTimes.Len() != 128 {
+				t.Fatalf("group %s timestamps=%d", e.IssuerIdentity, e.ObservedTimes.Len())
 			}
-			if e.FirstSeen != e.ObservedTimes[0] {
+			if e.FirstSeen != e.ObservedTimes.At(0) {
 				t.Fatal("first-seen not retained")
 			}
 		}

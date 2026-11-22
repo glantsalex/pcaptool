@@ -16,7 +16,7 @@ func TestTopologyIdentityUsesSelectedObservationTime(t *testing.T) {
 	later := query.Add(500 * time.Millisecond)
 	tx := &DNSTransaction{RequestTime: query, IssuerIP: net.ParseIP(issuer), DNSName: "device.example.test", NameEvidence: EvDNSAnswer}
 	tx.AddResolvedIP(net.ParseIP(destination), EvDNSAnswer)
-	edges := []connectivity.Edge{{IssuerIP: issuer, DstIP: destination, Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: first, ObservedTimes: []time.Time{first, later}}}
+	edges := []connectivity.Edge{{IssuerIP: issuer, DstIP: destination, Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: first, ObservedTimes: connectivity.NewObservationHistory(first, later)}}
 	for _, tc := range []struct {
 		name, early, late, want string
 		withDNS                 bool

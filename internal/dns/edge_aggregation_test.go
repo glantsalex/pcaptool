@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ func TestEdgeAccumulatorMatchesLegacyFileOrderMerge(t *testing.T) {
 				Protocol:      connectivity.ProtoTCP,
 				Port:          443,
 				FirstSeen:     t0.Add(time.Duration(fileIdx) * time.Minute),
-				ObservedTimes: []time.Time{t0.Add(time.Duration(fileIdx) * time.Minute)},
+				ObservedTimes: connectivity.NewObservationHistory(t0.Add(time.Duration(fileIdx) * time.Minute)),
 			},
 			{
 				IssuerIP:  "10.0.0.2",
@@ -38,8 +39,8 @@ func TestEdgeAccumulatorMatchesLegacyFileOrderMerge(t *testing.T) {
 	}
 	// Exercise duplicate observations, out-of-order timestamps, and the bounded
 	// earliest-plus-latest timestamp rule used by the production merger.
-	batches[3][0].ObservedTimes = []time.Time{t0.Add(5 * time.Hour), t0.Add(-time.Hour), t0.Add(3 * time.Minute)}
-	batches[7][0].ObservedTimes = append([]time.Time(nil), batches[3][0].ObservedTimes...)
+	batches[3][0].ObservedTimes = connectivity.NewObservationHistory(t0.Add(5*time.Hour), t0.Add(-time.Hour), t0.Add(3*time.Minute))
+	batches[7][0].ObservedTimes = batches[3][0].ObservedTimes.Clone()
 
 	want := legacyFlattenEdgeBatches(batches)
 	acc := newEdgeAccumulator()
@@ -413,18 +414,19 @@ func legacyFlattenEdgeBatches(batches [][]connectivity.Edge) []connectivity.Edge
 		for _, e := range batch {
 			k := edgeKey{issuer: e.IssuerIP, dst: e.DstIP, proto: e.Protocol, port: e.Port}
 			if idx, ok := seenEdges[k]; ok {
-				times := e.ObservedTimes
+				times := slices.Collect(e.ObservationTimes())
 				if len(times) == 0 && !e.FirstSeen.IsZero() {
 					times = []time.Time{e.FirstSeen}
 				}
-				out[idx].ObservedTimes = connectivity.MergeEdgeObservedTimes(out[idx].ObservedTimes, times...)
-				if len(out[idx].ObservedTimes) > 0 {
-					out[idx].FirstSeen = out[idx].ObservedTimes[0]
+				merged := connectivity.MergeEdgeObservedTimes(slices.Collect(out[idx].ObservationTimes()), times...)
+				out[idx].ObservedTimes = connectivity.NewObservationHistory(merged...)
+				if out[idx].ObservedTimes.Len() > 0 {
+					out[idx].FirstSeen = out[idx].ObservedTimes.At(0)
 				}
 				continue
 			}
-			if len(e.ObservedTimes) == 0 && !e.FirstSeen.IsZero() {
-				e.ObservedTimes = []time.Time{e.FirstSeen.UTC()}
+			if e.ObservedTimes.Len() == 0 && !e.FirstSeen.IsZero() {
+				e.ObservedTimes = connectivity.NewObservationHistory(e.FirstSeen.UTC())
 			}
 			seenEdges[k] = len(out)
 			out = append(out, e)
