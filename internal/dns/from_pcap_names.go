@@ -23,6 +23,21 @@ import (
 	"github.com/google/gopacket/pcap"
 )
 
+// A hostnamePool belongs to the file-result coordinator for one extraction pass.
+// Names arriving from DNS and SNI retain their existing spelling.
+type hostnamePool map[string]string
+
+func (p hostnamePool) share(name string) string {
+	if name == "" {
+		return ""
+	}
+	if stored, ok := p[name]; ok {
+		return stored
+	}
+	p[name] = name
+	return name
+}
+
 // BuildTransactionsWithSNIFromPCAPs performs a single corpus scan that always extracts:
 //  1. DNS A query/response transactions (real DNS)
 //
@@ -116,6 +131,7 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 	}()
 
 	// Global merge state (single goroutine consumer => no locks needed)
+	names := make(hostnamePool, 10_000)
 	globalMap := make(map[TxKey][]*DNSTransaction)
 	var globalSNI []*DNSTransaction
 	var truncatedDNSPackets []TruncatedDNSPacket
@@ -148,8 +164,12 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 			if len(localList) == 0 {
 				continue
 			}
+			k.Name = names.share(k.Name)
 			bucket := globalMap[k]
 			for _, localTx := range localList {
+				if localTx != nil {
+					localTx.DNSName = names.share(localTx.DNSName)
+				}
 				bucket = mergeDNSTransactionIntoBucket(bucket, localTx)
 			}
 			sortTxBucketByTime(bucket)
@@ -165,6 +185,7 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 			if ip0.isNil() {
 				continue
 			}
+			tx.DNSName = names.share(tx.DNSName)
 			k := sniKey{
 				observedAt: tx.RequestTime.UTC(),
 				issuer:     tx.IssuerIP.String(),
