@@ -307,7 +307,7 @@ func scanDNSAndSNIInFile(
 				}
 				return dnsEx.Map(), sniTxs, dnsEx.TruncatedDNSPackets(), earliest, nil
 			}
-			if !isDNSOrSNIPacket(pkt, includeSNI) || (admit != nil && !admit(pkt)) {
+			if !isDNSOrSNIPacket(pkt, includeSNI) || (admit != nil && !admit(pkt)) || pcaputil.InvalidTCPHeader(pkt) {
 				continue
 			}
 

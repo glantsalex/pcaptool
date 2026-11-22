@@ -58,6 +58,9 @@ func TestWriteRunArtifactsManifest(t *testing.T) {
 		t.Fatalf("unmarshal manifest: %v", err)
 	}
 
+	if !bytes.Contains(b, []byte(`"ignored_invalid_tcp_headers": 0`)) {
+		t.Fatal("clean scan manifest must explicitly report zero ignored TCP headers")
+	}
 	if got.RunID != "run" || got.NetID != "net" {
 		t.Fatalf("unexpected manifest identity: %+v", got)
 	}

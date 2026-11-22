@@ -57,6 +57,10 @@ type FirstPacketInfo struct {
 	// filtering. It is independent of worker scheduling and timestamp ordering,
 	// and remains zero if the first capture is empty.
 	FirstFilePacketTimestamp time.Time
+
+	// InvalidTCPHeadersByFile counts rejected input frames once in the connection
+	// scan, before subnet filtering. Only captures with rejections appear here.
+	InvalidTCPHeadersByFile map[string]uint64
 }
 
 // PacketFileObserver receives admitted decoded packets for one capture file.
@@ -468,6 +472,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		firstPktMu.Unlock()
 	}
 
+	invalidHeaders := make([]uint64, totalFiles) // each worker owns its file index
 	var filesDone int64
 
 	scanFile := func(scanCtx context.Context, idx int) (orderedFileScanOutput, error) {
@@ -562,6 +567,10 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 					firstFilePacketTimestamp = md.Timestamp.UTC()
 				}
 				haveFirstPacket = true
+			}
+			if pcaputil.InvalidTCPHeader(packet) {
+				invalidHeaders[idx]++
+				continue
 			}
 			if scanOpt.PacketAdmission != nil && !scanOpt.PacketAdmission(packet) {
 				continue
@@ -779,6 +788,14 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		return nil, FirstPacketInfo{}, scanErr
 	}
 	firstPkt.FirstFilePacketTimestamp = firstFilePacketTimestamp
+	for i, count := range invalidHeaders {
+		if count > 0 {
+			if firstPkt.InvalidTCPHeadersByFile == nil {
+				firstPkt.InvalidTCPHeadersByFile = make(map[string]uint64)
+			}
+			firstPkt.InvalidTCPHeadersByFile[files[i]] += count
+		}
+	}
 
 	// Choose closest candidate (min dt) per DNS transaction (existing behavior)
 	for _, tx := range txs {
@@ -1033,6 +1050,9 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 			if !ok {
 				// EOF or PacketSource stopped and closed channel.
 				return txMap, earliest, nil
+			}
+			if pcaputil.InvalidTCPHeader(packet) {
+				continue
 			}
 
 			md := packet.Metadata()

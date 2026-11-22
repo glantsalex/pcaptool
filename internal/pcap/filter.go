@@ -32,3 +32,21 @@ func IPv4EndpointAdmission(contains func(netip.Addr) bool) PacketAdmission {
 		return contains(dst)
 	}
 }
+
+// InvalidTCPHeader reports whether decoding failed on an incomplete or malformed
+// TCP header. gopacket exposes a TCP layer even on header errors. Recheck its
+// header bytes only on decode failure so errors above TCP do not discard traffic.
+func InvalidTCPHeader(packet gopacket.Packet) bool {
+	if packet.ErrorLayer() == nil {
+		return false
+	}
+	for _, layer := range packet.Layers() {
+		if tcp, ok := layer.(*layers.TCP); ok {
+			var header layers.TCP
+			if header.DecodeFromBytes(tcp.Contents, gopacket.NilDecodeFeedback) != nil {
+				return true
+			}
+		}
+	}
+	return false
+}

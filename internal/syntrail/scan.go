@@ -454,7 +454,7 @@ func ScanPacketBatch(ctx context.Context, path string, opts ScanOptions) ([]Reco
 			return nil, fmt.Errorf("read packet from %q: %w", path, err)
 		}
 		packetNumber++
-		if opts.PacketAdmission != nil && !opts.PacketAdmission(packet) {
+		if pcaputil.InvalidTCPHeader(packet) || (opts.PacketAdmission != nil && !opts.PacketAdmission(packet)) {
 			continue
 		}
 

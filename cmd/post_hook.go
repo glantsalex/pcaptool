@@ -16,7 +16,14 @@ import (
 	"github.com/aglants/pcaptool/progress"
 )
 
+// PacketAudit counts rejected capture records once across processing passes.
+type PacketAudit struct {
+	IgnoredInvalidTCPHeaders uint64            `json:"ignored_invalid_tcp_headers"`
+	InvalidTCPHeadersByFile  map[string]uint64 `json:"invalid_tcp_headers_by_file,omitempty"`
+}
+
 type RunArtifactsManifest struct {
+	PacketAudit         PacketAudit       `json:"packet_audit"`
 	LogicalServices     *lsm.Stats        `json:"logical_services,omitempty"`
 	RunID               string            `json:"run_id"`
 	NetID               string            `json:"net_id"`
@@ -65,7 +72,21 @@ func writeRunArtifactsManifest(
 		sortedFiles[k] = cleanFiles[k]
 	}
 
+	audit := PacketAudit{}
+	if len(first.InvalidTCPHeadersByFile) > 0 {
+		audit.InvalidTCPHeadersByFile = make(map[string]uint64, len(first.InvalidTCPHeadersByFile))
+		for path, count := range first.InvalidTCPHeadersByFile {
+			name, err := filepath.Rel(readDir, path)
+			if err != nil {
+				name = path
+			}
+			audit.InvalidTCPHeadersByFile[name] += count
+			audit.IgnoredInvalidTCPHeaders += count
+		}
+	}
+
 	manifest := RunArtifactsManifest{
+		PacketAudit:         audit,
 		LogicalServices:     stats,
 		RunID:               om.RunID(),
 		NetID:               om.NetID(),

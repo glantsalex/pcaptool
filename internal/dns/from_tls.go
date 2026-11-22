@@ -14,6 +14,7 @@ import (
 	"sort"
 	"sync"
 
+	pcaputil "github.com/aglants/pcaptool/internal/pcap"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -69,7 +70,7 @@ func BuildSNITransactionsFromPCAPs(ctx context.Context, files []string) ([]*DNST
 
 				// We only care about TCP
 				tcpLayer := pkt.Layer(layers.LayerTypeTCP)
-				if tcpLayer == nil {
+				if tcpLayer == nil || pcaputil.InvalidTCPHeader(pkt) {
 					continue
 				}
 				tcp, _ := tcpLayer.(*layers.TCP)

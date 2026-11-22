@@ -123,3 +123,42 @@ func serializeTestPacket(t *testing.T, packetLayers ...gopacket.SerializableLaye
 	}
 	return gopacket.NewPacket(buffer.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
 }
+
+func TestInvalidTCPHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		length  int
+		offset  byte
+		options []byte
+		invalid bool
+	}{
+		{"short fixed header", 19, 5, nil, true},
+		{"zero offset", 20, 0, nil, true},
+		{"offset below five", 20, 4, nil, true},
+		{"missing option bytes", 21, 6, nil, true},
+		{"invalid option length", 24, 6, []byte{2, 1}, true},
+		{"option overruns header", 24, 6, []byte{2, 6}, true},
+		{"minimum header", 20, 5, nil, false},
+		{"valid options", 24, 6, []byte{2, 4, 5, 180}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := make([]byte, tc.length)
+			data[12] = tc.offset << 4
+			if len(tc.options) != 0 {
+				copy(data[20:], tc.options)
+			}
+			packet := gopacket.NewPacket(data, layers.LayerTypeTCP, gopacket.Default)
+			if got := InvalidTCPHeader(packet); got != tc.invalid {
+				t.Fatalf("invalid = %v, want %v", got, tc.invalid)
+			}
+		})
+	}
+	// An incomplete DNS payload on a structurally valid TCP header is a
+	// separate decode error. Its ports are still reliable.
+	data := make([]byte, 21)
+	data[3], data[12] = 53, 5<<4
+	packet := gopacket.NewPacket(data, layers.LayerTypeTCP, gopacket.DecodeOptions{DecodeStreamsAsDatagrams: true})
+	if packet.ErrorLayer() == nil || InvalidTCPHeader(packet) {
+		t.Fatal("expected an application decode failure with a valid TCP header")
+	}
+}
