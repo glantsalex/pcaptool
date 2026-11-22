@@ -245,7 +245,8 @@ Each entry includes:
 - `normalization_rule_id` (only when a DNS normalization rule changed the row)
 - `protocol`
 - `port`
-- `observed_at_utc`
+
+Version 2 contains device/service facts. The compact matrix uses version 3. For PTI filtering and ingestion, keep the adjacent `topology-ingestion-times.json` with the full matrix. It contains one UTC contact time per row and the SHA-256 of the full JSON bytes.
 
 This file is intended for downstream tooling that should not parse the human-formatted text matrix.
 
@@ -473,7 +474,7 @@ With `--debug`, the sidecar additionally writes these detailed artifacts:
 - `private-nonfleet-to-fleet-trail.csv`
 - `private-nonfleet-to-fleet-tcp-syn-unique.csv`
 
-`private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses without RADIUS, or resolved IMSIs with RADIUS, for that exact role/protocol/port behavior. RADIUS output declares `fleet_identity_basis: imsi` and reports unresolved addresses separately. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Probe targets retain the existing TCP-only qualification.
+`private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses without RADIUS, or resolved IMSIs with RADIUS, for that exact role/protocol/port behavior. RADIUS output declares `fleet_identity_basis: imsi` and counts resolved identities only. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Probe targets retain the existing TCP-only qualification.
 
 The top-level `snapshot_time` is an integer Unix timestamp in milliseconds,
 aligned to 00:00:00 UTC on the date of the first packet in the first capture
@@ -551,7 +552,7 @@ The command is a multi-pass offline pipeline.
 
 ### Fleet constraint and optional TCP SYN trail sidecar
 
-If a fleet or subnet list is set, packet-processing passes after the optional unfiltered RADIUS pass admit only IPv4 packets whose source or destination belongs to the supplied membership set. Packet-level IPv4 TCP SYN evidence and UDP edge evidence are collected independently of connection-correlation filters. The public-server summary, private-nonfleet endpoint summary, and `flow-direction-correction.sql` are always written; detailed trail and unique evidence artifacts require `--debug`. Debug selection changes only artifact writing and does not rescan the corpus. By default, `--fleet-scan-workers 0` collects fleet evidence during connection correlation for PCAP/PCAPNG captures, using its bounded file workers; with RADIUS disabled and no reader compatibility errors, this reduces the pipeline to two full capture scans (DNS/SNI, then connections/fleet evidence). Capture format is checked from file headers, not filename extensions. A recoverable libpcap read error triggers one strict compatibility reread of the affected file for fleet evidence; malformed captures still fail, and correlation retains its historical reader/retry behavior. Other capture formats retain the full separate scan with automatic worker selection (`min(GOMAXPROCS, file_count)`, minimum `1`). Explicit positive values also retain the separate fleet scan: `1` is sequential, and values greater than `1` use that many concurrent file scanners, capped by the file count. The generated BigQuery script creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
+If a fleet or subnet list is set, packet-processing passes after the optional unfiltered RADIUS pass admit only IPv4 packets whose source or destination belongs to the supplied membership set. Packet-level IPv4 TCP SYN evidence and UDP edge evidence are collected independently of connection-correlation filters. The public-server summary, private-nonfleet endpoint summary, and `flow-direction-correction.sql` are always written; detailed trail and unique evidence artifacts require `--debug`. Debug selection changes only artifact writing and does not rescan the corpus. By default, `--fleet-scan-workers 0` collects fleet evidence during connection correlation for PCAP/PCAPNG captures, using its bounded file workers; with RADIUS disabled and no reader compatibility errors, this reduces the pipeline to two full capture scans (DNS, then connections/SNI/fleet evidence). Capture format is checked from file headers, not filename extensions. A recoverable libpcap read error triggers one strict compatibility reread of the affected file for fleet evidence; malformed captures still fail, and correlation retains its historical reader/retry behavior. Other capture formats retain the full separate scan with automatic worker selection (`min(GOMAXPROCS, file_count)`, minimum `1`). Explicit positive values also retain the separate fleet scan: `1` is sequential, and values greater than `1` use that many concurrent file scanners, capped by the file count. The generated BigQuery script creates a flow-direction-corrected materialized view from `flow-data-{net-id}` into `mv-flow-data-{net-id}` after replacing the `{{gcp_project_id}}` and `{{bq_dataset}}` placeholders.
 
 Fleet classification and artifact writing remain independent and do not feed DNS attribution, connection inference, topology generation, or service endpoint generation. Sharing packet reads does not share their filtering policies.
 The SQL script is not executed by pcaptool.
@@ -560,23 +561,11 @@ The SQL script is not executed by pcaptool.
 
 If `--radius-imsi` is enabled, the PCAP corpus is scanned for RADIUS Accounting records and a time-aware IP-to-IMSI index is built.
 
-This does not change packet correlation itself.
-It changes issuer labeling in the final outputs.
+Each observation uses the device address and its capture time. Missing or conflicting owners are excluded before retention. On replies the device can be the destination. Without RADIUS, configured fleet admission and private IPv4/CGNAT addressing determine the device.
 
-### Pass 2: DNS scan and optional TLS SNI scan
+### Pass 2: DNS evidence
 
-Transport selection happens after link-layer decoding, so untagged, 802.1Q, and
-QinQ frames reach the same DNS/SNI extractors and fleet/subnet admission. A plain
-libpcap `udp port 53 or tcp` filter must not be used here: it discarded Stone's
-VLAN 2511 DNS and ClientHello traffic before the extractors ran. UDP/53 and optional
-TCP selection are otherwise unchanged. The paired PTI fixture includes VLAN tagging.
-
-The tool scans the corpus and builds `DNSTransaction` objects from:
-
-- DNS responses
-- synthetic TLS SNI observations, unless `--disable-sni` is set
-
-This pass is where names and directly parsed DNS answer IPs are collected.
+UDP/53 and framed TCP/53 are decoded after link-layer and fleet admission, including VLAN and QinQ. DNS transactions supply the DNS reports. Per-device answer validity intervals supply the connection pass. Complete replacement answers can withdraw an address. Capture-truncated answers supply positive evidence only. An answer by itself creates no service relationship.
 
 ### Pass 2.1: optional NTP transport suppression
 
@@ -589,7 +578,7 @@ non-NTP traffic when the DNS response directly maps the name to the destination 
 
 ### Pass 2.5: optional active resolve
 
-If `--active-resolve` is enabled, every name unresolved before active completion is offered to the configured external resolvers. Successful results may complete otherwise unattributed topology rows; names actually attributed in the final topology are then omitted from `dns-unresolved-dns.txt`.
+If `--active-resolve` is enabled, every name unresolved before active completion is offered to the configured external resolvers. A unique result can complete an admitted contact when the same device queried the name at or before the retained contact time within the configured window; names actually attributed in the final topology are then omitted from `dns-unresolved-dns.txt`.
 Lookup outcomes and matrix application counts are recorded in `active-resolve-log.csv`.
 This is intentionally disabled by default because it is not capture-time truth.
 
@@ -632,7 +621,7 @@ Examples:
 
 ### Topology build
 
-The final topology matrix is built by joining connectivity edges back to the best DNS/SNI evidence available, with a configurable age window (`--topology-dns-window`).
+A row is unique by device, destination IPv4, effective hostname, protocol and destination port. At contact time the latest valid answer for that device and destination can supply a name within `--topology-dns-window`. Simultaneous competing names leave attribution open. A complete ClientHello on an eligible TCP port directly establishes its own named contact, including when the opening handshake was missed. Distinct observed SNI names survive. Repeated, overlapping and multi-address contacts merge. An unnamed contact is covered by the known names on that exact device and transport. A different device, protocol or port supplies no donor.
 
 When `--reverse-dns-lookup` is enabled, PTR lookup runs after active completion and DNS donation as a last-resort pass over still-unattributed public IPv4 matrix rows. Lookup work is bounded, deduplicated by IP, and uses a two-second timeout per IP. A unique forward-confirmed PTR is preferred, followed by a unique usable raw PTR, then a matching AWS EC2 IP-encoded normalization. Ambiguous, local, reverse-zone, invalid, or mismatched AWS names do not fill topology rows. PTR completion is weak endpoint labeling based on current resolver state; it is not observed DNS evidence and does not establish capture-time truth. PTR-completed names cannot act as donation sources and do not alter `dns-unresolved-dns.txt`.
 
@@ -648,11 +637,10 @@ Common source labels in `network-topology-matrix.txt` and related outputs:
 
 | Label | Meaning |
 |---|---|
-| `dns+synack` | direct DNS answer parsed from PCAP and observed connection confirmation |
+| `dns+synack` | a capture-time DNS answer matched an admitted contact, including mid-session TCP or two-way UDP |
 | `dns+synack+norm` | direct `dns+synack` row normalized by a configured `dns_normalize` rule |
 | `dns+conn+synack` | DNS name came from packet evidence, but the IP was backfilled from observed connectivity because the answer was incomplete or truncated |
-| `sni+synack` | name came from TLS SNI and was confirmed by observed connection |
-| `sni+conn+synack` | SNI-derived name with connectivity-backed IP inference |
+| `sni` | the device sent a parsed ClientHello naming this destination and TCP port |
 | `active+synack` | name was obtained by active resolver lookup and later confirmed by observed connection |
 | `active+conn+synack` | active-resolve name with connectivity-inferred IP |
 | `active+matrix` | an otherwise-unattributed topology row was completed from an optional active-resolve result |
@@ -664,22 +652,9 @@ Common source labels in `network-topology-matrix.txt` and related outputs:
 | `csv+conn` | DNS came from `dns-ip.csv` fallback on a non-mid-session row |
 | `csv+mid` | DNS came from `dns-ip.csv` fallback for a mid-session row |
 | `mid-session` | connection was observed without usable DNS attribution |
-| `donated+ipport` | unresolved row was completed from direct `dns+synack` or `sni+synack` evidence on the same `(dstIP, proto, port)` |
-| `donated+ipport+norm` | unresolved row was completed from normalized direct `dns+synack+norm` evidence on the same `(dstIP, proto, port)` |
-| `donated+ipport-private` | unresolved private-destination row was completed from direct `dns+synack` or `sni+synack` evidence on the same `(dstIP, proto, port)` when `--allow-private-dns-donation` is set |
-| `donated+ipport-private+norm` | unresolved private-destination row was completed from normalized direct `dns+synack+norm` evidence on the same `(dstIP, proto, port)` when `--allow-private-dns-donation` is set |
-| `donated+ip` | unresolved or CSV-fallback public IPv4 row was completed from the same run's unique direct `dns+synack` identity for that destination IP |
-| `donated+ip+norm` | unresolved or CSV-fallback public IPv4 row was completed from the same run's unique normalized direct `dns+synack+norm` identity for that destination IP |
 
-Important details:
+Name donation stays within the same device and transport. Distinct known names remain separate rows. Optional resolver, PTR and certificate enrichment still applies to admitted unnamed contacts.
 
-- CSV fallback, inferred DNS/SNI (`dns+conn+synack` / `sni+conn+synack`), active resolution, TLS certificate decoration (exact or fallback), and previously donated names never act as donors.
-- Donation is run-local only; it is not persisted back into `dns-ip.csv`.
-- Exact `(dstIP, proto, port)` donation can use direct `dns+synack`, normalized direct `dns+synack+norm`, and `sni+synack` rows.
-- Public IPv4 destination donation across issuers/protocols/ports runs after exact donation and can use only current-run direct `dns+synack` and normalized direct `dns+synack+norm` rows. It fills unresolved rows and upgrades `csv+mid` / `csv+conn` fallback rows only when the destination IP has exactly one canonical effective DNS identity after normalization. Ambiguous IPs are left unchanged.
-- Private destination donation is disabled by default. When `--allow-private-dns-donation` is set, donation is still exact `(dstIP, proto, port)` only and still refuses CSV, PTR, TLS, active, inferred `+conn`, and previously donated sources. Private destinations never receive IP-level `donated+ip` attribution.
-- Exact donation keeps priority over IP-level donation. One exact donor name is copied in full. Multiple exact names donate only their deterministic longest common DNS-label suffix when it contains at least two labels; otherwise the row remains unresolved.
-- PTR completion runs after donation, cannot donate to other rows, and is not persisted back into `dns-ip.csv`.
 - Strong direct evidence suppresses weaker conflicting CSV fallback where possible.
 - DNS normalization rules apply after raw topology rows are built and before donation. They currently support only `type: dns_normalize`, only rewrite `dns+synack` rows, and preserve observed/normalized DNS metadata in JSON plus `dns-normalization-audit.csv`.
 
@@ -775,8 +750,8 @@ This policy is designed to reduce CSV contamination from:
 
 ### Practical heuristics
 
-- TLS SNI is used as a synthetic name source unless disabled
-- unresolved or `mid-session` rows can inherit a name from another issuer in the same run on an exact `(dstIP, proto, port)` match from direct `dns+synack` / `sni+synack` evidence; public IPv4 rows can also inherit across ports/protocols/issuers from a unique direct DNS identity for the same destination IP
+- a parsed TLS ClientHello establishes a named contact unless SNI extraction is disabled
+- a named contact covers an unnamed row on the same device, destination, protocol and port
 - truncated DNS responses are salvaged only up to the last complete answer; incomplete tail answers are ignored
 
 ### Known limitations
@@ -807,11 +782,11 @@ This policy is designed to reduce CSV contamination from:
 | `--fleet-scan-workers` | int | `0` | `0` shares connection scanning for PCAP/PCAPNG, with compatibility fallback; positive values force a separate scan (`1` sequential, higher values concurrent, capped by file count) |
 | `--format` | string | `table` | main output format: `table` or `json` |
 | `--export-csv` | string | empty | optional CSV export path for main records |
-| `--short`, `-s` | bool | `false` | squash topology to one row per issuer/DNS/port |
+| `--short`, `-s` | bool | `false` | accepted for compatibility; full relationship keys are preserved |
 | `--radius-imsi` | bool | `false` | map issuer IPs to IMSI via RADIUS Accounting data |
 | `--only-tcp` | bool | `false` | only correlate TCP connections |
 | `--infer-dns-from-connections` | bool | `false` | opt in to issuer-only query/connection timing inference when DNS answers are missing |
-| `--allow-private-dns-donation` | bool | `false` | opt in to exact private-destination topology donation from direct DNS/SNI evidence |
+| `--allow-private-dns-donation` | bool | `false` | accepted for compatibility; exact named contacts cover the same device and transport |
 | `--ignore-ntp` | bool | `true` | suppress NTP transport edges by excluding port `123`; DNS evidence is preserved |
 | `--dns-ip-file` | string | empty | path to fallback DNS/IP map used for last-resort attribution |
 | `--dns-normalization-rules` | string | empty | optional YAML file with `dns_normalize` rules applied to direct DNS topology rows before donation |
@@ -825,7 +800,7 @@ This policy is designed to reduce CSV contamination from:
 | `--tls-cert-lookup` | bool | `false` | probe unresolved public TLS endpoints, decorate exact matching matrix rows, and write a certificate audit CSV |
 | `--tls-cert-lookup-timeout` | integer seconds | `15` | per-endpoint TCP connection plus TLS certificate handshake timeout; valid range `5..30` |
 | `--disable-sni` | bool | `false` | skip TLS ClientHello/SNI scan |
-| `--unsorted` | bool | `false` | preserve natural first-seen issuer order in topology output |
+| `--unsorted` | bool | `false` | accepted for compatibility; output uses stable relationship order |
 | `--debug` | bool | `false` | emit additional debug artifacts, including detailed fleet trail/unique CSVs and CSV append audit |
 | `--manifest-out` | string | empty | write an extra copy of `_run-artifacts.json` |
 | `--post-hook` | string array | empty | shell command(s) to run after extraction completes |
@@ -969,13 +944,7 @@ Subnets are device address pools, not a list of all internal infrastructure.
 When RADIUS is enabled, identity is resolved at packet time **before** fleet UDP
 aggregation. `private-nonfleet-endpoints.json` retains schema_version 1 and adds
 `fleet_identity_basis: imsi`. `fleet_devices_count` is distinct resolved IMSIs per
-endpoint/role/protocol/port. `unresolved_fleet_ips_count`, when nonzero, counts
-addresses with unresolved observations separately (an address may also have known
-observations); it is not a device count. An unresolved-only behavior is retained
-with zero known devices. Without RADIUS, the historical IPv4 counts/output remain;
-absence of `fleet_identity_basis` means the historical IPv4 basis. IP-bearing
-endpoint/trail fields remain IPs. General topology labels retain their existing IP
-fallback; that fallback is never counted as an IMSI.
+endpoint/role/protocol/port. Strict RADIUS runs discard unresolved fleet observations before retaining evidence, so unresolved-only observations contribute no devices or listeners. Static mode retains IPv4 counts. Fleet trail fields that describe wire addresses continue to use IPs.
 
 Direction registry/SQL ignore daily counts and consume qualified IP/transport/port
 evidence as before. No subnet predicates are added to correction SQL. Existing
@@ -1003,39 +972,6 @@ RSS with GOMAXPROCS=8/GOMEMLIMIT=16GiB. Private endpoint JSON and direction SQL
 were unchanged. This is one local capture subset, not full-day or cloud validation.
 No customer packets are checked in; regression fixtures are synthetic.
 
-## Timed SNI and topology identity (2026-11-16)
+## Downstream retention
 
-The active combined DNS/SNI scan deduplicates SNI by raw issuer IP, destination
-IP, destination port, name and **full capture timestamp** (UTC, no truncation).
-IMSI is deliberately absent from this extraction key. Identical timed copies
-collapse within/across files; global duplicates keep the lexicographically
-smallest capture basename. Later ClientHellos/retransmissions survive for timed
-identity lookup. Equal-time name observations use stable ordering.
-
-With RADIUS enabled, the connection collector resolves each admitted edge
-observation against the completed immutable index **before** timestamp pruning.
-Per-file and global grouping retain raw IP/endpoint plus resolved IMSI (or raw-IP
-fallback for unknown identity). The existing earliest-plus-latest-127 bound now
-applies within each group. Thus later traffic from device C cannot evict all
-observations of device B when an IP is reassigned A → B → C. Direct DNS/SNI
-correlation and topology joins require the same timed identity at the name and
-connection observations; an unknown interval never borrows a neighboring IMSI.
-
-Final topology still summarizes a device/service rather than exporting every
-packet: its uniqueness key is issuer label, destination, name, protocol and port.
-The existing best-name/window rules run per identity group. Repeated evidence for
-one IMSI/service may collapse, including across IPs; equal-rank duplicate rows
-retain the earlier selected observation. The 128-time cap can still discard
-intermediate observations **within** one identity group. This is not a change to
-TCP/UDP admission, passive-FTP heuristics, accounting windows, fleet counts, SQL
-qualification, schema, PTI config ownership or the global SNI default. With RADIUS
-disabled, connection grouping remains IP based; timed SNI preservation still applies
-when SNI is enabled. More transactions, identity groups and unknown-IP rows can
-increase memory/output size; an IP fallback is not a counted device.
-
-Tests cover timestamp precision, exact copies across files, worker/file order,
-three owners with >128 later observations, unknown intervals, same-IMSI summaries,
-and cross-owner correlation rejection. The shared synthetic fixture also gates
-PTI's generated/downloaded policies and the offline paired runtime container.
-Local corpus evidence and outstanding rollout gates are recorded in the companion
-PTI `docs/prompts/handoff.md`; no customer captures are checked in.
+The DNS table, issuer profiles, unresolved-name reports and DNS CSVs describe real DNS transactions. A ClientHello contributes to topology directly. Fleet summaries, SYN trail diagnostics and direction SQL consume independent packet evidence. Service endpoints count distinct admitted device identities. Ingestion, logical-service outputs and diagnostic audits that require an observation time use a real capture-time minimum for each completed fact.

@@ -31,7 +31,7 @@ func TestCollectorPartitionsIdentityBeforeTimestampCap(t *testing.T) {
 			if reverse {
 				i = 799 - n
 			}
-			c.recordEdgeObservation(key, base.Add(time.Duration(i)*5*time.Millisecond))
+			c.recordEdgeObservation(key, base.Add(time.Duration(i)*5*time.Millisecond), false)
 		}
 		edges := c.Edges()
 		if len(edges) != 4 {
@@ -67,6 +67,32 @@ func BenchmarkCollectorTimedIdentity(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		c.recordEdgeObservation(key, base.Add(time.Duration(i)))
+		c.recordEdgeObservation(key, base.Add(time.Duration(i)), false)
+	}
+}
+
+func TestFactCollectorReleasesAndExpiresHandshakes(t *testing.T) {
+	opts := DefaultOptions()
+	opts.IssuerIdentity = func(ip string, ts time.Time) string {
+		if ip == "10.0.0.1" {
+			return "A"
+		}
+		return ""
+	}
+	count := 0
+	opts.Contact = func(string, string, string, L4Proto, uint16, time.Time, bool) { count++ }
+	c := NewCollector(opts)
+	syn := mustPacketIPv4TCP(t, "10.0.0.1", "203.0.113.1", 50000, 443, true, false)
+	reply := mustPacketIPv4TCP(t, "203.0.113.1", "10.0.0.1", 443, 50000, true, true)
+	base := time.Unix(1700000000, 0)
+	c.OnPacket(syn, base)
+	c.OnPacket(reply, base.Add(time.Second))
+	if count != 1 || len(c.tcpSyn) != 0 || c.edges != nil {
+		t.Fatalf("completed state: %d %d %+v", count, len(c.tcpSyn), c.edges)
+	}
+	c.OnPacket(syn, base.Add(2*time.Second))
+	c.OnPacket(reply, base.Add(time.Minute))
+	if count != 1 || len(c.tcpSyn) != 0 {
+		t.Fatalf("expired SYN matched: %d", count)
 	}
 }

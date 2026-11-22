@@ -47,6 +47,9 @@ func mergeDNSTransaction(dst, src *DNSTransaction) {
 	if dst.RequestTime.IsZero() || (!src.RequestTime.IsZero() && src.RequestTime.Before(dst.RequestTime)) {
 		dst.RequestTime = src.RequestTime
 	}
+	if src.PCAPFile < dst.PCAPFile {
+		dst.PCAPFile = src.PCAPFile
+	}
 	if dst.NameEvidence == EvNone && src.NameEvidence != EvNone {
 		dst.NameEvidence = src.NameEvidence
 	}

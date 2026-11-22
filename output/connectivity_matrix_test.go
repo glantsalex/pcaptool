@@ -61,8 +61,8 @@ func TestWriteNetworkTopologyMatrixJSON(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if got.Version != 1 {
-		t.Fatalf("version = %d, want 1", got.Version)
+	if got.Version != 2 {
+		t.Fatalf("version = %d, want 2", got.Version)
 	}
 	if len(got.Entries) != 2 {
 		t.Fatalf("entries len = %d, want 2", len(got.Entries))
@@ -70,7 +70,7 @@ func TestWriteNetworkTopologyMatrixJSON(t *testing.T) {
 	if got.Entries[0].IssuerIP != "10.4.100.58" || got.Entries[0].DestinationIP != "100.104.10.1" {
 		t.Fatalf("first entry = %+v", got.Entries[0])
 	}
-	if got.Entries[0].ObservedAtUTC != "2026-04-13T10:15:00.123456789Z" {
+	if got.Entries[0].ObservedAtUTC != "" {
 		t.Fatalf("observed_at_utc = %q", got.Entries[0].ObservedAtUTC)
 	}
 	if got.Entries[1].DNSName != "ep2.online-log.worldline.ch" || got.Entries[1].DNSSource != "csv+mid" {
@@ -202,7 +202,7 @@ type compactTopologyTestPayload struct {
 
 type compactTopologyTestIssuer struct {
 	ID   int64
-	Rows [][6]int64
+	Rows [][5]int64
 }
 
 func TestWriteNetworkTopologyMatrixCompactJSONSingle(t *testing.T) {
@@ -218,10 +218,10 @@ func TestWriteNetworkTopologyMatrixCompactJSONSingle(t *testing.T) {
 	}}
 
 	payload, issuers, _ := writeAndDecodeCompactTopology(t, entries)
-	if payload.Version != 2 || payload.Layout != "dict_by_issuer" || payload.TimeUnit != "unix_ms" {
+	if payload.Version != 3 || payload.Layout != "dict_by_issuer" || payload.TimeUnit != "" {
 		t.Fatalf("metadata = version %d, layout %q, time unit %q", payload.Version, payload.Layout, payload.TimeUnit)
 	}
-	wantColumns := []string{"dst", "dns", "source", "proto", "port", "first_ms"}
+	wantColumns := []string{"dst", "dns", "source", "proto", "port"}
 	if !reflect.DeepEqual(payload.Columns, wantColumns) {
 		t.Fatalf("columns = %#v, want %#v", payload.Columns, wantColumns)
 	}
@@ -234,7 +234,7 @@ func TestWriteNetworkTopologyMatrixCompactJSONSingle(t *testing.T) {
 	}
 	wantIssuers := []compactTopologyTestIssuer{{
 		ID:   0,
-		Rows: [][6]int64{{0, 0, 0, 0, 443, observedAt.UTC().UnixMilli()}},
+		Rows: [][5]int64{{0, 0, 0, 0, 443}},
 	}}
 	if !reflect.DeepEqual(issuers, wantIssuers) {
 		t.Fatalf("issuers = %#v, want %#v", issuers, wantIssuers)
@@ -260,8 +260,8 @@ func TestWriteNetworkTopologyMatrixCompactJSONGroupsDeduplicatesAndPreservesEmpt
 		t.Fatalf("dict = %#v, want %#v", payload.Dict, wantDict)
 	}
 	wantIssuers := []compactTopologyTestIssuer{
-		{ID: 0, Rows: [][6]int64{{0, 0, 0, 0, 80, 0}, {1, 0, 0, 0, 443, 0}}},
-		{ID: 1, Rows: [][6]int64{{1, 1, 1, 1, 53, 0}}},
+		{ID: 0, Rows: [][5]int64{{0, 0, 0, 0, 80}, {1, 0, 0, 0, 443}}},
+		{ID: 1, Rows: [][5]int64{{1, 1, 1, 1, 53}}},
 	}
 	if !reflect.DeepEqual(issuers, wantIssuers) {
 		t.Fatalf("issuer groups = %#v, want %#v", issuers, wantIssuers)
@@ -320,9 +320,6 @@ func TestWriteNetworkTopologyMatrixCompactJSONRoundTripAtMillisecondPrecision(t 
 				Protocol:      payload.Dict.Proto[row[3]],
 				Port:          uint16(row[4]),
 			}
-			if row[5] != 0 {
-				entry.ObservedAt = time.UnixMilli(row[5]).UTC()
-			}
 			reconstructed = append(reconstructed, entry)
 		}
 	}
@@ -332,9 +329,7 @@ func TestWriteNetworkTopologyMatrixCompactJSONRoundTripAtMillisecondPrecision(t 
 	}
 	for i := range entries {
 		want := entries[i]
-		if !want.ObservedAt.IsZero() {
-			want.ObservedAt = time.UnixMilli(want.ObservedAt.UTC().UnixMilli()).UTC()
-		}
+		want.ObservedAt = time.Time{}
 		if !reflect.DeepEqual(reconstructed[i], want) {
 			t.Fatalf("round trip entry %d = %#v, want %#v", i, reconstructed[i], want)
 		}

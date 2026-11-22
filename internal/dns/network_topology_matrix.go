@@ -765,7 +765,7 @@ const (
 // donate names. Connection-inferred and donated names cannot recursively donate.
 func classifyDNSDonationDonor(source string) dnsDonationDonorTier {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "dns+synack", "dns+synack+norm", "sni+synack":
+	case "dns+synack", "dns+synack+norm", "sni+synack", "sni":
 		return dnsDonationDonorDirect
 	default:
 		return dnsDonationDonorNone
@@ -787,6 +787,9 @@ func isDNSDonationRecipient(source, name string) bool {
 func topologySourceRank(src string) int {
 	s := strings.ToLower(strings.TrimSpace(src))
 	switch s {
+	// A corroborating direct DNS answer remains eligible for DNS normalization and cache learning.
+	case "sni":
+		return 59
 	case "dns+synack", "sni+synack", "dns+synack+norm":
 		return 60
 	case "dns+conn+synack", "sni+conn+synack":

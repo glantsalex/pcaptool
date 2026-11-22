@@ -184,3 +184,14 @@ func TestServiceEndpointHash64_Deterministic(t *testing.T) {
 		t.Fatalf("hash should differ when protocol differs")
 	}
 }
+
+func TestSubscriberPeersCountDevicesOnce(t *testing.T) {
+	rows := []TopologyEntry{}
+	for _, id := range []string{"724180056410011", "724180056410012", "724180056410011"} {
+		rows = append(rows, TopologyEntry{IssuerIP: id, DestinationIP: "8.8.8.8", DNSName: "a.example", Protocol: "tcp", Port: 443})
+	}
+	got := BuildServiceEndpoints(rows)
+	if len(got) != 1 || got[0].PeersCount != 2 {
+		t.Fatalf("subscriber peers: %+v", got)
+	}
+}

@@ -75,7 +75,6 @@ func TestSYNRetryIdentityAcrossFilesAndSubscribers(t *testing.T) {
 		record(5*time.Second, "10.1.0.2", dst, 443, "first subscriber"),
 		record(6*time.Second, src, "192.0.2.2", 443, "first subscriber"),
 		record(7*time.Hour, src, dst, 443, "second subscriber"),
-		record(8*time.Hour, src, dst, 443, ""),
 	}
 	one, err := ScanFileWithOptions(context.Background(), first, opt)
 	if err != nil || !reflect.DeepEqual(one, want[:6]) {

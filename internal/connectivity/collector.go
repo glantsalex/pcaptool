@@ -9,6 +9,7 @@ package connectivity
 
 import (
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,6 +42,9 @@ type Edge struct {
 const maxEdgeObservedTimes = 128
 
 type Options struct {
+	// Contact consumes an admitted observation synchronously in the file worker.
+	// When supplied, no transport edge or timestamp history is retained.
+	Contact func(identity, issuer, dst string, proto L4Proto, port uint16, ts time.Time, confirmed bool)
 	// IssuerIdentity resolves the issuer at each observation time. It must be
 	// safe for concurrent calls when shared by file collectors. Nil preserves
 	// legacy grouping; an empty result in scoped mode uses the raw IP.
@@ -68,8 +72,9 @@ func DefaultOptions() Options {
 }
 
 type pairKey struct {
-	issuer string
-	dst    string
+	identity string
+	issuer   string
+	dst      string
 }
 
 type Collector struct {
@@ -88,10 +93,11 @@ type Collector struct {
 }
 
 type tcpKey struct {
-	cip string
-	sip string
-	cpt uint16
-	spt uint16
+	cip      string
+	sip      string
+	cpt      uint16
+	spt      uint16
+	identity string
 }
 
 type udpKey = tcpKey
@@ -123,11 +129,15 @@ func NewCollector(opt Options) *Collector {
 		ftpControlPorts[port] = struct{}{}
 	}
 	opt.FTPControlPorts = ftpControlPorts
+	var edges map[edgeKey]ObservationHistory
+	if opt.Contact == nil {
+		edges = make(map[edgeKey]ObservationHistory, 32768)
+	}
 	return &Collector{
 		opt:            opt,
 		tcpSyn:         make(map[tcpKey]time.Time, 8192),
 		udpFirst:       make(map[udpKey]time.Time, 8192),
-		edges:          make(map[edgeKey]ObservationHistory, 32768),
+		edges:          edges,
 		ftpControlSeen: make(map[pairKey]struct{}, 1024),
 		ftpPassivePend: make(map[pairKey]time.Time, 256),
 		ftpPassivePort: make(map[edgeKey]time.Time, 512),
@@ -282,12 +292,19 @@ func MergeEdgeObservedTimes(existing []time.Time, additions ...time.Time) []time
 	return out
 }
 
-func (c *Collector) recordEdgeObservation(ek edgeKey, ts time.Time) {
-	if c.opt.IssuerIdentity != nil {
+func (c *Collector) recordEdgeObservation(ek edgeKey, ts time.Time, confirmed bool) {
+	if c.opt.IssuerIdentity != nil && !(ek.identity != "" && c.opt.Contact != nil) {
 		ek.identity = c.opt.IssuerIdentity(ek.issuer, ts)
 		if ek.identity == "" {
+			if c.opt.Contact != nil {
+				return
+			}
 			ek.identity = ek.issuer
 		}
+	}
+	if c.opt.Contact != nil {
+		c.opt.Contact(ek.identity, ek.issuer, ek.dst, ek.proto, ek.port, ts, confirmed)
+		return
 	}
 	history := c.edges[ek]
 	history.add(ts)
@@ -356,8 +373,14 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 		if c.isExcludedPort(dport) {
 			return
 		}
-		k := tcpKey{srcIP.String(), dstIP.String(), sport, dport}
-		if _, ok := c.tcpSyn[k]; !ok {
+		k := tcpKey{srcIP.String(), dstIP.String(), sport, dport, ""}
+		if c.opt.Contact != nil {
+			k.identity = c.opt.IssuerIdentity(k.cip, ts)
+			if k.identity == "" {
+				return
+			}
+		}
+		if prev, ok := c.tcpSyn[k]; !ok || (c.opt.Contact != nil && ts.Sub(prev) > c.opt.PendingTTL) {
 			c.tcpSyn[k] = ts
 		}
 		return
@@ -367,13 +390,25 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 		if c.isExcludedPort(sport) {
 			return
 		}
-		k := tcpKey{dstIP.String(), srcIP.String(), dport, sport}
+		k := tcpKey{dstIP.String(), srcIP.String(), dport, sport, ""}
+		if c.opt.Contact != nil {
+			k.identity = c.opt.IssuerIdentity(k.cip, ts)
+			if k.identity == "" {
+				return
+			}
+		}
 		synTS, ok := c.tcpSyn[k]
 		if !ok {
 			return
 		}
 
-		ek := edgeKey{issuer: k.cip, dst: k.sip, proto: ProtoTCP, port: k.spt}
+		if c.opt.Contact != nil {
+			delete(c.tcpSyn, k)
+			if ts.Before(synTS) || ts.Sub(synTS) > c.opt.PendingTTL {
+				return
+			}
+		}
+		ek := edgeKey{identity: k.identity, issuer: k.cip, dst: k.sip, proto: ProtoTCP, port: k.spt}
 
 		if c.opt.CollapseFTPPassive {
 			if _, ok := c.ftpPassivePort[ek]; ok {
@@ -382,17 +417,17 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 		}
 
 		if c.opt.CollapseFTPPassive && ek.port >= c.opt.FTPPassiveMinPort {
-			if _, ok := c.ftpControlSeen[pairKey{ek.issuer, ek.dst}]; ok {
+			if _, ok := c.ftpControlSeen[pairKey{ek.identity, ek.issuer, ek.dst}]; ok {
 				return
 			}
 		}
 
 		if c.opt.CollapseFTPPassive && c.isFTPControlPort(ek.port) {
-			c.ftpControlSeen[pairKey{ek.issuer, ek.dst}] = struct{}{}
+			c.ftpControlSeen[pairKey{ek.identity, ek.issuer, ek.dst}] = struct{}{}
 		}
 
 		// For SYN/SYN-ACK confirmed edges, observed time is the SYN timestamp.
-		c.recordEdgeObservation(ek, synTS)
+		c.recordEdgeObservation(ek, synTS, true)
 		return
 	}
 
@@ -433,6 +468,12 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 		port:   destPort,
 	}
 
+	if c.opt.Contact != nil {
+		ek.identity = c.opt.IssuerIdentity(ek.issuer, ts)
+		if ek.identity == "" || c.isExcludedPort(destPort) {
+			return
+		}
+	}
 	if c.opt.CollapseFTPPassive {
 		if _, ok := c.ftpPassivePort[ek]; ok {
 			return
@@ -440,16 +481,16 @@ func (c *Collector) onTCP(srcIP, dstIP net.IP, tcp *layers.TCP, ts time.Time) {
 	}
 
 	if c.opt.CollapseFTPPassive && ek.port >= c.opt.FTPPassiveMinPort {
-		if _, ok := c.ftpControlSeen[pairKey{ek.issuer, ek.dst}]; ok {
+		if _, ok := c.ftpControlSeen[pairKey{ek.identity, ek.issuer, ek.dst}]; ok {
 			return
 		}
 	}
 
 	if c.opt.CollapseFTPPassive && c.isFTPControlPort(ek.port) {
-		c.ftpControlSeen[pairKey{ek.issuer, ek.dst}] = struct{}{}
+		c.ftpControlSeen[pairKey{ek.identity, ek.issuer, ek.dst}] = struct{}{}
 	}
 
-	c.recordEdgeObservation(ek, ts)
+	c.recordEdgeObservation(ek, ts, false)
 
 }
 
@@ -465,12 +506,35 @@ func (c *Collector) onUDP(srcIP, dstIP net.IP, udp *layers.UDP, ts time.Time) {
 		return
 	}
 
-	k := udpKey{srcIP.String(), dstIP.String(), sport, dport}
+	k := udpKey{cip: srcIP.String(), sip: dstIP.String(), cpt: sport, spt: dport}
+	rev := udpKey{cip: k.sip, sip: k.cip, cpt: dport, spt: sport}
+	if c.opt.Contact != nil {
+		resolve := c.opt.IssuerIdentity
+		if resolve(k.cip, ts) == "" && resolve(k.sip, ts) == "" {
+			return
+		}
+		if first, ok := c.udpFirst[rev]; ok {
+			delete(c.udpFirst, rev)
+			issuer, dst, port := rev.cip, rev.sip, rev.spt
+			id := resolve(issuer, first)
+			if id == "" {
+				issuer, dst, port = rev.sip, rev.cip, rev.cpt
+				id = resolve(issuer, first)
+			}
+			if id != "" && id == resolve(issuer, ts) && !ts.Before(first) && ts.Sub(first) <= c.opt.PendingTTL {
+				c.opt.Contact(id, issuer, dst, ProtoUDP, port, first, true)
+				return
+			}
+		}
+		if prev, pending := c.udpFirst[k]; !pending || ts.Sub(prev) > c.opt.PendingTTL {
+			c.udpFirst[k] = ts
+		}
+		return
+	}
 	if _, ok := c.udpFirst[k]; !ok {
 		c.udpFirst[k] = ts
 	}
 
-	rev := udpKey{dstIP.String(), srcIP.String(), dport, sport}
 	revTS, ok := c.udpFirst[rev]
 	if !ok {
 		return
@@ -491,7 +555,7 @@ func (c *Collector) onUDP(srcIP, dstIP net.IP, udp *layers.UDP, ts time.Time) {
 
 	ek := edgeKey{issuer: issuer, dst: dst, proto: ProtoUDP, port: port}
 	// For UDP confirmed edges, keep the first packet timestamp from issuer->dst flow.
-	c.recordEdgeObservation(ek, revTS)
+	c.recordEdgeObservation(ek, revTS, true)
 }
 
 func (c *Collector) sweep(now time.Time) {
@@ -518,21 +582,37 @@ func (c *Collector) sweep(now time.Time) {
 	}
 }
 
+// PassiveTCP checks previously advertised data ports before a ClientHello is
+// admitted independently of transport handshake state.
+func (c *Collector) PassiveTCP(device string, wire, dst netip.Addr, port uint16) bool {
+	if len(c.ftpPassivePort) == 0 {
+		return false
+	}
+	_, ok := c.ftpPassivePort[edgeKey{identity: device, issuer: wire.String(), dst: dst.String(), proto: ProtoTCP, port: port}]
+	return ok
+}
+
 func (c *Collector) observeFTPPassiveControl(srcIP, dstIP net.IP, sport, dport uint16, payload []byte, ts time.Time) {
 	if !c.opt.CollapseFTPPassive || len(payload) == 0 {
 		return
 	}
 
+	if !c.isFTPControlPort(sport) && !c.isFTPControlPort(dport) {
+		return
+	}
 	issuer := srcIP.String()
 	dst := dstIP.String()
 	if c.isFTPControlPort(dport) {
 		if isFTPPassiveCommand(payload) {
-			c.ftpPassivePend[pairKey{issuer: issuer, dst: dst}] = ts
+			pair := pairKey{issuer: issuer, dst: dst}
+			if c.opt.Contact != nil {
+				pair.identity = c.opt.IssuerIdentity(issuer, ts)
+				if pair.identity == "" {
+					return
+				}
+			}
+			c.ftpPassivePend[pair] = ts
 		}
-		return
-	}
-
-	if !c.isFTPControlPort(sport) {
 		return
 	}
 
@@ -542,14 +622,20 @@ func (c *Collector) observeFTPPassiveControl(srcIP, dstIP net.IP, sport, dport u
 	}
 
 	pair := pairKey{issuer: dst, dst: issuer}
+	if c.opt.Contact != nil {
+		pair.identity = c.opt.IssuerIdentity(dst, ts)
+		if pair.identity == "" {
+			return
+		}
+	}
 	if _, pending := c.ftpPassivePend[pair]; pending {
 		delete(c.ftpPassivePend, pair)
 	}
 	c.ftpPassivePort[edgeKey{
-		issuer: pair.issuer,
-		dst:    pair.dst,
-		proto:  ProtoTCP,
-		port:   port,
+		identity: pair.identity, issuer: pair.issuer,
+		dst:   pair.dst,
+		proto: ProtoTCP,
+		port:  port,
 	}] = ts
 }
 

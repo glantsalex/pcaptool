@@ -8,6 +8,7 @@
 package output
 
 import (
+	"bufio"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/aglants/pcaptool/internal/dns"
 )
@@ -123,13 +123,12 @@ type networkTopologyMatrixJSONEntry struct {
 	NormalizationRuleID string `json:"normalization_rule_id,omitempty"`
 	Protocol            string `json:"protocol"`
 	Port                uint16 `json:"port"`
-	ObservedAtUTC       string `json:"observed_at_utc,omitempty"`
 }
 
 // WriteNetworkTopologyMatrixJSON writes the topology matrix in machine-readable JSON.
 func WriteNetworkTopologyMatrixJSON(w io.Writer, entries []dns.TopologyEntry) error {
 	payload := networkTopologyMatrixJSON{
-		Version: 1,
+		Version: 2,
 		Entries: make([]networkTopologyMatrixJSONEntry, 0, len(entries)),
 	}
 	for _, entry := range entries {
@@ -144,15 +143,44 @@ func WriteNetworkTopologyMatrixJSON(w io.Writer, entries []dns.TopologyEntry) er
 			Protocol:            entry.Protocol,
 			Port:                entry.Port,
 		}
-		if !entry.ObservedAt.IsZero() {
-			row.ObservedAtUTC = entry.ObservedAt.UTC().Format(time.RFC3339Nano)
-		}
 		payload.Entries = append(payload.Entries, row)
 	}
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)
+}
+
+// WriteTopologyIngestionTimes streams one UTC contact time per matrix row.
+// The digest binds row positions to the exact bytes of the full v2 matrix.
+func WriteTopologyIngestionTimes(w io.Writer, digest []byte, entries []dns.TopologyEntry) error {
+	b := bufio.NewWriter(w)
+	if _, err := fmt.Fprintf(b, `{"matrix_sha256":"%x","observed_utc":[`, digest); err != nil {
+		return err
+	}
+	var scratch [48]byte
+	for i, row := range entries {
+		if row.ObservedAt.IsZero() {
+			return fmt.Errorf("missing ingestion observation for topology row %d", i)
+		}
+		buf := scratch[:0]
+		if i != 0 {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, '"')
+		buf, err := row.ObservedAt.UTC().AppendText(buf)
+		if err != nil {
+			return fmt.Errorf("encode observation for topology row %d: %w", i, err)
+		}
+		buf = append(buf, '"')
+		if _, err = b.Write(buf); err != nil {
+			return err
+		}
+	}
+	if _, err := b.WriteString("]}\n"); err != nil {
+		return err
+	}
+	return b.Flush()
 }
 
 // WriteUniqueDNSPortProtoCSV writes the unique (DNS, port, protocol)
@@ -202,12 +230,11 @@ func WriteUniqueDNSPortProtoCSV(w io.Writer, entries []dns.TopologyEntry) error 
 }
 
 type networkTopologyMatrixCompactJSON struct {
-	Version  int                                    `json:"version"`
-	Layout   string                                 `json:"layout"`
-	TimeUnit string                                 `json:"time_unit"`
-	Columns  []string                               `json:"columns"`
-	Dict     networkTopologyMatrixCompactDictionary `json:"dict"`
-	Issuers  [][2]any                               `json:"issuers"`
+	Version int                                    `json:"version"`
+	Layout  string                                 `json:"layout"`
+	Columns []string                               `json:"columns"`
+	Dict    networkTopologyMatrixCompactDictionary `json:"dict"`
+	Issuers [][2]any                               `json:"issuers"`
 }
 
 type networkTopologyMatrixCompactDictionary struct {
@@ -242,7 +269,7 @@ func (d *compactStringDictionary) id(value string) int64 {
 
 type networkTopologyMatrixCompactIssuerGroup struct {
 	issuerID int64
-	rows     [][6]int64
+	rows     [][5]int64
 }
 
 // WriteNetworkTopologyMatrixCompactJSON writes a dictionary-encoded topology
@@ -266,17 +293,12 @@ func WriteNetworkTopologyMatrixCompactJSON(w io.Writer, entries []dns.TopologyEn
 			groups = append(groups, networkTopologyMatrixCompactIssuerGroup{issuerID: issuerID})
 		}
 
-		firstMS := int64(0)
-		if !entry.ObservedAt.IsZero() {
-			firstMS = entry.ObservedAt.UTC().UnixMilli()
-		}
-		groups[groupIndex].rows = append(groups[groupIndex].rows, [6]int64{
+		groups[groupIndex].rows = append(groups[groupIndex].rows, [5]int64{
 			dstDict.id(entry.DestinationIP),
 			dnsDict.id(entry.DNSName),
 			sourceDict.id(entry.DNSSource),
 			protoDict.id(entry.Protocol),
 			int64(entry.Port),
-			firstMS,
 		})
 	}
 
@@ -285,10 +307,9 @@ func WriteNetworkTopologyMatrixCompactJSON(w io.Writer, entries []dns.TopologyEn
 		issuerGroups = append(issuerGroups, [2]any{group.issuerID, group.rows})
 	}
 	payload := networkTopologyMatrixCompactJSON{
-		Version:  2,
-		Layout:   "dict_by_issuer",
-		TimeUnit: "unix_ms",
-		Columns:  []string{"dst", "dns", "source", "proto", "port", "first_ms"},
+		Version: 3,
+		Layout:  "dict_by_issuer",
+		Columns: []string{"dst", "dns", "source", "proto", "port"},
 		Dict: networkTopologyMatrixCompactDictionary{
 			Issuer: issuerDict.values,
 			Dst:    dstDict.values,

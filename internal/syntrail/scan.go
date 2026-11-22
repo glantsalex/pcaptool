@@ -370,6 +370,9 @@ func (c *Collector) Observe(packet gopacket.Packet) error {
 	if tcp != nil {
 		if c.fleetIdentity != nil {
 			record.FleetIdentity = c.fleetIdentity(record)
+			if record.FleetIdentity == "" {
+				return nil
+			}
 		}
 		record.hasSYNHeader, record.synSrcPort, record.synSeq = true, uint16(tcp.SrcPort), tcp.Seq
 		c.tcpRecords = append(c.tcpRecords, record)
@@ -381,6 +384,9 @@ func (c *Collector) Observe(packet gopacket.Packet) error {
 	if ok {
 		if c.fleetIdentity != nil {
 			record.FleetIdentity = c.fleetIdentity(record)
+			if record.FleetIdentity == "" {
+				return nil
+			}
 		}
 		if c.syslogEligible != nil && c.syslogEligible(record.SrcAddr(), record.DstAddr()) {
 			udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)

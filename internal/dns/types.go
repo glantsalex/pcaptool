@@ -57,6 +57,7 @@ type DNSTransaction struct {
 
 // Used during pass 1 to match queries/responses
 type TxKey struct {
+	Identity string
 	Issuer   string
 	SrcPort  uint16
 	Resolver string
@@ -69,6 +70,7 @@ type TxKey struct {
 // issuer(srcIP), issuer source port, resolver(dstIP), protocol, DNS ID.
 // DNS name is intentionally excluded here and used as an optional secondary hint.
 type txLookupKey struct {
+	Identity string
 	Issuer   string
 	SrcPort  uint16
 	Resolver string

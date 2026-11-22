@@ -78,8 +78,8 @@ func TestRadiusSubnetPipelineSharedAndSeparateScans(t *testing.T) {
 				t.Fatalf("incorrect IMSI count for %s: %s", ip, raw)
 			}
 		}
-		if endpoints["10.250.0.5"].Server.Listeners[0].UnresolvedFleetIPsCount != 1 {
-			t.Fatalf("missing unresolved coverage: %s", raw)
+		if endpoints["10.250.0.5"].Server.Listeners[0].UnresolvedFleetIPsCount != 0 {
+			t.Fatalf("retained unresolved fleet observations: %s", raw)
 		}
 		if len(endpoints["10.250.0.7"].Probe.Targets) != 1 || endpoints["10.250.0.7"].Probe.Targets[0].FleetDevicesCount != 1 {
 			t.Fatalf("probe not attributed: %s", raw)

@@ -85,7 +85,7 @@ func TestCollectorRecordEdgeObservationMatchesLegacyAtEveryStep(t *testing.T) {
 			var want []time.Time
 			for step, ts := range observations {
 				want = legacyMergeEdgeObservedTimes(want, ts)
-				c.recordEdgeObservation(key, ts)
+				c.recordEdgeObservation(key, ts, false)
 				got := slices.Collect((Edge{ObservedTimes: c.edges[key]}).ObservationTimes())
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("step %d timestamp %s: collector differs from legacy\n got: %#v\nwant: %#v", step, ts, got, want)
@@ -139,7 +139,7 @@ func TestCollectorExportedEdgesDoNotAliasOwnedTimestamps(t *testing.T) {
 	key := edgeKey{issuer: "10.0.0.1", dst: "198.51.100.10", proto: ProtoTCP, port: 443}
 	c := NewCollector(DefaultOptions())
 	for i := 0; i < maxEdgeObservedTimes; i++ {
-		c.recordEdgeObservation(key, base.Add(time.Duration(i)*time.Second))
+		c.recordEdgeObservation(key, base.Add(time.Duration(i)*time.Second), false)
 	}
 
 	edgesSnapshot := c.Edges()
@@ -156,9 +156,9 @@ func TestCollectorExportedEdgesDoNotAliasOwnedTimestamps(t *testing.T) {
 		t.Fatalf("mutating exported snapshot changed collector-owned first timestamp to %s", c.edges[key].At(0))
 	}
 
-	c.recordEdgeObservation(key, base.Add(-time.Second))
-	c.recordEdgeObservation(key, base.Add(63500*time.Millisecond))
-	c.recordEdgeObservation(key, base.Add(500*time.Second))
+	c.recordEdgeObservation(key, base.Add(-time.Second), false)
+	c.recordEdgeObservation(key, base.Add(63500*time.Millisecond), false)
+	c.recordEdgeObservation(key, base.Add(500*time.Second), false)
 	if !reflect.DeepEqual(edgesSnapshot[0].ObservedTimes, edgesBefore) {
 		t.Fatalf("collector updates mutated Edges snapshot\n got: %#v\nwant: %#v", edgesSnapshot[0].ObservedTimes, edgesBefore)
 	}
@@ -267,12 +267,12 @@ func BenchmarkCollectorRecordEdgeObservationSaturated(b *testing.B) {
 		b.Run(bm.name, func(b *testing.B) {
 			c := NewCollector(DefaultOptions())
 			for i := 0; i < maxEdgeObservedTimes; i++ {
-				c.recordEdgeObservation(key, base.Add(time.Duration(i)*time.Second))
+				c.recordEdgeObservation(key, base.Add(time.Duration(i)*time.Second), false)
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				c.recordEdgeObservation(key, bm.next(i))
+				c.recordEdgeObservation(key, bm.next(i), false)
 			}
 		})
 	}

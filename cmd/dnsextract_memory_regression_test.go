@@ -29,9 +29,9 @@ func TestDNSExtractManyFileArtifactsPreserveAttributionAndWorkerIndependence(t *
 	}
 	last := base.Add((fileCount - 1) * time.Minute)
 	wantTopology := []dns.TopologyEntry{
-		{IssuerIP: "10.0.0.1", DestinationIP: "198.51.100.10", DNSName: "tcp.example", DNSSource: "dns+synack", Protocol: "tcp", Port: 80, ObservedAt: last.Add(220 * time.Millisecond)},
+		{IssuerIP: "10.0.0.1", DestinationIP: "198.51.100.10", DNSName: "tcp.example", DNSSource: "dns+synack", Protocol: "tcp", Port: 80, ObservedAt: base.Add(220 * time.Millisecond)},
 		{IssuerIP: "10.0.0.1", DestinationIP: "198.51.100.10", DNSName: "tcp.example", DNSSource: "dns+synack", Protocol: "tcp", Port: 443, ObservedAt: base.Add(200 * time.Millisecond)},
-		{IssuerIP: "10.0.0.1", DestinationIP: "198.51.100.20", DNSName: "udp.example", DNSSource: "dns+synack", Protocol: "udp", Port: 3478, ObservedAt: last.Add(350 * time.Millisecond)},
+		{IssuerIP: "10.0.0.1", DestinationIP: "198.51.100.20", DNSName: "udp.example", DNSSource: "dns+synack", Protocol: "udp", Port: 3478, ObservedAt: base.Add(350 * time.Millisecond)},
 		{IssuerIP: "10.0.0.1", DestinationIP: "198.51.100.30", DNSSource: "mid-session", Protocol: "tcp", Port: 990, ObservedAt: last.Add(450 * time.Millisecond)},
 	}
 	writers := map[string]func(io.Writer) error{

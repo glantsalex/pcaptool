@@ -225,6 +225,9 @@ func extractIPAndIMSI(r *layers.RADIUS) (ip, imsi string) {
 	return ip, imsi
 }
 
+// IsIMSI recognizes the canonical subscriber labels emitted by the RADIUS index.
+func IsIMSI(label string) bool { return imsiDigitsRe.MatchString(label) }
+
 func canonicalIMSI(s string) string {
 	// Trim whitespace and NULs
 	s = strings.TrimSpace(strings.Trim(s, "\x00"))
@@ -245,7 +248,7 @@ func canonicalIMSI(s string) string {
 	out := string(b)
 
 	// IMSIs are typically 15, sometimes 14/16 with MVNO quirks; enforce band.
-	if imsiDigitsRe.MatchString(out) {
+	if IsIMSI(out) {
 		return out
 	}
 	return ""

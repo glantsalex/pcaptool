@@ -10,9 +10,11 @@ package dns
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +38,12 @@ func (p hostnamePool) share(name string) string {
 	}
 	p[name] = name
 	return name
+}
+
+// CollectDNS reads device DNS transactions and the answer evidence used by the
+// following connection pass. TCP DNS is independent of ClientHello extraction.
+func CollectDNS(ctx context.Context, files []string, admit pcaputil.PacketAdmission, facts *FactCollection) ([]*DNSTransaction, time.Time, []TruncatedDNSPacket, error) {
+	return BuildTransactionsWithSNIFromPCAPsWithOptions(ctx, files, false, true, PacketScanOptions{Facts: facts, PacketAdmission: admit})
 }
 
 // BuildTransactionsWithSNIFromPCAPs performs a single corpus scan that always extracts:
@@ -87,6 +95,8 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 		file                string
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	fileCh := make(chan string)
 	resCh := make(chan fileResult)
 
@@ -104,7 +114,7 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 					path,
 					includeSNI,
 					collectTruncatedDNS,
-					opt.PacketAdmission,
+					opt,
 				)
 				resCh <- fileResult{
 					txMap:               txMap,
@@ -120,7 +130,12 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 
 	go func() {
 		for _, path := range files {
-			fileCh <- path
+			select {
+			case fileCh <- path:
+			case <-ctx.Done():
+				close(fileCh)
+				return
+			}
 		}
 		close(fileCh)
 	}()
@@ -146,13 +161,22 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 		totalFiles     = len(files)
 	)
 
+	stage := "DNS"
+	if includeSNI {
+		stage = "DNS+SNI"
+	}
+	var firstErr error
 	for res := range resCh {
 		if res.err != nil {
-			return nil, time.Time{}, nil, res.err
+			if firstErr == nil {
+				firstErr = res.err
+				cancel()
+			}
+			continue
 		}
 
 		doneFiles++
-		progress.UpdateBar(doneFiles, totalFiles, "DNS+SNI "+filepath.Base(res.file))
+		progress.UpdateBar(doneFiles, totalFiles, stage+" "+filepath.Base(res.file))
 
 		if !res.earliest.IsZero() && (firstEarliest || res.earliest.Before(globalEarliest)) {
 			globalEarliest = res.earliest
@@ -208,6 +232,12 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 		truncatedDNSPackets = append(truncatedDNSPackets, res.truncatedDNSPackets...)
 	}
 
+	if firstErr == nil {
+		firstErr = ctx.Err()
+	}
+	if firstErr != nil {
+		return nil, time.Time{}, nil, firstErr
+	}
 	// Convert globalMap to slice
 	var txs []*DNSTransaction
 	for _, bucket := range globalMap {
@@ -257,7 +287,7 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 		return a.Reason < b.Reason
 	})
 
-	progress.UpdateBar(totalFiles, totalFiles, "DNS+SNI scan complete")
+	progress.UpdateBar(totalFiles, totalFiles, stage+" scan complete")
 	return txs, globalEarliest, truncatedDNSPackets, nil
 }
 
@@ -266,7 +296,7 @@ func scanDNSAndSNIInFile(
 	path string,
 	includeSNI bool,
 	collectTruncatedDNS bool,
-	admit pcaputil.PacketAdmission,
+	opt PacketScanOptions,
 ) (map[TxKey][]*DNSTransaction, []*DNSTransaction, []TruncatedDNSPacket, time.Time, error) {
 	handle, err := pcap.OpenOffline(path)
 	if err != nil {
@@ -281,43 +311,41 @@ func scanDNSAndSNIInFile(
 	src.NoCopy = true
 
 	dnsEx := newDNSExtractorWithDiagnostics(collectTruncatedDNS)
+	dnsEx.facts = opt.Facts
 	var sniEx *sniExtractor
 	if includeSNI {
 		sniEx = newSNIExtractor()
 	}
 
-	packets := src.Packets()
+	base := filepath.Base(path)
+	compatible := interfaceReadRecovery(handle)
 	for {
-		select {
-		case <-ctx.Done():
-			return nil, nil, nil, time.Time{}, ctx.Err()
-
-		case pkt, ok := <-packets:
-			if !ok {
-				// EOF
-				earliest := dnsEx.Earliest()
-				if sniEx != nil {
-					if s := sniEx.Earliest(); !s.IsZero() && (earliest.IsZero() || s.Before(earliest)) {
-						earliest = s
-					}
-				}
-				var sniTxs []*DNSTransaction
-				if sniEx != nil {
-					sniTxs = sniEx.Slice()
-				}
-				return dnsEx.Map(), sniTxs, dnsEx.TruncatedDNSPackets(), earliest, nil
-			}
-			if !isDNSOrSNIPacket(pkt, includeSNI) || (admit != nil && !admit(pkt)) || pcaputil.InvalidTCPHeader(pkt) {
-				continue
-			}
-
-			base := filepath.Base(path)
-
-			// Feed both extractors (each will early-return quickly if irrelevant)
-			dnsEx.OnPacket(pkt, base)
+		pkt, err := nextPacketForSharedScan(ctx, src, compatible)
+		if err != nil && err != io.EOF {
+			return nil, nil, nil, time.Time{}, fmt.Errorf("scan DNS %s: %w", path, err)
+		}
+		if err == io.EOF {
+			// EOF
+			earliest := dnsEx.Earliest()
 			if sniEx != nil {
-				sniEx.OnPacket(pkt, base)
+				if s := sniEx.Earliest(); !s.IsZero() && (earliest.IsZero() || s.Before(earliest)) {
+					earliest = s
+				}
 			}
+			var sniTxs []*DNSTransaction
+			if sniEx != nil {
+				sniTxs = sniEx.Slice()
+			}
+			return dnsEx.Map(), sniTxs, dnsEx.TruncatedDNSPackets(), earliest, nil
+		}
+		if !isDNSOrSNIPacket(pkt, includeSNI) || (opt.PacketAdmission != nil && !opt.PacketAdmission(pkt)) || pcaputil.InvalidTCPHeader(pkt) {
+			continue
+		}
+
+		// Feed both extractors (each will early-return quickly if irrelevant)
+		dnsEx.OnPacket(pkt, base)
+		if sniEx != nil {
+			sniEx.OnPacket(pkt, base)
 		}
 	}
 }
@@ -336,11 +364,31 @@ func isDNSOrSNIPacket(pkt gopacket.Packet, includeSNI bool) bool {
 		return false
 	}
 	if protocol == layers.IPProtocolTCP {
-		return includeSNI
+		tcp, ok := pkt.TransportLayer().(*layers.TCP)
+		return ok && (includeSNI || tcp.SrcPort == 53 || tcp.DstPort == 53)
 	}
 	if protocol != layers.IPProtocolUDP {
 		return false
 	}
 	udp, ok := pkt.TransportLayer().(*layers.UDP)
 	return ok && (udp.SrcPort == 53 || udp.DstPort == 53)
+}
+
+// interfaceReadRecovery handles the two libpcap errors caused by skipping an
+// incompatible PCAPNG link type. Other read failures invalidate the capture.
+func interfaceReadRecovery(handle *pcap.Handle) func(error) error {
+	skipped := false
+	return func(err error) error {
+		detail := handle.Error()
+		if detail != nil {
+			if strings.Contains(detail.Error(), "different from the type of the first interface") {
+				skipped = true
+				return nil
+			}
+			if skipped && strings.Contains(detail.Error(), "no Interface Description Block") {
+				return nil
+			}
+		}
+		return fmt.Errorf("%w: %v", err, detail)
+	}
 }

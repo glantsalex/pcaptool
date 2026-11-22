@@ -13,6 +13,8 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+
+	"github.com/aglants/pcaptool/internal/radius"
 )
 
 const (
@@ -40,7 +42,7 @@ type ServiceEndpoint struct {
 //   - include destination IPv4 with non-zero port
 //   - dedupe by (ip,dns,protocol,port)
 //   - observed_at is earliest timestamp among duplicates (unix ms)
-//   - peers_count is number of unique non-public IPv4 issuers that talked to that endpoint
+//   - peers_count is number of unique IMSIs or non-public IPv4 issuers that talked to that endpoint
 //   - when no real DNS exists for an (ip,protocol,port) tuple:
 //   - public IPs use [no-dns-attribution]
 //   - non-public IPs use [private-server]
@@ -144,6 +146,9 @@ func BuildServiceEndpoints(entries []TopologyEntry) []ServiceEndpoint {
 
 		issuer, ok := canonicalIPv4String(e.IssuerIP)
 		if !ok {
+			if radius.IsIMSI(e.IssuerIP) {
+				cur.peers[e.IssuerIP] = struct{}{}
+			}
 			continue
 		}
 		issuerAddr, err := netip.ParseAddr(issuer)

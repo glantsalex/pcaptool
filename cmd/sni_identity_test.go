@@ -60,7 +60,7 @@ func TestSNITimedIdentityPipeline(t *testing.T) {
 				got[row["issuer_ip"].(string)]++
 			}
 		}
-		want := map[string]int{"323456789012345": 1, "423456789012345": 1, "523456789012345": 1, "10.181.2.10": 1}
+		want := map[string]int{"323456789012345": 1, "423456789012345": 1, "523456789012345": 1}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("mode=%+v SNI owners=%v, want %v", mode, got, want)
 		}

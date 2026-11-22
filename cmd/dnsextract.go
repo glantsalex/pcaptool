@@ -9,9 +9,11 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -75,7 +77,7 @@ func newDNSExtractCommandWithExecutor(opts *DNSExtractOptions, executor dnsExtra
 	cmd.Flags().StringVar(&opts.Format, "format", defaults.Format, "Output format: table|json")
 	cmd.Flags().StringVar(&opts.ExportCSV, "export-csv", defaults.ExportCSV, "Optional CSV export path (relative paths are placed under the run output directory)")
 	cmd.Flags().BoolVarP(&opts.ConnectivityShort, "short", "s", defaults.ConnectivityShort,
-		"write a short connectivity matrix (one row per issuer/DNS/port, ignoring multiple IPs)")
+		"Accepted for existing configurations. All matrix formats preserve every device/service key.")
 	cmd.Flags().BoolVar(&opts.RadiusIMSI, "radius-imsi", defaults.RadiusIMSI,
 		"map issuer IPs to IMSI using RADIUS Accounting records")
 	cmd.Flags().BoolVar(&opts.OnlyTCP, "only-tcp", defaults.OnlyTCP,
@@ -90,7 +92,7 @@ func newDNSExtractCommandWithExecutor(opts *DNSExtractOptions, executor dnsExtra
 		&opts.AllowPrivateDNSDonation,
 		"allow-private-dns-donation",
 		defaults.AllowPrivateDNSDonation,
-		"Allow direct DNS/SNI topology donation for exact private destination IP/protocol/port tuples.",
+		"Accepted for existing configurations. Named contacts cover the same device and exact transport for all destinations.",
 	)
 	cmd.Flags().BoolVar(
 		&opts.IgnoreNTP,
@@ -169,13 +171,13 @@ func newDNSExtractCommandWithExecutor(opts *DNSExtractOptions, executor dnsExtra
 		&opts.DisableSNI,
 		"disable-sni",
 		defaults.DisableSNI,
-		"Disable TLS SNI extraction in pass 2 (speeds up truncated/offline workloads by skipping TCP ClientHello scan).",
+		"Skip TLS ClientHello extraction during connection processing.",
 	)
 	cmd.Flags().BoolVar(
 		&opts.Unsorted,
 		"unsorted",
 		defaults.Unsorted,
-		"Keep network topology matrix in natural first-seen issuer order instead of sorting by endpoint count and DNS name.",
+		"Accepted for existing configurations. Device/service rows use deterministic key order.",
 	)
 	cmd.Flags().BoolVar(
 		&opts.Debug,
@@ -328,21 +330,27 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	}
 
 	// --------------------------------------------------------------------
-	// Pass 2: DNS + TLS SNI in one corpus scan (extractors)
+	// Pass 2: DNS evidence, scoped to the device at the packet timestamp.
 	// --------------------------------------------------------------------
 	diagnostic.Checkpoint("dns_scan", map[string]int{"capture_files": len(files)}, false)
-	if opts.DisableSNI {
-		progress.SetStage("Pass 2: scanning DNS (SNI disabled)...")
-	} else {
-		progress.SetStage("Pass 2: scanning DNS + TLS SNI...")
+	progress.SetStage("Pass 2: scanning DNS...")
+	sharedAddressSpace := netip.MustParsePrefix("100.64.0.0/10")
+	resolveDevice := func(ip netip.Addr, ts time.Time) string {
+		ip = ip.Unmap()
+		if !ip.Is4() || (fleet != nil && !fleet.Contains(ip)) {
+			return ""
+		}
+		if opts.RadiusIMSI {
+			id, _ := imsiIndex.LookupAddr(ip, ts)
+			return id
+		}
+		if ip.IsPrivate() || sharedAddressSpace.Contains(ip) {
+			return ip.String()
+		}
+		return ""
 	}
-	txs, pass2Earliest, truncatedDNSPackets, err := dns.BuildTransactionsWithSNIFromPCAPsWithOptions(
-		ctx,
-		files,
-		!opts.DisableSNI,
-		true,
-		dns.PacketScanOptions{PacketAdmission: packetAdmission},
-	)
+	facts := dns.NewFactCollection(resolveDevice, !opts.DisableSNI, opts.TopologyDNSWindow)
+	txs, pass2Earliest, truncatedDNSPackets, err := dns.CollectDNS(ctx, files, packetAdmission, facts)
 	if err != nil {
 		return err
 	}
@@ -389,21 +397,8 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 		}
 	}
 	useSharedFleetScan := fleet != nil && opts.FleetScanWorkers == 0 && canUseSharedFleetScan(files)
-	connectionScanOpt := dns.PacketScanOptions{PacketAdmission: packetAdmission}
-	if opts.RadiusIMSI {
-		// The completed Pass 1 index is immutable. Resolve identity before
-		// either per-file or global edge timestamp limits can discard an owner.
-		connectionScanOpt.IssuerIdentity = func(ip string, ts time.Time) string {
-			if imsiIndex != nil {
-				if addr, err := netip.ParseAddr(ip); err == nil {
-					if imsi, ok := imsiIndex.LookupAddr(addr.Unmap(), ts); ok {
-						return imsi
-					}
-				}
-			}
-			return ip
-		}
-	}
+	facts.Prepare(txs, ipToDNS, opts.InferDNSFromConnections)
+	connectionScanOpt := dns.PacketScanOptions{PacketAdmission: packetAdmission, Facts: facts}
 	var sharedFleetAccumulator *syntrail.Accumulator
 	var sharedFleetOptions syntrail.ScanOptions
 	var fleetCompatibilityRereads atomic.Int64
@@ -448,7 +443,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 		}
 	}
 	diagnostic.Checkpoint("connection_scan", nil, false)
-	edges, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
+	_, firstPktInfo, err := dns.AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		ctx,
 		files,
 		txs,
@@ -464,7 +459,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	if err != nil {
 		return err
 	}
-	diagnostic.Checkpoint("connection_scan_complete", map[string]int{"transactions": len(txs), "edges": len(edges)}, true)
+	diagnostic.Checkpoint("connection_scan_complete", map[string]int{"transactions": len(txs), "facts": facts.Len()}, true)
 	if count := fleetCompatibilityRereads.Load(); count > 0 {
 		progress.SetStage(fmt.Sprintf("Fleet evidence compatibility rereads: %d file(s).", count))
 	}
@@ -526,26 +521,6 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	// --------------------------------------------------------------------
 	// Identity mapping: default issuer label = IP, optional RADIUS IMSI
 	// --------------------------------------------------------------------
-	for _, tx := range txs {
-		if tx.IssuerIP != nil {
-			tx.IssuerLabel = tx.IssuerIP.String()
-		} else {
-			tx.IssuerLabel = ""
-		}
-	}
-
-	if opts.RadiusIMSI && imsiIndex != nil {
-		progress.SetStage("Mapping issuer IPs to IMSI...")
-		for _, tx := range txs {
-			if tx.IssuerIP == nil {
-				continue
-			}
-			if imsi, ok := imsiIndex.Lookup(tx.IssuerIP, tx.RequestTime); ok && imsi != "" {
-				tx.IssuerLabel = imsi
-			}
-		}
-	}
-
 	diagnostic.Checkpoint("topology_output", nil, true)
 	progress.SetStage("Preparing records for output...")
 
@@ -610,20 +585,10 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	// ---------------------------
 	// Extra report: network topology matrix (issuer → dstIP → DNSName? → proto → port)
 	// ---------------------------
-	issuerFn := func(ip string, ts time.Time) string {
-		// Default: use IP
-		if connectionScanOpt.IssuerIdentity != nil {
-			return connectionScanOpt.IssuerIdentity(ip, ts)
-		}
-		return ip
-	}
+	topo := facts.Take(ftpPassiveMinPort, ftpControlPorts)
 	var learnedAudit []dns.IPDNSAppendAuditRecord
 	var learnedNewPairs []dns.IPDNSPair
 
-	topoOpt := dns.DefaultTopologyBuildOptions()
-	topoOpt.MaxDNSAge = opts.TopologyDNSWindow
-	topoOpt.SortOutput = !opts.Unsorted
-	topo := dns.BuildNetworkTopologyMatrixEntriesWithOptions(txs, edges, issuerFn, ipToDNS, topoOpt)
 	var dnsNormalizationAudit []dns.DNSNormalizationAudit
 	if strings.TrimSpace(opts.DNSNormalizationRules) != "" {
 		rules, err := dns.LoadDNSNormalizationRules(opts.DNSNormalizationRules)
@@ -632,6 +597,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 			return fmt.Errorf("load --dns-normalization-rules: %w", err)
 		}
 		topo, dnsNormalizationAudit = dns.ApplyDNSNormalization(opts.NetID, topo, rules)
+		topo = dns.UniqueFacts(topo)
 	}
 	if strings.TrimSpace(opts.DNSIPFile) != "" {
 		learned := dns.StrongObservedIPDNSPairsFromTopology(topo)
@@ -647,9 +613,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 		}
 		ipToDNS = merged
 	}
-	if opts.ConnectivityShort {
-		topo = dns.SquashNetworkTopologyShortWithOptions(topo, !opts.Unsorted)
-	}
+	// The full device/service key is required even when the historical short display option is set.
 
 	// Compute packet/topology unresolved names before optional active matrix
 	// completion so every packet-unresolved name remains eligible for lookup.
@@ -671,7 +635,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 				return fmt.Errorf("active resolve for matrix completion: %w", err)
 			}
 			beforeActive := topo
-			topo = dns.CompleteTopologyWithActiveDNS(topo, resolvedNames)
+			topo = dns.CompleteFactsWithActiveDNS(topo, resolvedNames, txs, opts.TopologyDNSWindow)
 			activeResolveRecords = annotateActiveResolveRecords(records, beforeActive, topo)
 		}
 		activeResolveLogPath, err = writeActiveResolveLog(om, activeResolveRecords, activeResolveOpt)
@@ -679,10 +643,6 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 			return err
 		}
 	}
-	topo = dns.CompleteTopologyWithDNSDonationWithOptions(topo, dns.DNSDonationOptions{
-		AllowPrivateDestinations: opts.AllowPrivateDNSDonation,
-	})
-	topo = dns.CompleteTopologyWithFreshIPDNSDonation(topo)
 	// The artifact reflects final topology attribution, including active matrix
 	// completion and conservative DNS donation.
 	unresolvedFinal = dns.FilterUnresolvedByTopologyAttribution(unresolvedFinal, topo)
@@ -764,11 +724,14 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 		))
 	}
 
+	if opts.ActiveResolve || opts.ReverseDNSLookup || opts.TLSCertLookup {
+		topo = dns.UniqueFacts(topo)
+	}
 	networkTopologyPath := ""
 	networkTopologyJSONPath := ""
 	networkTopologyCompactJSONPath := ""
 	uniqueDNSPortProtoPath := ""
-	if len(topo) > 0 {
+	{
 		mf, err := om.Create("network-topology-matrix.txt")
 		if err != nil {
 			return fmt.Errorf("create network topology matrix: %w", err)
@@ -787,10 +750,21 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 		defer mjf.Close()
 		networkTopologyJSONPath = mjf.Name()
 
-		if err := output.WriteNetworkTopologyMatrixJSON(mjf, topo); err != nil {
+		matrixHash := sha256.New()
+		if err := output.WriteNetworkTopologyMatrixJSON(io.MultiWriter(mjf, matrixHash), topo); err != nil {
 			return fmt.Errorf("write network topology matrix json: %w", err)
 		}
 
+		// PTI applies fleet/rule filtering before computing the earliest real
+		// observation per endpoint. Bind its parallel timing array to this exact matrix.
+		tf, err := om.Create("topology-ingestion-times.json")
+		if err != nil {
+			return err
+		}
+		err = output.WriteTopologyIngestionTimes(tf, matrixHash.Sum(nil), topo)
+		if err = errors.Join(err, tf.Close()); err != nil {
+			return err
+		}
 		mcjf, err := om.Create("network-topology-matrix.compact.json")
 		if err != nil {
 			return fmt.Errorf("create compact network topology matrix json: %w", err)
@@ -940,6 +914,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	}
 	if networkTopologyJSONPath != "" {
 		filesMap["network_topology_matrix_json"] = networkTopologyJSONPath
+		filesMap["topology_ingestion_times"] = om.Path("topology-ingestion-times.json")
 	}
 	if networkTopologyCompactJSONPath != "" {
 		filesMap["network_topology_matrix_compact"] = networkTopologyCompactJSONPath

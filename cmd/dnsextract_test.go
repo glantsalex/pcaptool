@@ -504,9 +504,6 @@ func TestDnsextractFleetAdmissionNoMatchUsesUnknownMetadataAndPreservesGating(t 
 
 	for _, key := range []string{
 		"dns_issuer_profile",
-		"network_topology_matrix",
-		"network_topology_matrix_json",
-		"network_topology_matrix_compact",
 		"dns_unresolved_dns",
 		"external_endpoints",
 		"unresolved_ip",
@@ -522,7 +519,7 @@ func TestDnsextractFleetAdmissionNoMatchUsesUnknownMetadataAndPreservesGating(t 
 			t.Fatalf("manifest key %q present=%v, want %v", artifact.key, present, wantPresent)
 		}
 	}
-	for _, key := range []string{"main_output", "service_endpoints", "unique_dns_port_proto", "truncated_dns_packets"} {
+	for _, key := range []string{"main_output", "service_endpoints", "unique_dns_port_proto", "truncated_dns_packets", "network_topology_matrix", "network_topology_matrix_json", "network_topology_matrix_compact", "topology_ingestion_times"} {
 		if path := manifest.Files[key]; path == "" {
 			t.Fatalf("always-written manifest key %q missing", key)
 		}
@@ -1121,7 +1118,7 @@ func TestActiveResolveFiltersFinalUnresolvedWritesCompactMatrixWithoutMutatingDN
 	if err := json.Unmarshal(compactMatrixBytes, &compactMatrix); err != nil {
 		t.Fatalf("unmarshal compact network topology matrix: %v", err)
 	}
-	if compactMatrix.Version != 2 || compactMatrix.Layout != "dict_by_issuer" {
+	if compactMatrix.Version != 3 || compactMatrix.Layout != "dict_by_issuer" {
 		t.Fatalf("compact matrix metadata = %#v", compactMatrix)
 	}
 	manifestBytes, err := os.ReadFile(filepath.Join(runDir, "_run-artifacts.json"))

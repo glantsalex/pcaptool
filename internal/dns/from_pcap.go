@@ -81,6 +81,7 @@ type PacketFileObserverFactory func(fileIndex int, path string) PacketFileObserv
 // PacketScanOptions controls packet admission and optional observation for
 // PCAP processing. Nil fields preserve the historical connection-scan path.
 type PacketScanOptions struct {
+	Facts *FactCollection
 	// IssuerIdentity partitions connection observations before bounded pruning.
 	// The resolver must be immutable/concurrency safe; nil retains legacy behavior.
 	IssuerIdentity func(string, time.Time) string
@@ -333,14 +334,18 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 	ftpPassiveMinPort uint16,
 	scanOpt PacketScanOptions,
 ) ([]connectivity.Edge, FirstPacketInfo, error) {
+	if scanOpt.Facts != nil {
+		scanOpt.IssuerIdentity = scanOpt.Facts.resolveWire
+	}
 	if ftpPassiveMinPort == 0 {
 		ftpPassiveMinPort = connectivity.DefaultOptions().FTPPassiveMinPort
 	}
 	index := BuildTxnIndex(txs)
 
 	// issuer -> txs sorted by RequestTime (for conservative fallback matching)
-	issuerTxs := make(map[string][]*DNSTransaction, 4096)
-	if inferDNSFromConnections {
+	var issuerTxs map[string][]*DNSTransaction
+	if inferDNSFromConnections && scanOpt.Facts == nil {
+		issuerTxs = make(map[string][]*DNSTransaction)
 		for _, tx := range txs {
 			// Skip already-finalized (e.g., synthetic SNI txs)
 			if tx.DestinationPort != nil && *tx.DestinationPort > 0 {
@@ -370,7 +375,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		fromFallback bool // true if issuer-only fallback matched (no direct issuer+dstIP match)
 	}
 
-	updates := make(chan update, 4096)
+	updates := make(chan update, min(len(txs), 4096))
 
 	// --- DNS correlation aggregator (existing behavior + evidence marking) ---
 	var aggWG sync.WaitGroup
@@ -378,7 +383,18 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 	go func() {
 		defer aggWG.Done()
 		for u := range updates {
-			if len(u.tx.Candidates) < maxCandidatesPerTX {
+			if scanOpt.Facts != nil {
+				if !onlyTCP || u.cand.Proto == L4ProtoTCP {
+					if len(u.tx.Candidates) == 0 {
+						u.tx.Candidates = append(u.tx.Candidates, u.cand)
+					} else {
+						old := u.tx.Candidates[0]
+						if u.cand.DT < old.DT || (u.cand.DT == old.DT && (u.cand.Proto < old.Proto || (u.cand.Proto == old.Proto && u.cand.Port < old.Port))) {
+							u.tx.Candidates[0] = u.cand
+						}
+					}
+				}
+			} else if len(u.tx.Candidates) < maxCandidatesPerTX {
 				u.tx.Candidates = append(u.tx.Candidates, u.cand)
 			}
 
@@ -425,7 +441,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 							debugDNSFallbackf("backfilled-ip issuer=%s name=%q ip=%s ev=%s", u.tx.IssuerIP, u.tx.DNSName, key, EvidenceString(u.tx.resolvedIPEvidenceValue(key)))
 						}
 					}
-					if !u.fromFallback && u.tx.hasResolvedIPEvidence() && u.tx.resolvedIPEvidenceValue(key)&EvDNSAnswer != 0 {
+					if scanOpt.Facts == nil && !u.fromFallback && u.tx.hasResolvedIPEvidence() && u.tx.resolvedIPEvidenceValue(key)&EvDNSAnswer != 0 {
 						u.tx.AddObservedEndpointBinding(ObservedEndpointBinding{
 							DstIP:      key,
 							Protocol:   u.cand.Proto,
@@ -494,6 +510,16 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		// One collector per file (no locks); merged after file completes.
 		opt := connectivity.DefaultOptions()
 		opt.IssuerIdentity = scanOpt.IssuerIdentity
+		var localFacts factSet
+		var namedHello bool
+		if facts := scanOpt.Facts; facts != nil {
+			localFacts = make(factSet)
+			opt.Contact = func(device, wire, dst string, p connectivity.L4Proto, port uint16, ts time.Time, confirmed bool) {
+				if !namedHello {
+					facts.contact(localFacts, device, wire, dst, p, port, ts, confirmed)
+				}
+			}
+		}
 		opt.ExcludedDstPorts = excludePorts
 		opt.EnforcePrivateAsSource = enforcePrivateAsSource
 		opt.FTPControlPorts = ftpControlPorts
@@ -518,7 +544,8 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		)
 
 		var packets <-chan gopacket.Packet
-		if scanOpt.NewFileObserver == nil {
+		compatible := interfaceReadRecovery(handle)
+		if scanOpt.NewFileObserver == nil && scanOpt.Facts == nil {
 			packets = source.Packets()
 		}
 	packetLoop:
@@ -532,13 +559,13 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 				default:
 				}
 				nextPacket, err := nextPacketForSharedScan(scanCtx, source, func(readErr error) error {
+					if fileObserver.OnReadError == nil {
+						return compatible(readErr)
+					}
 					if readErrorValidated {
 						return nil
 					}
 					readErrorValidated = true
-					if fileObserver.OnReadError == nil {
-						return readErr
-					}
 					return fileObserver.OnReadError(scanCtx, readErr)
 				})
 				if err == io.EOF {
@@ -593,9 +620,16 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 			}
 
 			// --- NEW: collect topology edges (IPv4-only, per requirements) ---
+			if scanOpt.Facts != nil {
+				namedHello = scanOpt.Facts.hello(localFacts, packet, excludePorts, coll)
+			}
 			coll.OnPacket(packet, ts)
 
-			// --- Existing DNS correlation logic (with safe fallback) ---
+			if len(txs) == 0 {
+				continue
+			}
+
+			// Correlate actual DNS transactions for the independent DNS reports.
 			ip4 := packet.Layer(layers.LayerTypeIPv4)
 			ip6 := packet.Layer(layers.LayerTypeIPv6)
 			if ip4 == nil && ip6 == nil {
@@ -647,7 +681,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 				proto = L4ProtoUDP
 			}
 
-			if !isConn {
+			if _, excluded := excludePorts[dstPort]; !isConn || excluded {
 				continue
 			}
 
@@ -671,9 +705,13 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 				}
 
 				// HARDENING #2: TCP issuer-only fallback only if exactly one unresolved tx exists in window.
-				list := issuerTxs[srcIPStr]
 				eligibleCnt, unresCnt := 0, 0
-				tx, eligibleCnt, unresCnt = pickFallbackTxUniq(list, ts, maxConnDelay)
+				if facts := scanOpt.Facts; facts != nil {
+					tx, unresCnt = facts.pendingQuery(facts.resolveWire(srcIPStr, ts), ts)
+					eligibleCnt = unresCnt
+				} else {
+					tx, eligibleCnt, unresCnt = pickFallbackTxUniq(issuerTxs[srcIPStr], ts, maxConnDelay)
+				}
 				if tx == nil {
 					// Ambiguous issuer-only window -> do not backfill conn IP into any DNS name.
 					if debugDNSFallback {
@@ -684,8 +722,8 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 				}
 				fromFallback = true
 				if debugDNSFallback {
-					debugDNSFallbackf("fallback-selected issuer=%s name=%q resolver=%v dst=%s:%d proto=%s dt=%s eligible=%d unresolved=%d resolvedIPs=%d",
-						srcIPStr, tx.DNSName, tx.ResolverIP, dstIPStr, dstPort, proto, ts.Sub(tx.RequestTime), eligibleCnt, unresCnt, tx.ResolvedIPCount())
+					debugDNSFallbackf("fallback-selected issuer=%s name=%q resolver=%v dst=%s:%d proto=%s dt=%s eligible=%d unresolved=%d",
+						srcIPStr, tx.DNSName, tx.ResolverIP, dstIPStr, dstPort, proto, ts.Sub(tx.RequestTime), eligibleCnt, unresCnt)
 				}
 			} else {
 				continue
@@ -706,7 +744,12 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 
 			// A previous lease owner's DNS/SNI is not evidence for this device.
 			// RequestTime and IssuerIP are immutable during parallel correlation.
-			if resolve := scanOpt.IssuerIdentity; resolve != nil {
+			if facts := scanOpt.Facts; facts != nil {
+				device := facts.resolveWire(srcIPStr, ts)
+				if device == "" || tx.IssuerLabel != device {
+					continue
+				}
+			} else if resolve := scanOpt.IssuerIdentity; resolve != nil {
 				identityAt := func(at time.Time) string {
 					if identity := resolve(srcIPStr, at); identity != "" {
 						return identity
@@ -772,19 +815,34 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		// Progress update (files completed)
 		done := int(atomic.AddInt64(&filesDone, 1))
 		progress.UpdateBar(done, totalFiles, "connections "+filepath.Base(path))
+		if scanOpt.Facts != nil {
+			return orderedFileScanOutput{afterEdges: func() {
+				localFacts.each(scanOpt.Facts.facts.add)
+				if fileObserver.Commit != nil {
+					fileObserver.Commit()
+				}
+			}}, nil
+		}
 		return orderedFileScanOutput{
 			edges:      coll.EdgesByFirstSeen(),
 			afterEdges: fileObserver.Commit,
 		}, nil
 	}
 
-	edgeAccumulator := newEdgeAccumulator()
+	var edgeAccumulator edgeAccumulator
+	if scanOpt.Facts == nil {
+		edgeAccumulator = *newEdgeAccumulator()
+	}
 	_, scanErr := runBoundedOrderedFileScans(ctx, totalFiles, workers, scanFile, edgeAccumulator.merge)
 
 	close(updates)
 	aggWG.Wait()
 
 	if scanErr != nil {
+		if scanOpt.Facts != nil {
+			scanOpt.Facts.facts = nil
+			scanOpt.Facts.releaseDNS()
+		}
 		return nil, FirstPacketInfo{}, scanErr
 	}
 	firstPkt.FirstFilePacketTimestamp = firstFilePacketTimestamp
@@ -814,6 +872,9 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		tx.Candidates = nil
 	}
 
+	if scanOpt.Facts != nil {
+		scanOpt.Facts.releaseDNS()
+	}
 	out := edgeAccumulator.edges()
 	out = suppressMergedFTPPassiveEdges(out, ftpPassiveMinPort, ftpControlPorts)
 	return out, firstPkt, nil
