@@ -434,3 +434,19 @@ func legacyFlattenEdgeBatches(batches [][]connectivity.Edge) []connectivity.Edge
 	}
 	return out
 }
+
+func TestCoordinatorOwnsHistoryAcrossFileMerges(t *testing.T) {
+	base := time.Unix(0, 0).UTC()
+	var times []time.Time
+	for i := 0; i < 128; i++ {
+		times = append(times, base.Add(time.Duration(i)))
+	}
+	first := connectivity.Edge{ObservedTimes: connectivity.NewObservationHistory(times...), FirstSeen: base}
+	second := connectivity.Edge{ObservedTimes: connectivity.NewObservationHistory(base.Add(-1))}
+	acc := newEdgeAccumulator()
+	acc.merge([]connectivity.Edge{first})
+	acc.merge([]connectivity.Edge{second})
+	if !acc.edges()[0].FirstSeen.Equal(base.Add(-1)) || !first.ObservedTimes.At(0).Equal(base) {
+		t.Fatal("coordinator must update its own history without changing the input batch")
+	}
+}

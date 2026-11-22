@@ -70,13 +70,18 @@ func (h *ObservationHistory) addNano(n int64) {
 	}
 }
 
-// Merged returns an independent bounded union.
-func (h ObservationHistory) Merged(other ObservationHistory) ObservationHistory {
-	out := h.Clone()
-	for i := 0; i < other.Len(); i++ {
-		out.add(other.At(i))
+// MergeOwned adds a disjoint input history to a receiver whose backing storage
+// the caller exclusively owns. At saturation, compact histories update in place.
+func (h *ObservationHistory) MergeOwned(other ObservationHistory) {
+	if h.wide == nil && other.wide == nil {
+		for _, n := range other.nanos {
+			h.addNano(n)
+		}
+		return
 	}
-	return out
+	for i := 0; i < other.Len(); i++ {
+		h.add(other.At(i))
+	}
 }
 
 // ObservationTimes yields the edge's retained instants in order. Older callers

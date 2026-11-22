@@ -36,3 +36,34 @@ func TestObservationHistoryAcrossNanoLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestOwnedMergeMatchesIndependentUnion(t *testing.T) {
+	for _, start := range []time.Time{time.Unix(0, -100), minNanoTime.Add(-1000), maxNanoTime.Add(-50)} {
+		var left, right []time.Time
+		for i := 0; i < 128; i++ {
+			left = append(left, start.Add(time.Duration(i*3)))
+			right = append(right, start.Add(time.Duration(i*2-5)))
+		}
+		dst, src := NewObservationHistory(left...), NewObservationHistory(right...)
+		srcBefore := src.Clone()
+		want := legacyMergeEdgeObservedTimes(legacyMergeEdgeObservedTimes(nil, left...), right...)
+		dst.MergeOwned(src)
+		got := slices.Collect((Edge{ObservedTimes: dst}).ObservationTimes())
+		if !slices.Equal(got, want) || !reflect.DeepEqual(src, srcBefore) {
+			t.Fatalf("incorrect owned merge at %v", start)
+		}
+	}
+}
+
+func TestSaturatedCompactMergeReusesStorage(t *testing.T) {
+	var history ObservationHistory
+	for i := 0; i < 128; i++ {
+		history.add(time.Unix(0, int64(i)))
+	}
+	before := &history.nanos[0]
+	source := NewObservationHistory(time.Unix(0, -1), time.Unix(0, 129))
+	history.MergeOwned(source)
+	if &history.nanos[0] != before || history.At(0).UnixNano() != -1 || history.At(127).UnixNano() != 129 {
+		t.Fatal("expected bounded update in existing storage")
+	}
+}

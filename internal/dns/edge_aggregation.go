@@ -41,7 +41,7 @@ func (a *edgeAccumulator) merge(batch []connectivity.Edge) {
 			if times.Len() == 0 && !e.FirstSeen.IsZero() {
 				times = connectivity.NewObservationHistory(e.FirstSeen)
 			}
-			a.out[idx].ObservedTimes = a.out[idx].ObservedTimes.Merged(times)
+			a.out[idx].ObservedTimes.MergeOwned(times)
 			if a.out[idx].ObservedTimes.Len() > 0 {
 				a.out[idx].FirstSeen = a.out[idx].ObservedTimes.At(0)
 			}
@@ -49,6 +49,9 @@ func (a *edgeAccumulator) merge(batch []connectivity.Edge) {
 		}
 		if e.ObservedTimes.Len() == 0 && !e.FirstSeen.IsZero() {
 			e.ObservedTimes = connectivity.NewObservationHistory(e.FirstSeen)
+		} else {
+			// Repeated keys mutate this history after the worker batch is released.
+			e.ObservedTimes = e.ObservedTimes.Clone()
 		}
 		a.seen[key] = len(a.out)
 		a.out = append(a.out, e)
