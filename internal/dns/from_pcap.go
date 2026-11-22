@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -340,7 +341,10 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 	if ftpPassiveMinPort == 0 {
 		ftpPassiveMinPort = connectivity.DefaultOptions().FTPPassiveMinPort
 	}
-	index := BuildTxnIndex(txs)
+	var index TxIndex
+	if scanOpt.Facts == nil {
+		index = BuildTxnIndex(txs)
+	}
 
 	// issuer -> txs sorted by RequestTime (for conservative fallback matching)
 	var issuerTxs map[string][]*DNSTransaction
@@ -384,6 +388,9 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		defer aggWG.Done()
 		for u := range updates {
 			if scanOpt.Facts != nil {
+				if !u.fromFallback {
+					scanOpt.Facts.bound[u.tx] = true
+				}
 				if !onlyTCP || u.cand.Proto == L4ProtoTCP {
 					if len(u.tx.Candidates) == 0 {
 						u.tx.Candidates = append(u.tx.Candidates, u.cand)
@@ -459,7 +466,10 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 	if totalFiles == 0 {
 		close(updates)
 		aggWG.Wait()
-		return nil, FirstPacketInfo{}, nil
+		if scanOpt.Facts != nil {
+			scanOpt.Facts.releaseDNS()
+		}
+		return nil, FirstPacketInfo{}, ctx.Err()
 	}
 
 	workers := runtime.GOMAXPROCS(0)
@@ -511,12 +521,14 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		opt := connectivity.DefaultOptions()
 		opt.IssuerIdentity = scanOpt.IssuerIdentity
 		var localFacts factSet
+		var provisional provisionalFacts
 		var namedHello bool
 		if facts := scanOpt.Facts; facts != nil {
 			localFacts = make(factSet)
+			provisional = make(provisionalFacts)
 			opt.Contact = func(device, wire, dst string, p connectivity.L4Proto, port uint16, ts time.Time, confirmed bool) {
 				if !namedHello {
-					facts.contact(localFacts, device, wire, dst, p, port, ts, confirmed)
+					facts.contact(localFacts, provisional, device, wire, dst, p, port, ts, confirmed)
 				}
 			}
 		}
@@ -693,9 +705,20 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 				fromFallback bool
 			)
 
-			if ok {
+			if facts := scanOpt.Facts; facts != nil {
+				device := facts.resolveWire(srcIPStr, ts)
+				if device == "" {
+					continue
+				}
+				ip, err := netip.ParseAddr(dstIPStr)
+				if err != nil {
+					continue
+				}
+				_, tx, ok = facts.matchingAnswer(destinationKey{device, ip}, ts)
+			} else if ok {
 				tx = findLatestTxBefore(txsForKey, ts)
-			} else if inferDNSFromConnections {
+			}
+			if !ok && inferDNSFromConnections {
 				// HARDENING #1: never issuer-only fallback for UDP (too ambiguous; causes name poisoning).
 				if proto == L4ProtoUDP {
 					if debugDNSFallback {
@@ -725,8 +748,6 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 					debugDNSFallbackf("fallback-selected issuer=%s name=%q resolver=%v dst=%s:%d proto=%s dt=%s eligible=%d unresolved=%d",
 						srcIPStr, tx.DNSName, tx.ResolverIP, dstIPStr, dstPort, proto, ts.Sub(tx.RequestTime), eligibleCnt, unresCnt)
 				}
-			} else {
-				continue
 			}
 
 			if tx == nil {
@@ -818,6 +839,9 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		if scanOpt.Facts != nil {
 			return orderedFileScanOutput{afterEdges: func() {
 				localFacts.each(scanOpt.Facts.facts.add)
+				for k, v := range provisional {
+					scanOpt.Facts.provisional.add(k, v)
+				}
 				if fileObserver.Commit != nil {
 					fileObserver.Commit()
 				}
@@ -872,8 +896,13 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 		tx.Candidates = nil
 	}
 
-	if scanOpt.Facts != nil {
-		scanOpt.Facts.releaseDNS()
+	if facts := scanOpt.Facts; facts != nil {
+		for k, v := range facts.provisional {
+			if !facts.bound[k.query] {
+				facts.facts.add(k.fact, v)
+			}
+		}
+		facts.releaseDNS()
 	}
 	out := edgeAccumulator.edges()
 	out = suppressMergedFTPPassiveEdges(out, ftpPassiveMinPort, ftpControlPorts)

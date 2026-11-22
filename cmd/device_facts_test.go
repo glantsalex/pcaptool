@@ -51,12 +51,13 @@ func TestDeviceFactsAcrossCaptureAndLeaseBoundaries(t *testing.T) {
 		hello(7, second, other, 8443, "b.example"), hello(7, first, server, 9443, "b.example"),
 		hello(10, first, server, 8443, "ambiguous.example"), hello(12, first, server, 8443, "new-owner.example"),
 		{base.Add(12 * time.Second), buildTCPPacket(t, server, first, 999, 40000, false, true)},
-		{base.Add(7 * time.Second), buildTCPPacket(t, server, second, 900, 40000, false, true)},
 		{base.Add(7 * time.Second), buildUDPPacket(t, second, server, 50000, 900)},
 		{base.Add(8 * time.Second), buildUDPPacket(t, server, second, 900, 50000)},
 		{base.Add(8 * time.Second), buildTCPPacket(t, second, other, 45000, 8080, false, true)},
 	})
 	early := []timestampedPacket{
+		// The other file binds the DNS query to UDP/900. This mid-session TCP contact remains unnamed.
+		{base.Add(7 * time.Second), buildTCPPacket(t, server, second, 900, 40000, false, true)},
 		wireDNS(2, first, "dns.example", server), wireDNS(3, first, "dns.example", server),
 		wireDNS(1, unknown, "unmapped.example", other), wireDNS(4, first, "unused.example", "203.0.113.90"),
 		hello(2, first, server, 8443, "A.EXAMPLE"), hello(2, unknown, server, 8443, "unmapped.example"),
@@ -73,7 +74,7 @@ func TestDeviceFactsAcrossCaptureAndLeaseBoundaries(t *testing.T) {
 	want := map[key]bool{
 		{"A", server, "a.example", "tcp", 8443}: true, {"A", server, "b.example", "tcp", 8443}: true, {"A", other, "b.example", "tcp", 8443}: true,
 		{"A", server, "b.example", "tcp", 9443}: true, {"B", server, "new-owner.example", "tcp", 8443}: true,
-		{"B", server, "", "tcp", 999}: true, {"A", server, "dns.example", "tcp", 900}: true, {"A", server, "dns.example", "udp", 900}: true, {"A", other, "", "tcp", 8080}: true,
+		{"B", server, "", "tcp", 999}: true, {"A", server, "", "tcp", 900}: true, {"A", server, "dns.example", "udp", 900}: true, {"A", other, "", "tcp", 8080}: true,
 	}
 	old := runtime.GOMAXPROCS(1)
 	defer runtime.GOMAXPROCS(old)

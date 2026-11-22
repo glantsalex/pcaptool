@@ -36,7 +36,7 @@ func TestFactAnswerValidityAndOwnership(t *testing.T) {
 		addr, name string
 	}{{0, "203.0.113.1", ""}, {1, "203.0.113.1", "a.example"}, {3, "203.0.113.1", "b.example"}, {7, "203.0.113.1", ""}, {5, "203.0.113.2", "a.example"}, {6, "203.0.113.2", ""}} {
 		s := make(factSet)
-		c.contact(s, "A", "10.0.0.1", tc.addr, connectivity.ProtoTCP, 443, base.Add(time.Duration(tc.sec)*time.Second), false)
+		c.contact(s, make(provisionalFacts), "A", "10.0.0.1", tc.addr, connectivity.ProtoTCP, 443, base.Add(time.Duration(tc.sec)*time.Second), false)
 		k := transportFact{"A", netip.MustParseAddr(tc.addr), connectivity.ProtoTCP, 443}
 		if g, ok := s[k]; !ok || g.name != tc.name {
 			t.Fatalf("%+v: got %+v", tc, g)
@@ -108,8 +108,8 @@ func TestNegativeAndPartialAnswers(t *testing.T) {
 	c.Prepare(nil, nil, false)
 	for _, dst := range []string{"8.8.8.8", "8.8.4.4"} {
 		s := make(factSet)
-		c.contact(s, "A", "10.0.0.1", dst, connectivity.ProtoTCP, 443, time.Unix(3, 0), false)
-		c.contact(s, "A", "10.0.0.1", dst, connectivity.ProtoTCP, 8443, time.Unix(4, 0), false)
+		c.contact(s, make(provisionalFacts), "A", "10.0.0.1", dst, connectivity.ProtoTCP, 443, time.Unix(3, 0), false)
+		c.contact(s, make(provisionalFacts), "A", "10.0.0.1", dst, connectivity.ProtoTCP, 8443, time.Unix(4, 0), false)
 		if s[transportFact{"A", netip.MustParseAddr(dst), connectivity.ProtoTCP, 443}].name != "dns.example" || s[transportFact{"A", netip.MustParseAddr(dst), connectivity.ProtoTCP, 8443}].name != "" {
 			t.Fatalf("invalid DNS validity: %+v", s)
 		}
@@ -141,5 +141,19 @@ func TestActiveNameRequiresQueryByContactingDevice(t *testing.T) {
 	got := CompleteFactsWithActiveDNS(rows, []DNSNameIPv4Resolution{{DNSName: "a.example", IPv4s: []string{"8.8.8.8"}}}, txs, 10*time.Second)
 	if got[0].DNSName != "a.example" || got[1].DNSName != "" || got[2].DNSName != "" || got[3].DNSName != "" {
 		t.Fatalf("active attribution escaped temporal device scope: %+v", got)
+	}
+}
+
+func TestAmbiguousDNSBlocksIssuerOnlyInference(t *testing.T) {
+	c := NewFactCollection(nil, false, time.Minute)
+	ts := time.Unix(100, 0)
+	for _, name := range []string{"one.example", "two.example"} {
+		c.answer("A", name, ts, []net.IP{net.IPv4(8, 8, 8, 8)}, nil, true)
+	}
+	c.Prepare([]*DNSTransaction{{IssuerLabel: "A", DNSName: "wrong.example", RequestTime: ts}}, nil, true)
+	s := make(factSet)
+	c.contact(s, make(provisionalFacts), "A", "10.0.0.1", "8.8.8.8", connectivity.ProtoTCP, 443, ts, true)
+	if group := s[transportFact{"A", netip.MustParseAddr("8.8.8.8"), connectivity.ProtoTCP, 443}]; group.name != "" {
+		t.Fatalf("attributed ambiguous answer: %+v", group)
 	}
 }

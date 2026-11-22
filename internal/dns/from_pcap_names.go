@@ -43,7 +43,11 @@ func (p hostnamePool) share(name string) string {
 // CollectDNS reads device DNS transactions and the answer evidence used by the
 // following connection pass. TCP DNS is independent of ClientHello extraction.
 func CollectDNS(ctx context.Context, files []string, admit pcaputil.PacketAdmission, facts *FactCollection) ([]*DNSTransaction, time.Time, []TruncatedDNSPacket, error) {
-	return BuildTransactionsWithSNIFromPCAPsWithOptions(ctx, files, false, true, PacketScanOptions{Facts: facts, PacketAdmission: admit})
+	txs, earliest, truncated, err := BuildTransactionsWithSNIFromPCAPsWithOptions(ctx, files, false, true, PacketScanOptions{Facts: facts, PacketAdmission: admit})
+	if err != nil && facts != nil {
+		facts.answers = nil
+	}
+	return txs, earliest, truncated, err
 }
 
 // BuildTransactionsWithSNIFromPCAPs performs a single corpus scan that always extracts:

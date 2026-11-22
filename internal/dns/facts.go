@@ -53,6 +53,23 @@ type destinationKey struct {
 	device string
 	ip     netip.Addr
 }
+type answerLookup struct {
+	destinationKey
+	name string
+}
+type provisionalKey struct {
+	query *DNSTransaction
+	fact  factKey
+}
+type provisionalFacts map[provisionalKey]factValue
+
+func (s provisionalFacts) add(k provisionalKey, v factValue) {
+	if prev, ok := s[k]; ok {
+		v = mergeValue(prev, v)
+	}
+	s[k] = v
+}
+
 type binding struct {
 	start, end  captureTime
 	name, chain string
@@ -62,16 +79,19 @@ type binding struct {
 // DNS answer ingestion is concurrent. Prepare freezes the temporal lookup;
 // file workers subsequently merge their facts on the ordered coordinator.
 type FactCollection struct {
-	resolve    DeviceResolver
-	sni        bool
-	window     time.Duration
-	mu         sync.Mutex
-	answers    map[answerSeries][]captureTime
-	bindings   map[destinationKey][]binding
-	resolvers  map[netip.Addr]bool
-	unanswered map[string][]*DNSTransaction
-	csv        map[string][]string
-	facts      factSet
+	resolve     DeviceResolver
+	sni         bool
+	window      time.Duration
+	mu          sync.Mutex
+	answers     map[answerSeries][]captureTime
+	bindings    map[destinationKey][]binding
+	resolvers   map[netip.Addr]bool
+	queries     map[answerLookup][]*DNSTransaction
+	bound       map[*DNSTransaction]bool // written by the DNS-report coordinator, read after join
+	provisional provisionalFacts         // merged at the ordered file frontier
+	unanswered  map[string][]*DNSTransaction
+	csv         map[string][]string
+	facts       factSet
 }
 
 // NewFactCollection initializes the device facts for one run.
@@ -119,12 +139,24 @@ func (c *FactCollection) answer(device, name string, ts time.Time, ips []net.IP,
 // answer sets. A replacement answer invalidates addresses dropped by that name.
 func (c *FactCollection) Prepare(txs []*DNSTransaction, csv map[string][]string, infer bool) {
 	c.csv = csv
+	c.queries = make(map[answerLookup][]*DNSTransaction)
+	c.bound = make(map[*DNSTransaction]bool)
+	c.provisional = make(provisionalFacts)
 	c.bindings = make(map[destinationKey][]binding)
 	c.resolvers = make(map[netip.Addr]bool)
 	c.unanswered = make(map[string][]*DNSTransaction)
 	for _, tx := range txs {
 		if ip, ok := netip.AddrFromSlice(tx.ResolverIP); ok {
 			c.resolvers[ip.Unmap()] = true
+		}
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			raw, n := tx.resolvedIPAt(i).To4().rawBytes()
+			if n != 4 {
+				continue
+			}
+			ip := netip.AddrFrom4([4]byte(raw[:4]))
+			k := answerLookup{destinationKey{tx.IssuerLabel, ip}, tx.DNSName}
+			c.queries[k] = append(c.queries[k], tx)
 		}
 		if infer && tx.ResolvedIPCount() == 0 && LooksLikeResolvableDNSName(tx.DNSName) {
 			c.unanswered[tx.IssuerLabel] = append(c.unanswered[tx.IssuerLabel], tx)
@@ -341,7 +373,25 @@ func (c *FactCollection) pendingQuery(device string, ts time.Time) (*DNSTransact
 	return nil, hi - lo
 }
 
-func (c *FactCollection) contact(s factSet, device, wire, dst string, p connectivity.L4Proto, port uint16, ts time.Time, confirmed bool) {
+// matchingAnswer returns one capture-time DNS attribution and its diagnostic
+// query, if available. Both indexes are immutable throughout the parallel scan.
+func (c *FactCollection) matchingAnswer(k destinationKey, ts time.Time) (binding, *DNSTransaction, bool) {
+	bs, seen := c.bindings[k]
+	at := wireTime(ts)
+	i := sort.Search(len(bs), func(i int) bool { return bs[i].start.compare(at) > 0 })
+	if i == 0 || at.compare(bs[i-1].end) >= 0 {
+		return binding{}, nil, seen
+	}
+	b := bs[i-1]
+	txs := c.queries[answerLookup{k, b.name}]
+	j := sort.Search(len(txs), func(j int) bool { return txs[j].RequestTime.After(ts) })
+	if j == 0 {
+		return b, nil, true
+	}
+	return b, txs[j-1], true
+}
+
+func (c *FactCollection) contact(s factSet, pending provisionalFacts, device, wire, dst string, p connectivity.L4Proto, port uint16, ts time.Time, confirmed bool) {
 	ip, err := netip.ParseAddr(dst)
 	if err != nil || !ip.Is4() || blockedService(port) {
 		return
@@ -351,13 +401,21 @@ func (c *FactCollection) contact(s factSet, device, wire, dst string, p connecti
 		return
 	}
 	at := wireTime(ts)
-	bs := c.bindings[destinationKey{device, ip}]
-	i := sort.Search(len(bs), func(i int) bool { return bs[i].start.compare(at) > 0 })
+	tuple := transportFact{device, ip, p, port}
+	b, query, history := c.matchingAnswer(destinationKey{device, ip}, ts)
 	name, source, chain := "", "", ""
-	if i > 0 && at.compare(bs[i-1].end) < 0 && bs[i-1].name != "" {
-		name, source, chain = bs[i-1].name, "dns+synack", bs[i-1].chain
+	if b.name != "" {
+		v := factValue{at, "dns+synack", b.chain}
+		key := factKey{tuple, b.name}
+		if query == nil || (confirmed && ts.Sub(query.RequestTime) <= maxConnDelay) {
+			s.add(key, v)
+			return
+		}
+		// Another file can supply an exact binding for this query. Defer
+		// its unbound-name fallback while preserving the admitted contact.
+		pending.add(provisionalKey{query, key}, v)
 	}
-	if name == "" && len(bs) == 0 && confirmed && p == connectivity.ProtoTCP {
+	if !history && confirmed && p == connectivity.ProtoTCP {
 		if tx, _ := c.pendingQuery(device, ts); tx != nil {
 			if allow, _ := allowConnectionInferredDNSBackfill(tx.DNSName, dst, c.csv); allow {
 				name, source = tx.DNSName, "dns+conn+synack"
@@ -370,7 +428,7 @@ func (c *FactCollection) contact(s factSet, device, wire, dst string, p connecti
 			name, source = n, "csv+mid"
 		}
 	}
-	s.add(factKey{transportFact{device, ip, p, port}, name}, factValue{at, source, chain})
+	s.add(factKey{tuple, name}, factValue{at, source, chain})
 }
 
 func (c *FactCollection) hello(s factSet, pkt gopacket.Packet, exclude map[uint16]struct{}, collector *connectivity.Collector) bool {
@@ -418,6 +476,9 @@ func (c *FactCollection) hello(s factSet, pkt gopacket.Packet, exclude map[uint1
 }
 
 func (c *FactCollection) releaseDNS() {
+	c.queries = nil
+	c.bound = nil
+	c.provisional = nil
 	c.bindings = nil
 	c.unanswered = nil
 	c.csv = nil
