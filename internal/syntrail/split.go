@@ -7,7 +7,7 @@ func SplitFleetToNonFleetByDestinationLocality(records []Record) (public []Recor
 	// both partitions. Callers frequently need only one partition at a time.
 	privateCount := 0
 	for _, record := range records {
-		if isLocalIPv4(record.DstIP) {
+		if isLocalIPv4(record.DstAddr()) {
 			privateCount++
 		}
 	}
@@ -15,7 +15,7 @@ func SplitFleetToNonFleetByDestinationLocality(records []Record) (public []Recor
 	privateNonFleet = make([]Record, 0, privateCount)
 
 	for _, record := range records {
-		if isLocalIPv4(record.DstIP) {
+		if isLocalIPv4(record.DstAddr()) {
 			privateNonFleet = append(privateNonFleet, record)
 			continue
 		}
@@ -32,13 +32,13 @@ func SplitFleetToNonFleetByDestinationLocality(records []Record) (public []Recor
 func SelectFleetToNonFleetByDestinationLocality(records []Record, private bool) []Record {
 	count := 0
 	for _, record := range records {
-		if isLocalIPv4(record.DstIP) == private {
+		if isLocalIPv4(record.DstAddr()) == private {
 			count++
 		}
 	}
 	selected := make([]Record, 0, count)
 	for _, record := range records {
-		if isLocalIPv4(record.DstIP) == private {
+		if isLocalIPv4(record.DstAddr()) == private {
 			selected = append(selected, record)
 		}
 	}

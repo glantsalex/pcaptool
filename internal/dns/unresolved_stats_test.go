@@ -12,12 +12,11 @@ func TestComputeUnresolvedDNSFirstSeen_DecisionByNameNotIssuer(t *testing.T) {
 	txs := []*DNSTransaction{
 		{DNSName: "foo.example.com", IssuerIP: ipA, PCAPFile: "a.pcap"},
 		{DNSName: "foo.example.com", IssuerIP: ipB, PCAPFile: "b.pcap"},
-		{
-			DNSName:     "foo.example.com",
-			IssuerIP:    ipA,
-			PCAPFile:    "c.pcap",
-			ResolvedIPs: []net.IP{net.ParseIP("8.8.8.8")},
-		},
+		withTestResolvedAnswers(&DNSTransaction{
+			DNSName:  "foo.example.com",
+			IssuerIP: ipA,
+			PCAPFile: "c.pcap",
+		}, []net.IP{net.ParseIP("8.8.8.8")}, nil),
 		{DNSName: "bar.example.com", IssuerIP: ipA, PCAPFile: "d.pcap"},
 	}
 

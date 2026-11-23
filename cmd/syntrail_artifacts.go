@@ -28,7 +28,7 @@ type synTrailArtifactOptions struct {
 }
 
 var (
-	scanSYNTrailFile             = syntrail.ScanFileWithOptions
+	scanSYNTrailFile             = syntrail.ScanPacketBatch
 	scanSYNTrailFilesWithOptions = syntrail.ScanFilesWithOptions
 )
 
@@ -271,7 +271,7 @@ func tcpSYNTrailRecords(records []syntrail.Record) []syntrail.Record {
 	}
 	filtered := make([]syntrail.Record, 0, count)
 	for _, record := range records {
-		if record.Protocol != "" && record.Protocol != syntrail.ProtocolTCP {
+		if record.Protocol != 0 && record.Protocol != syntrail.ProtocolTCP {
 			continue
 		}
 		filtered = append(filtered, record)
@@ -307,7 +307,7 @@ func filterOwnedPassiveFTPServerSummaryRecords(
 		if _, ok := opt.FTPControlPorts[record.DstPort]; !ok {
 			continue
 		}
-		controlSeen[synTrailPair{srcIP: record.SrcIP, dstIP: record.DstIP}] = struct{}{}
+		controlSeen[synTrailPair{srcIP: record.SrcAddr(), dstIP: record.DstAddr()}] = struct{}{}
 	}
 
 	filtered := records[:0]
@@ -343,12 +343,12 @@ func shouldSuppressPassiveFTPRecord(
 	if _, ok := opt.FTPControlPorts[record.DstPort]; ok {
 		return false
 	}
-	_, ok := controlSeen[synTrailPair{srcIP: record.SrcIP, dstIP: record.DstIP}]
+	_, ok := controlSeen[synTrailPair{srcIP: record.SrcAddr(), dstIP: record.DstAddr()}]
 	return ok
 }
 
 func isTCPSYNTrailRecord(record syntrail.Record) bool {
-	return record.Protocol == "" || record.Protocol == syntrail.ProtocolTCP
+	return record.Protocol == 0 || record.Protocol == syntrail.ProtocolTCP
 }
 
 // filterUDPServerSummaryRecords accepts borrowed input.

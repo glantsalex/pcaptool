@@ -27,7 +27,8 @@ func processRadiusFile(
 	collector *radiusCollector,
 ) error {
 
-	var src *gopacket.PacketSource
+	var rawSource gopacket.PacketDataSource
+	var linkType layers.LinkType
 
 	fileCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -52,7 +53,7 @@ func processRadiusFile(
 		if e != nil {
 			return e
 		}
-		src = gopacket.NewPacketSource(ngr, ngr.LinkType())
+		rawSource, linkType = ngr, ngr.LinkType()
 	} else {
 		// classic pcap
 		handle, e := pcap.OpenOffline(path)
@@ -60,8 +61,12 @@ func processRadiusFile(
 			return e
 		}
 		defer handle.Close()
-		src = gopacket.NewPacketSource(handle, handle.LinkType())
+		rawSource, linkType = handle, handle.LinkType()
 	}
+
+	filtered := newRadiusPacketSource(fileCtx, rawSource, linkType, &captureEnd, compileRadiusBPF)
+	defer func() { collector.addPrefilterStats(filtered.stats) }()
+	src := gopacket.NewPacketSource(filtered, linkType)
 
 	for {
 		if err := fileCtx.Err(); err != nil {
@@ -78,9 +83,6 @@ func processRadiusFile(
 		}
 		if err != nil {
 			return fmt.Errorf("read RADIUS capture: %w", err)
-		}
-		if ts := pkt.Metadata().Timestamp; ts.After(captureEnd) {
-			captureEnd = ts
 		}
 
 		netL := pkt.NetworkLayer()

@@ -39,8 +39,8 @@ func legacyMergeScanFileResults(results []scanFileResult) []Record {
 
 func legacyAddEarliestRecord(records map[observedRecordKey]Record, order *[]observedRecordKey, record Record) {
 	key := observedRecordKey{
-		srcIP:    record.SrcIP,
-		dstIP:    record.DstIP,
+		srcIP:    record.SrcAddr(),
+		dstIP:    record.DstAddr(),
 		dstPort:  record.DstPort,
 		protocol: record.Protocol,
 	}
@@ -50,7 +50,7 @@ func legacyAddEarliestRecord(records map[observedRecordKey]Record, order *[]obse
 		*order = append(*order, key)
 		return
 	}
-	if record.Timestamp.Before(current.Timestamp) {
+	if record.TimeBefore(current) {
 		records[key] = record
 	}
 }
@@ -90,28 +90,28 @@ func TestScanRecordAccumulatorPreservesLateEarliestUDPAndTCPDuplicates(t *testin
 
 	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	tcp := Record{
-		SrcIP:     netip.MustParseAddr("10.0.0.1"),
-		DstIP:     netip.MustParseAddr("203.0.113.1"),
+		SrcIP:     netip.MustParseAddr("10.0.0.1").As4(),
+		DstIP:     netip.MustParseAddr("203.0.113.1").As4(),
 		DstPort:   443,
 		Protocol:  ProtocolTCP,
-		Timestamp: base,
+		Timestamp: base.UnixNano(),
 	}
 	udpFirst := Record{
-		SrcIP:     netip.MustParseAddr("10.0.0.2"),
-		DstIP:     netip.MustParseAddr("203.0.113.2"),
+		SrcIP:     netip.MustParseAddr("10.0.0.2").As4(),
+		DstIP:     netip.MustParseAddr("203.0.113.2").As4(),
 		DstPort:   53,
 		Protocol:  ProtocolUDP,
-		Timestamp: base.Add(10 * time.Second),
+		Timestamp: base.Add(10 * time.Second).UnixNano(),
 	}
 	udpSecond := Record{
-		SrcIP:     netip.MustParseAddr("10.0.0.3"),
-		DstIP:     netip.MustParseAddr("203.0.113.3"),
+		SrcIP:     netip.MustParseAddr("10.0.0.3").As4(),
+		DstIP:     netip.MustParseAddr("203.0.113.3").As4(),
 		DstPort:   123,
 		Protocol:  ProtocolUDP,
-		Timestamp: base.Add(2 * time.Second),
+		Timestamp: base.Add(2 * time.Second).UnixNano(),
 	}
 	udpEarlier := udpFirst
-	udpEarlier.Timestamp = base.Add(-time.Second)
+	udpEarlier.Timestamp = base.Add(-time.Second).UnixNano()
 
 	accumulator := NewAccumulator()
 	accumulator.Add([]Record{tcp, tcp, udpFirst, udpSecond})
@@ -123,31 +123,31 @@ func TestScanRecordAccumulatorPreservesLateEarliestUDPAndTCPDuplicates(t *testin
 	}
 }
 
-func TestAccumulatorTakeRecordsReusesTCPBackingStorageWhenCapacityAllows(t *testing.T) {
+func TestAccumulatorTakeRecordsOwnsDecodedStorage(t *testing.T) {
 	t.Parallel()
 
 	base := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
 	tcp := Record{
-		SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.1"),
-		DstPort: 443, Protocol: ProtocolTCP, Timestamp: base,
+		SrcIP: netip.MustParseAddr("10.0.0.1").As4(), DstIP: netip.MustParseAddr("203.0.113.1").As4(),
+		DstPort: 443, Protocol: ProtocolTCP, Timestamp: base.UnixNano(),
 	}
 	udp := Record{
-		SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.2"),
-		DstPort: 53, Protocol: ProtocolUDP, Timestamp: base,
+		SrcIP: netip.MustParseAddr("10.0.0.1").As4(), DstIP: netip.MustParseAddr("203.0.113.2").As4(),
+		DstPort: 53, Protocol: ProtocolUDP, Timestamp: base.UnixNano(),
 	}
 	accumulator := NewAccumulator()
-	accumulator.tcpRecords = make([]Record, 1, 2)
-	accumulator.tcpRecords[0] = tcp
-	originalFirst := &accumulator.tcpRecords[0]
-	accumulator.Add([]Record{udp})
-
+	batch := []Record{tcp, udp}
+	accumulator.Add(batch)
+	clear(batch)
 	records := accumulator.TakeRecords()
-	if len(records) != 2 || &records[0] != originalFirst {
-		t.Fatalf("TakeRecords() copied preallocated TCP storage: len=%d reused=%v", len(records), len(records) > 0 && &records[0] == originalFirst)
+	if !reflect.DeepEqual(records, []Record{tcp, udp}) || cap(records) != len(records) {
+		t.Fatalf("TakeRecords() = %+v (cap %d)", records, cap(records))
 	}
-	if accumulator.tcpRecords != nil || accumulator.udpRecords != nil || accumulator.udpOrder != nil {
-		t.Fatal("TakeRecords() retained transferred record storage")
+	records[0] = udp
+	if batch[0] != (Record{}) {
+		t.Fatal("transferred result aliases the input batch")
 	}
+	assertAccumulatorReleased(t, accumulator)
 }
 
 func TestScanFilesConcurrentBoundsOutstandingFileBatches(t *testing.T) {
@@ -182,11 +182,11 @@ func TestScanFilesConcurrentBoundsOutstandingFileBatches(t *testing.T) {
 			}
 		}
 		return []Record{{
-			SrcIP:     netip.AddrFrom4([4]byte{10, 0, 0, byte(index + 1)}),
-			DstIP:     netip.MustParseAddr("203.0.113.1"),
+			SrcIP:     netip.AddrFrom4([4]byte{10, 0, 0, byte(index + 1)}).As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.1").As4(),
 			DstPort:   443,
 			Protocol:  ProtocolTCP,
-			Timestamp: time.Unix(int64(index), 0).UTC(),
+			Timestamp: time.Unix(int64(index), 0).UTC().UnixNano(),
 		}}, nil
 	}
 
@@ -234,7 +234,7 @@ func TestScanFilesConcurrentBoundsOutstandingFileBatches(t *testing.T) {
 		}
 		for i, record := range outcome.records {
 			want := netip.AddrFrom4([4]byte{10, 0, 0, byte(i + 1)})
-			if record.SrcIP != want {
+			if record.SrcAddr() != want {
 				t.Fatalf("record %d source = %v, want %v; file order was not preserved", i, record.SrcIP, want)
 			}
 		}
@@ -440,11 +440,11 @@ func generatedScanFileResults(seed int64, fileCount, recordsPerFile int) []scanF
 			srcOctet := byte(1 + rng.Intn(12))
 			dstOctet := byte(1 + rng.Intn(20))
 			records = append(records, Record{
-				SrcIP:     netip.AddrFrom4([4]byte{10, 0, 0, srcOctet}),
-				DstIP:     netip.AddrFrom4([4]byte{203, 0, 113, dstOctet}),
+				SrcIP:     netip.AddrFrom4([4]byte{10, 0, 0, srcOctet}).As4(),
+				DstIP:     netip.AddrFrom4([4]byte{203, 0, 113, dstOctet}).As4(),
 				DstPort:   uint16(1 + rng.Intn(8)),
 				Protocol:  protocol,
-				Timestamp: base.Add(time.Duration(rng.Int63n(int64(24 * time.Hour)))),
+				Timestamp: base.Add(time.Duration(rng.Int63n(int64(24 * time.Hour)))).UnixNano(),
 			})
 		}
 		results[fileIndex] = scanFileResult{

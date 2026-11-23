@@ -97,10 +97,10 @@ func buildPrivateNonFleetEndpointsDocument(serverRecords, probeRecords []Record)
 func buildPrivateNonFleetEndpointsDocumentWithIMSI(serverRecords, probeRecords []Record, countIMSI bool) PrivateNonFleetEndpointsDocument {
 	byIP := make(map[netip.Addr]*endpointAccumulator)
 	for _, record := range serverRecords {
-		addEndpointEvidence(byIP, record.DstIP, record.SrcIP, record.Protocol, record.DstPort, true, record.FleetIdentity, countIMSI)
+		addEndpointEvidence(byIP, record.DstAddr(), record.SrcAddr(), record.Protocol, record.DstPort, true, record.FleetIdentity, countIMSI)
 	}
 	for _, record := range probeRecords {
-		addEndpointEvidence(byIP, record.SrcIP, record.DstIP, record.Protocol, record.DstPort, false, record.FleetIdentity, countIMSI)
+		addEndpointEvidence(byIP, record.SrcAddr(), record.DstAddr(), record.Protocol, record.DstPort, false, record.FleetIdentity, countIMSI)
 	}
 
 	addresses := make([]netip.Addr, 0, len(byIP))
@@ -133,7 +133,7 @@ func buildPrivateNonFleetEndpointsDocumentWithIMSI(serverRecords, probeRecords [
 	qualified := make(map[syslogEndpoint]bool)
 	for _, r := range serverRecords {
 		if r.Protocol == ProtocolUDP && r.SyslogQualified {
-			qualified[syslogEndpoint{r.DstIP, r.DstPort}] = true
+			qualified[syslogEndpoint{r.DstAddr(), r.DstPort}] = true
 		}
 	}
 	for i := range document.Endpoints {
@@ -224,8 +224,8 @@ func transportBehaviors(sets map[transportPortKey]*fleetDeviceSet) []TransportBe
 }
 
 func normalizedProtocolName(protocol Protocol) string {
-	if protocol == "" {
-		return string(ProtocolTCP)
+	if protocol == 0 {
+		return ProtocolTCP.String()
 	}
-	return strings.ToLower(string(protocol))
+	return strings.ToLower(protocol.String())
 }

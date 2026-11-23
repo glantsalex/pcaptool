@@ -105,7 +105,7 @@ func TestAttachConnectionsInferenceFlagControlsIssuerOnlyFallback(t *testing.T) 
 			if row.DNSName != tt.wantName || row.DNSSource != tt.wantSource {
 				t.Fatalf("row attribution=(%q,%q), want (%q,%q): %#v", row.DNSName, row.DNSSource, tt.wantName, tt.wantSource, rows)
 			}
-			if got := containsConnectionInferenceTestIP(tt.txs[0].ResolvedIPs, dst); got != tt.wantResolvedIP {
+			if got := containsConnectionInferenceTestIP(testResolvedIPs(tt.txs[0]), dst); got != tt.wantResolvedIP {
 				t.Fatalf("resolved IP present=%v, want %v; tx=%#v", got, tt.wantResolvedIP, tt.txs[0])
 			}
 			if got := len(tt.txs[0].ObservedEndpointBindings); got != tt.wantBindings {

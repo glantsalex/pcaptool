@@ -358,12 +358,14 @@ func writeFleetMemoryFixture(t *testing.T, dir string, fileCount, repetitions in
 	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	var files []string
 	var tcp []syntrail.Record
-	type udpKey struct {
+	type endpointKey struct {
 		src, dst netip.Addr
 		port     uint16
 	}
-	udp := make(map[udpKey]syntrail.Record)
-	var order []udpKey
+	// Every fixture SYN uses the same source port, sequence number, and identity.
+	seenTCP := make(map[endpointKey]bool)
+	udp := make(map[endpointKey]syntrail.Record)
+	var order []endpointKey
 	for fileIndex := 0; fileIndex < fileCount; fileIndex++ {
 		ts := base.Add(time.Duration(fileCount-fileIndex) * time.Minute)
 		src := fmt.Sprintf("10.0.0.%d", 1+fileIndex%2)
@@ -371,17 +373,21 @@ func writeFleetMemoryFixture(t *testing.T, dir string, fileCount, repetitions in
 		var packets []timestampedPacket
 		addTCP := func(from, to string, port uint16, timestamp time.Time) {
 			packets = append(packets, timestampedPacket{ts: timestamp, data: buildTCPPacket(t, from, to, 41000, port, true, false)})
-			tcp = append(tcp, syntrail.Record{SrcIP: netip.MustParseAddr(from), DstIP: netip.MustParseAddr(to), DstPort: port, Protocol: syntrail.ProtocolTCP, Timestamp: timestamp})
+			key := endpointKey{netip.MustParseAddr(from), netip.MustParseAddr(to), port}
+			if !seenTCP[key] {
+				tcp = append(tcp, syntrail.Record{SrcIP: key.src.As4(), DstIP: key.dst.As4(), DstPort: port, Protocol: syntrail.ProtocolTCP, Timestamp: timestamp.UnixNano()})
+				seenTCP[key] = true
+			}
 		}
 		addUDP := func(from, to string, port uint16, timestamp time.Time) {
 			packets = append(packets, timestampedPacket{ts: timestamp, data: buildUDPPacket(t, from, to, 41000, port)})
-			key := udpKey{netip.MustParseAddr(from), netip.MustParseAddr(to), port}
-			r := syntrail.Record{SrcIP: key.src, DstIP: key.dst, DstPort: port, Protocol: syntrail.ProtocolUDP, Timestamp: timestamp}
+			key := endpointKey{netip.MustParseAddr(from), netip.MustParseAddr(to), port}
+			r := syntrail.Record{SrcIP: key.src.As4(), DstIP: key.dst.As4(), DstPort: port, Protocol: syntrail.ProtocolUDP, Timestamp: timestamp.UnixNano()}
 			old, exists := udp[key]
 			if !exists {
 				order = append(order, key)
 			}
-			if !exists || timestamp.Before(old.Timestamp) {
+			if !exists || timestamp.Before(old.CaptureTime()) {
 				udp[key] = r
 			}
 		}
@@ -430,7 +436,7 @@ func legacyFleetArtifactBytes(t *testing.T, buckets syntrail.BucketedRecords, op
 	tcpOnly := func(records []syntrail.Record) []syntrail.Record {
 		out := make([]syntrail.Record, 0, len(records))
 		for _, r := range records {
-			if r.Protocol == "" || r.Protocol == syntrail.ProtocolTCP {
+			if r.Protocol == 0 || r.Protocol == syntrail.ProtocolTCP {
 				out = append(out, r)
 			}
 		}
@@ -440,16 +446,16 @@ func legacyFleetArtifactBytes(t *testing.T, buckets syntrail.BucketedRecords, op
 		type pair struct{ src, dst netip.Addr }
 		controls := make(map[pair]bool)
 		for _, r := range records {
-			if r.Protocol == "" || r.Protocol == syntrail.ProtocolTCP {
+			if r.Protocol == 0 || r.Protocol == syntrail.ProtocolTCP {
 				if _, ok := opt.FTPControlPorts[r.DstPort]; ok {
-					controls[pair{r.SrcIP, r.DstIP}] = true
+					controls[pair{r.SrcAddr(), r.DstAddr()}] = true
 				}
 			}
 		}
 		var out []syntrail.Record
 		for _, r := range records {
 			_, control := opt.FTPControlPorts[r.DstPort]
-			if (r.Protocol == "" || r.Protocol == syntrail.ProtocolTCP) && r.DstPort >= opt.FTPPassiveMinPort && !control && controls[pair{r.SrcIP, r.DstIP}] {
+			if (r.Protocol == 0 || r.Protocol == syntrail.ProtocolTCP) && r.DstPort >= opt.FTPPassiveMinPort && !control && controls[pair{r.SrcAddr(), r.DstAddr()}] {
 				continue
 			}
 			if r.Protocol == syntrail.ProtocolUDP {

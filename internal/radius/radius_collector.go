@@ -35,6 +35,7 @@ type radiusCollector struct {
 	mu         sync.Mutex
 	msgs       []radMsg
 	captureEnd time.Time
+	prefilter  radiusPrefilterStats
 }
 
 func NewRadiusCollector(capHint int) *radiusCollector {
@@ -77,5 +78,20 @@ func (c *radiusCollector) ObserveCaptureEnd(t time.Time) {
 	defer c.mu.Unlock()
 	if t.After(c.captureEnd) {
 		c.captureEnd = t
+	}
+}
+
+// addPrefilterStats merges bounded counters once per file, after its scan ends.
+func (c *radiusCollector) addPrefilterStats(s radiusPrefilterStats) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.prefilter.scanned += s.scanned
+	c.prefilter.matched += s.matched
+	c.prefilter.rejected += s.rejected
+	c.prefilter.fallback += s.fallback
+	c.prefilter.unsupportedFiles += s.unsupportedFiles
+	c.prefilter.filterErrorFiles += s.filterErrorFiles
+	if c.prefilter.compileError == "" {
+		c.prefilter.compileError = s.compileError
 	}
 }

@@ -51,15 +51,16 @@ func mergeDNSTransaction(dst, src *DNSTransaction) {
 		dst.NameEvidence = src.NameEvidence
 	}
 
-	for _, ip := range src.ResolvedIPs {
+	for i := 0; i < src.resolvedIPLen(); i++ {
+		ip := src.resolvedIPAt(i)
 		ip4 := ip.To4()
-		if ip4 == nil {
+		if ip4.isNil() {
 			continue
 		}
 
 		ev := EvNone
-		if src.ResolvedIPEvidence != nil {
-			ev = src.ResolvedIPEvidence[ip4.String()]
+		if src.hasResolvedIPEvidence() {
+			ev = src.resolvedIPEvidenceValue(ip4.String())
 		}
 		if ev == EvNone {
 			ev = src.NameEvidence
@@ -67,7 +68,7 @@ func mergeDNSTransaction(dst, src *DNSTransaction) {
 				ev = EvDNSAnswer
 			}
 		}
-		dst.AddResolvedIP(ip4, ev)
+		dst.addResolvedIPView(ip4, ev)
 	}
 	for _, cname := range src.CNAMETargets {
 		dst.AddCNAMETarget(cname)

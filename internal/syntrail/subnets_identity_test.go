@@ -41,7 +41,7 @@ func TestHostPrefixesMatchExactFleetClassification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	records := []Record{{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("10.1.0.1"), DstPort: 443}, {SrcIP: netip.MustParseAddr("10.1.0.1"), DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 22}, {SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 80}}
+	records := []Record{{SrcIP: netip.MustParseAddr("10.0.0.1").As4(), DstIP: netip.MustParseAddr("10.1.0.1").As4(), DstPort: 443}, {SrcIP: netip.MustParseAddr("10.1.0.1").As4(), DstIP: netip.MustParseAddr("10.0.0.2").As4(), DstPort: 22}, {SrcIP: netip.MustParseAddr("10.0.0.1").As4(), DstIP: netip.MustParseAddr("10.0.0.2").As4(), DstPort: 80}}
 	if !reflect.DeepEqual(ClassifyRecords(records, exact), ClassifyRecords(records, prefixes)) {
 		t.Fatal("host prefix differs from fleet")
 	}

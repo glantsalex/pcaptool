@@ -2,22 +2,22 @@ package syntrail
 
 // Classify assigns r to a SYN trail bucket.
 func Classify(r Record, fleet FleetSet) (Bucket, bool) {
-	if r.DstPort == 0 || !r.SrcIP.Is4() || !r.DstIP.Is4() {
+	if r.DstPort == 0 {
 		return "", false
 	}
-	if !isLocalIPv4(r.SrcIP) {
+	if !isLocalIPv4(r.SrcAddr()) {
 		return "", false
 	}
 
-	srcInFleet := fleet.Contains(r.SrcIP)
-	dstInFleet := fleet.Contains(r.DstIP)
+	srcInFleet := fleet.Contains(r.SrcAddr())
+	dstInFleet := fleet.Contains(r.DstAddr())
 
 	switch {
 	case srcInFleet && !dstInFleet:
 		return BucketFleetToNonFleet, true
 	case srcInFleet && dstInFleet:
 		return BucketFleetToFleet, true
-	case isLocalIPv4(r.SrcIP) && !srcInFleet && dstInFleet:
+	case isLocalIPv4(r.SrcAddr()) && !srcInFleet && dstInFleet:
 		return BucketPrivateNonFleetToFleet, true
 	default:
 		return "", false

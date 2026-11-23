@@ -46,11 +46,11 @@ func TestNetworkTopologyMatrixUsesCaptureTruncatedDNSResponseARecord(t *testing.
 			tx.IssuerIP,
 			tx.DNSName,
 			tx.ResolverIP,
-			tx.ResolvedIPs,
+			testResolvedIPs(tx),
 			EvidenceString(tx.NameEvidence),
-			tx.ResolvedIPEvidence,
+			testResolvedEvidence(tx),
 		)
-		if tx.IssuerIP.String() == wantIssuer && tx.DNSName == wantName && containsIPString(tx.ResolvedIPs, wantDst) {
+		if tx.IssuerIP.String() == wantIssuer && tx.DNSName == wantName && containsIPString(testResolvedIPs(tx), wantDst) {
 			sawRecoveredDNSAnswer = true
 		}
 	}

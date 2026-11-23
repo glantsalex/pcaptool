@@ -11,42 +11,32 @@ import (
 )
 
 func TestStrongObservedIPDNSPairsFromTransactions(t *testing.T) {
-	txStrong := &DNSTransaction{
-		DNSName:     "Api.Example.COM.",
-		ResolvedIPs: mustIPs(t, "34.120.10.1"),
-		ResolvedIPEvidence: map[string]Evidence{
-			"34.120.10.1": EvDNSAnswer | EvObservedConn,
-		},
-	}
-	txStrongConn := &DNSTransaction{
-		DNSName:     "api.example.com",
-		ResolvedIPs: mustIPs(t, "34.120.10.2"),
-		ResolvedIPEvidence: map[string]Evidence{
-			"34.120.10.2": EvDNSAnswer | EvConnInferred | EvObservedConn,
-		},
-	}
-	txWeakNoObserved := &DNSTransaction{
-		DNSName:     "weak.example.com",
-		ResolvedIPs: mustIPs(t, "34.120.10.3"),
-		ResolvedIPEvidence: map[string]Evidence{
-			"34.120.10.3": EvDNSAnswer,
-		},
-	}
-	txWeakSNI := &DNSTransaction{
+	txStrong := withTestResolvedAnswers(&DNSTransaction{
+		DNSName: "Api.Example.COM.",
+	}, mustIPs(t, "34.120.10.1"), map[string]Evidence{
+		"34.120.10.1": EvDNSAnswer | EvObservedConn,
+	})
+	txStrongConn := withTestResolvedAnswers(&DNSTransaction{
+		DNSName: "api.example.com",
+	}, mustIPs(t, "34.120.10.2"), map[string]Evidence{
+		"34.120.10.2": EvDNSAnswer | EvConnInferred | EvObservedConn,
+	})
+	txWeakNoObserved := withTestResolvedAnswers(&DNSTransaction{
+		DNSName: "weak.example.com",
+	}, mustIPs(t, "34.120.10.3"), map[string]Evidence{
+		"34.120.10.3": EvDNSAnswer,
+	})
+	txWeakSNI := withTestResolvedAnswers(&DNSTransaction{
 		DNSName:      "sni.example.com",
 		NameEvidence: EvSNI,
-		ResolvedIPs:  mustIPs(t, "34.120.10.4"),
-		ResolvedIPEvidence: map[string]Evidence{
-			"34.120.10.4": EvSNI | EvObservedConn,
-		},
-	}
-	txPrivate := &DNSTransaction{
-		DNSName:     "private.example.com",
-		ResolvedIPs: mustIPs(t, "10.10.10.10"),
-		ResolvedIPEvidence: map[string]Evidence{
-			"10.10.10.10": EvDNSAnswer | EvObservedConn,
-		},
-	}
+	}, mustIPs(t, "34.120.10.4"), map[string]Evidence{
+		"34.120.10.4": EvSNI | EvObservedConn,
+	})
+	txPrivate := withTestResolvedAnswers(&DNSTransaction{
+		DNSName: "private.example.com",
+	}, mustIPs(t, "10.10.10.10"), map[string]Evidence{
+		"10.10.10.10": EvDNSAnswer | EvObservedConn,
+	})
 
 	got := StrongObservedIPDNSPairsFromTransactions([]*DNSTransaction{
 		txStrong,
@@ -386,5 +376,32 @@ func assertFileContents(t *testing.T, path string, want []byte) {
 	}
 	if string(got) != string(want) {
 		t.Fatalf("file %s changed: got %q, want %q", path, got, want)
+	}
+}
+
+func TestLoadIPToDNSFromFile_NormalizesIPKeys(t *testing.T) {
+	for name, input := range map[string]string{
+		"dns_first":       " \tService.Example. , \t203.0.113.10 \t\n",
+		"ip_first":        " \t203.0.113.10 \t, Service.Example. \n",
+		"mapped_ipv4":     "Service.Example., ::ffff:203.0.113.10 \n",
+		"equivalent_keys": "service.example,203.0.113.10\nService.Example., ::ffff:203.0.113.10 \n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "dns-ip.csv")
+			if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := LoadIPToDNSFromFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			names := got["203.0.113.10"]
+			if len(got) != 1 || len(names) != 1 || names[0] != "service.example" {
+				t.Fatalf("expected one canonical IP/name pair, got %#v", got)
+			}
+			if name, ok := csvNameForIP(got, "203.0.113.10", false); !ok || name != "service.example" {
+				t.Fatalf("normalized CSV lookup = (%q, %v)", name, ok)
+			}
+		})
 	}
 }

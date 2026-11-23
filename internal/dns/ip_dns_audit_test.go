@@ -12,44 +12,41 @@ func TestBuildIPDNSAppendAuditRecords_UsesEarliestStrongMatch(t *testing.T) {
 	port80 := uint16(80)
 
 	txs := []*DNSTransaction{
-		{
-			RequestTime:     t2,
-			IssuerIP:        net.ParseIP("10.0.0.2"),
-			DNSName:         "ocppj.freshmile.com",
-			ResolvedIPs:     []net.IP{net.ParseIP("4.178.249.19")},
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: t2,
+			IssuerIP:    net.ParseIP("10.0.0.2"),
+			DNSName:     "ocppj.freshmile.com",
+
 			ResolverIP:      net.ParseIP("8.8.8.8"),
 			DestinationPort: &port80,
 			ProtocolL4:      L4ProtoTCP,
 			PCAPFile:        "b.pcap",
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"4.178.249.19": EvDNSAnswer | EvObservedConn,
-			},
-		},
-		{
-			RequestTime:     t1,
-			IssuerIP:        net.ParseIP("10.0.0.1"),
-			DNSName:         "ocppj.freshmile.com.",
-			ResolvedIPs:     []net.IP{net.ParseIP("4.178.249.19")},
+		}, []net.IP{net.ParseIP("4.178.249.19")}, map[string]Evidence{
+			"4.178.249.19": EvDNSAnswer | EvObservedConn,
+		}),
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: t1,
+			IssuerIP:    net.ParseIP("10.0.0.1"),
+			DNSName:     "ocppj.freshmile.com.",
+
 			ResolverIP:      net.ParseIP("1.1.1.1"),
 			DestinationPort: &port80,
 			ProtocolL4:      L4ProtoTCP,
 			PCAPFile:        "a.pcap",
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"4.178.249.19": EvDNSAnswer | EvObservedConn,
-			},
-		},
-		{
-			RequestTime:  t1.Add(1 * time.Minute),
-			IssuerIP:     net.ParseIP("10.0.0.3"),
-			DNSName:      "weak.example.com",
-			ResolvedIPs:  []net.IP{net.ParseIP("20.20.20.20")},
+		}, []net.IP{net.ParseIP("4.178.249.19")}, map[string]Evidence{
+			"4.178.249.19": EvDNSAnswer | EvObservedConn,
+		}),
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: t1.Add(1 * time.Minute),
+			IssuerIP:    net.ParseIP("10.0.0.3"),
+			DNSName:     "weak.example.com",
+
 			NameEvidence: EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"20.20.20.20": EvDNSAnswer,
-			},
-		},
+		}, []net.IP{net.ParseIP("20.20.20.20")}, map[string]Evidence{
+			"20.20.20.20": EvDNSAnswer,
+		}),
 	}
 
 	got := BuildIPDNSAppendAuditRecords(txs, []IPDNSPair{

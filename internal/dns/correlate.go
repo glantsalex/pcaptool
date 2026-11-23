@@ -75,7 +75,7 @@ func BuildTransactionsFromEvents(events []pce.Event) ([]*DNSTransaction, error) 
 			for _, ip := range ev.DNSAAnswers {
 				found.AddResolvedIP(ip, EvDNSAnswer)
 			}
-			if len(found.ResolvedIPs) > 0 {
+			if found.resolvedIPLen() > 0 {
 				found.ResolverIP = append(net.IP{}, ev.SrcIP...)
 			}
 		}

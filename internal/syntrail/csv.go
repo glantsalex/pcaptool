@@ -24,13 +24,13 @@ func SortTrail(records []Record) {
 		left := records[i]
 		right := records[j]
 
-		if cmp := compareAddr(left.SrcIP, right.SrcIP); cmp != 0 {
+		if cmp := compareAddr(left.SrcAddr(), right.SrcAddr()); cmp != 0 {
 			return cmp < 0
 		}
-		if !left.Timestamp.Equal(right.Timestamp) {
-			return left.Timestamp.Before(right.Timestamp)
+		if !left.TimeEqual(right) {
+			return left.TimeBefore(right)
 		}
-		if cmp := compareAddr(left.DstIP, right.DstIP); cmp != 0 {
+		if cmp := compareAddr(left.DstAddr(), right.DstAddr()); cmp != 0 {
 			return cmp < 0
 		}
 		return left.DstPort < right.DstPort
@@ -43,8 +43,8 @@ func Unique(records []Record) []Record {
 	unique := make([]Record, 0, len(records))
 	for _, record := range records {
 		key := recordKey{
-			srcIP:   record.SrcIP,
-			dstIP:   record.DstIP,
+			srcIP:   record.SrcAddr(),
+			dstIP:   record.DstAddr(),
 			dstPort: record.DstPort,
 		}
 		if _, ok := seen[key]; ok {
@@ -58,10 +58,10 @@ func Unique(records []Record) []Record {
 		left := unique[i]
 		right := unique[j]
 
-		if cmp := compareAddr(left.SrcIP, right.SrcIP); cmp != 0 {
+		if cmp := compareAddr(left.SrcAddr(), right.SrcAddr()); cmp != 0 {
 			return cmp < 0
 		}
-		if cmp := compareAddr(left.DstIP, right.DstIP); cmp != 0 {
+		if cmp := compareAddr(left.DstAddr(), right.DstAddr()); cmp != 0 {
 			return cmp < 0
 		}
 		return left.DstPort < right.DstPort
@@ -81,10 +81,10 @@ func WriteTrailCSV(w io.Writer, records []Record) error {
 	SortTrail(records)
 	for _, record := range records {
 		if err := cw.Write([]string{
-			record.SrcIP.String(),
-			record.DstIP.String(),
+			record.SrcAddr().String(),
+			record.DstAddr().String(),
 			strconv.FormatUint(uint64(record.DstPort), 10),
-			FormatTimestampUTC(record.Timestamp),
+			FormatTimestampUTC(record.CaptureTime()),
 		}); err != nil {
 			return fmt.Errorf("write SYN trail CSV record: %w", err)
 		}
@@ -119,11 +119,11 @@ func WriteProtocolTrailCSV(w io.Writer, records []Record) error {
 
 	for _, row := range rows {
 		if err := cw.Write([]string{
-			row.record.SrcIP.String(),
-			row.record.DstIP.String(),
+			row.record.SrcAddr().String(),
+			row.record.DstAddr().String(),
 			strconv.FormatUint(uint64(row.record.DstPort), 10),
-			string(row.protocol),
-			FormatTimestampUTC(row.record.Timestamp),
+			row.protocol.String(),
+			FormatTimestampUTC(row.record.CaptureTime()),
 		}); err != nil {
 			return fmt.Errorf("write protocol trail CSV record: %w", err)
 		}
@@ -152,8 +152,8 @@ func WriteUniqueCSV(w io.Writer, records []Record) error {
 
 	for _, record := range Unique(records) {
 		if err := cw.Write([]string{
-			record.SrcIP.String(),
-			record.DstIP.String(),
+			record.SrcAddr().String(),
+			record.DstAddr().String(),
 			strconv.FormatUint(uint64(record.DstPort), 10),
 		}); err != nil {
 			return fmt.Errorf("write unique SYN trail CSV record: %w", err)
@@ -177,8 +177,8 @@ func WriteTCPUniqueCSV(w io.Writer, records []Record) error {
 
 	for _, record := range Unique(records) {
 		if err := cw.Write([]string{
-			record.SrcIP.String(),
-			record.DstIP.String(),
+			record.SrcAddr().String(),
+			record.DstAddr().String(),
 			strconv.FormatUint(uint64(record.DstPort), 10),
 			"tcp",
 		}); err != nil {
@@ -207,7 +207,7 @@ func WriteProtocolUniqueCSV(w io.Writer, records []Record) error {
 			row.srcIP.String(),
 			row.dstIP.String(),
 			strconv.FormatUint(uint64(row.dstPort), 10),
-			string(row.protocol),
+			row.protocol.String(),
 		}); err != nil {
 			return fmt.Errorf("write unique protocol trail CSV record: %w", err)
 		}
@@ -233,7 +233,7 @@ func WritePublicServersCSV(w io.Writer, records []Record) error {
 		if err := cw.Write([]string{
 			row.DstIP.String(),
 			strconv.FormatUint(uint64(row.DstPort), 10),
-			string(row.Protocol),
+			row.Protocol.String(),
 		}); err != nil {
 			return fmt.Errorf("write public servers CSV record: %w", err)
 		}
@@ -277,13 +277,13 @@ func protocolTrailRowLess(left, right protocolTrailRow) bool {
 	if leftRank != rightRank {
 		return leftRank < rightRank
 	}
-	if cmp := compareAddr(left.record.SrcIP, right.record.SrcIP); cmp != 0 {
+	if cmp := compareAddr(left.record.SrcAddr(), right.record.SrcAddr()); cmp != 0 {
 		return cmp < 0
 	}
-	if !left.record.Timestamp.Equal(right.record.Timestamp) {
-		return left.record.Timestamp.Before(right.record.Timestamp)
+	if !left.record.TimeEqual(right.record) {
+		return left.record.TimeBefore(right.record)
 	}
-	if cmp := compareAddr(left.record.DstIP, right.record.DstIP); cmp != 0 {
+	if cmp := compareAddr(left.record.DstAddr(), right.record.DstAddr()); cmp != 0 {
 		return cmp < 0
 	}
 	return left.record.DstPort < right.record.DstPort
@@ -301,7 +301,7 @@ func protocolRank(protocol Protocol) int {
 }
 
 func normalizedProtocol(protocol Protocol) Protocol {
-	if protocol == "" {
+	if protocol == 0 {
 		return ProtocolTCP
 	}
 	return protocol
@@ -324,8 +324,8 @@ func uniqueProtocolRows(records []Record) []protocolUniqueRow {
 	rows := make([]protocolUniqueRow, 0, len(records))
 	for _, record := range records {
 		row := protocolUniqueRow{
-			srcIP:    record.SrcIP,
-			dstIP:    record.DstIP,
+			srcIP:    record.SrcAddr(),
+			dstIP:    record.DstAddr(),
 			dstPort:  record.DstPort,
 			protocol: normalizedProtocol(record.Protocol),
 		}
@@ -365,7 +365,7 @@ func PrivateServerTuples(records []Record) []ServerTuple {
 	seen := make(map[ServerTuple]struct{})
 	for _, record := range records {
 		row := ServerTuple{
-			DstIP:    record.DstIP,
+			DstIP:    record.DstAddr(),
 			DstPort:  record.DstPort,
 			Protocol: normalizedProtocol(record.Protocol),
 		}

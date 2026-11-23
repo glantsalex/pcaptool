@@ -12,7 +12,7 @@ import (
 func TestOwnedSummaryFiltersPreserveLateControlAndOrder(t *testing.T) {
 	src, dst, other := netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.2")
 	makeRecord := func(ip netip.Addr, port uint16, proto syntrail.Protocol) syntrail.Record {
-		return syntrail.Record{SrcIP: src, DstIP: ip, DstPort: port, Protocol: proto}
+		return syntrail.Record{SrcIP: src.As4(), DstIP: ip.As4(), DstPort: port, Protocol: proto}
 	}
 	original := []syntrail.Record{
 		makeRecord(dst, 12000, syntrail.ProtocolTCP),
@@ -20,7 +20,7 @@ func TestOwnedSummaryFiltersPreserveLateControlAndOrder(t *testing.T) {
 		makeRecord(dst, 6514, syntrail.ProtocolUDP),
 		makeRecord(dst, 80, syntrail.ProtocolTCP),
 		makeRecord(other, 12000, syntrail.ProtocolTCP),
-		makeRecord(dst, 21, ""),
+		makeRecord(dst, 21, 0),
 	}
 	opt := synTrailArtifactOptions{FTPControlPorts: map[uint16]struct{}{21: {}}, FTPPassiveMinPort: 10000, ServerSummaryExcludeUDPPorts: map[uint16]struct{}{33434: {}}}
 	owned := append([]syntrail.Record(nil), original...)
@@ -51,7 +51,7 @@ func TestTCPSelectionCapacityMatchesQualifyingEvidence(t *testing.T) {
 		records[i].Protocol = syntrail.ProtocolUDP
 	}
 	records[19].Protocol = syntrail.ProtocolTCP
-	records[200].Protocol = ""
+	records[200].Protocol = 0
 	got := tcpSYNTrailRecords(records)
 	if len(got) != 2 || cap(got) != 2 {
 		t.Fatalf("len=%d cap=%d", len(got), cap(got))

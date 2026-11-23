@@ -33,17 +33,17 @@ func TestScanFilesExtractsIPv4TCPSYNRecords(t *testing.T) {
 	}
 
 	want := Record{
-		SrcIP:     netip.MustParseAddr("10.1.2.3"),
-		DstIP:     netip.MustParseAddr("203.0.113.10"),
+		SrcIP:     netip.MustParseAddr("10.1.2.3").As4(),
+		DstIP:     netip.MustParseAddr("203.0.113.10").As4(),
 		DstPort:   443,
 		Protocol:  ProtocolTCP,
-		Timestamp: ts.UTC(),
+		Timestamp: ts.UTC().UnixNano(),
 	}
 	if records[0] != want {
 		t.Fatalf("record = %+v, want %+v", records[0], want)
 	}
-	if records[0].Timestamp.Location() != time.UTC {
-		t.Fatalf("timestamp location = %v, want UTC", records[0].Timestamp.Location())
+	if records[0].CaptureTime().Location() != time.UTC {
+		t.Fatalf("timestamp location = %v, want UTC", records[0].CaptureTime().Location())
 	}
 }
 
@@ -58,11 +58,11 @@ func TestScanFilesExtractsEligibleIPv4UDPRecord(t *testing.T) {
 		t.Fatalf("ScanFiles() error = %v", err)
 	}
 	want := []Record{{
-		SrcIP:     netip.MustParseAddr("10.1.2.3"),
-		DstIP:     netip.MustParseAddr("203.0.113.10"),
+		SrcIP:     netip.MustParseAddr("10.1.2.3").As4(),
+		DstIP:     netip.MustParseAddr("203.0.113.10").As4(),
 		DstPort:   53,
 		Protocol:  ProtocolUDP,
-		Timestamp: ts.UTC(),
+		Timestamp: ts.UTC().UnixNano(),
 	}}
 	if !reflect.DeepEqual(records, want) {
 		t.Fatalf("ScanFiles() = %+v, want %+v", records, want)
@@ -80,11 +80,11 @@ func TestScanFilesAcceptsIPv4LinkLocalUDPDestination(t *testing.T) {
 		t.Fatalf("ScanFiles() error = %v", err)
 	}
 	want := []Record{{
-		SrcIP:     netip.MustParseAddr("10.1.2.3"),
-		DstIP:     netip.MustParseAddr("169.254.1.2"),
+		SrcIP:     netip.MustParseAddr("10.1.2.3").As4(),
+		DstIP:     netip.MustParseAddr("169.254.1.2").As4(),
 		DstPort:   5353,
 		Protocol:  ProtocolUDP,
-		Timestamp: ts,
+		Timestamp: ts.UnixNano(),
 	}}
 	if !reflect.DeepEqual(records, want) {
 		t.Fatalf("ScanFiles() = %+v, want %+v", records, want)
@@ -109,25 +109,25 @@ func TestScanFilesDedupesUDPAtEarliestTimestampAcrossPacketsAndFiles(t *testing.
 	}
 	want := []Record{
 		{
-			SrcIP:     netip.MustParseAddr("10.1.2.3"),
-			DstIP:     netip.MustParseAddr("203.0.113.10"),
+			SrcIP:     netip.MustParseAddr("10.1.2.3").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.10").As4(),
 			DstPort:   53,
 			Protocol:  ProtocolUDP,
-			Timestamp: base,
+			Timestamp: base.UnixNano(),
 		},
 		{
-			SrcIP:     netip.MustParseAddr("10.1.2.3"),
-			DstIP:     netip.MustParseAddr("203.0.113.10"),
+			SrcIP:     netip.MustParseAddr("10.1.2.3").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.10").As4(),
 			DstPort:   5353,
 			Protocol:  ProtocolUDP,
-			Timestamp: base.Add(4 * time.Second),
+			Timestamp: base.Add(4 * time.Second).UnixNano(),
 		},
 		{
-			SrcIP:     netip.MustParseAddr("10.1.2.3"),
-			DstIP:     netip.MustParseAddr("203.0.113.11"),
+			SrcIP:     netip.MustParseAddr("10.1.2.3").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.11").As4(),
 			DstPort:   53,
 			Protocol:  ProtocolUDP,
-			Timestamp: base.Add(5 * time.Second),
+			Timestamp: base.Add(5 * time.Second).UnixNano(),
 		},
 	}
 	if !reflect.DeepEqual(records, want) {
@@ -146,7 +146,7 @@ func TestScanFileDedupesUDPWithinOneFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scanFile() error = %v", err)
 	}
-	if len(records) != 1 || !records[0].Timestamp.Equal(base) {
+	if len(records) != 1 || !records[0].CaptureTime().Equal(base) {
 		t.Fatalf("scanFile() = %+v, want one UDP record at %v", records, base)
 	}
 }
@@ -176,7 +176,7 @@ func TestScanFilesExcludesIneligiblePackets(t *testing.T) {
 	}
 }
 
-func TestScanFilesPreservesTCPFilePacketOrderAndDuplicates(t *testing.T) {
+func TestScanFilesPreservesTCPFilePacketOrderForDistinctAttempts(t *testing.T) {
 	firstTS := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
 	secondTS := firstTS.Add(time.Second)
 
@@ -185,7 +185,7 @@ func TestScanFilesPreservesTCPFilePacketOrderAndDuplicates(t *testing.T) {
 	})
 	second := writePCAP(t, []testPacket{
 		tcp4Packet(secondTS, "10.0.0.2", "203.0.113.2", 8443, true, false),
-		tcp4Packet(secondTS.Add(time.Second), "10.0.0.2", "203.0.113.2", 8443, true, false),
+		tcp4PacketWithHeader(secondTS.Add(time.Second), "10.0.0.2", "203.0.113.2", 49152, 8443, 2, true, false),
 	})
 
 	records, err := ScanFiles(context.Background(), []string{second, first})
@@ -196,9 +196,9 @@ func TestScanFilesPreservesTCPFilePacketOrderAndDuplicates(t *testing.T) {
 		t.Fatalf("ScanFiles() returned %d records, want 3", len(records))
 	}
 
-	if records[0].SrcIP != netip.MustParseAddr("10.0.0.2") ||
-		records[1].SrcIP != netip.MustParseAddr("10.0.0.2") ||
-		records[2].SrcIP != netip.MustParseAddr("10.0.0.1") {
+	if records[0].SrcAddr() != netip.MustParseAddr("10.0.0.2") ||
+		records[1].SrcAddr() != netip.MustParseAddr("10.0.0.2") ||
+		records[2].SrcAddr() != netip.MustParseAddr("10.0.0.1") {
 		t.Fatalf("TCP records are out of file/packet order: %+v", records)
 	}
 }
@@ -207,7 +207,7 @@ func TestScanFilesWithOptionsConcurrentMatchesSequentialOrder(t *testing.T) {
 	base := time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)
 	first := writePCAP(t, []testPacket{
 		tcp4Packet(base.Add(10*time.Millisecond), "10.0.0.1", "203.0.113.1", 443, true, false),
-		tcp4Packet(base.Add(20*time.Millisecond), "10.0.0.1", "203.0.113.1", 443, true, false),
+		tcp4PacketWithHeader(base.Add(20*time.Millisecond), "10.0.0.1", "203.0.113.1", 49152, 443, 2, true, false),
 		udp4Packet(base.Add(10*time.Second), "10.0.0.1", "203.0.113.10", 53),
 		udp4Packet(base.Add(12*time.Second), "10.0.0.1", "203.0.113.10", 53),
 		udp4Packet(base.Add(2*time.Second), "10.0.0.1", "203.0.113.10", 5353),
@@ -219,7 +219,7 @@ func TestScanFilesWithOptionsConcurrentMatchesSequentialOrder(t *testing.T) {
 	})
 	third := writePCAP(t, []testPacket{
 		tcp4Packet(base.Add(40*time.Millisecond), "10.0.0.3", "203.0.113.3", 9443, true, false),
-		tcp4Packet(base.Add(50*time.Millisecond), "10.0.0.3", "203.0.113.3", 9443, true, false),
+		tcp4PacketWithHeader(base.Add(50*time.Millisecond), "10.0.0.3", "203.0.113.3", 49152, 9443, 2, true, false),
 		udp4Packet(base.Add(4*time.Second), "10.0.0.4", "203.0.113.12", 123),
 	})
 	files := []string{first, second, third}
@@ -238,67 +238,67 @@ func TestScanFilesWithOptionsConcurrentMatchesSequentialOrder(t *testing.T) {
 
 	want := []Record{
 		{
-			SrcIP:     netip.MustParseAddr("10.0.0.1"),
-			DstIP:     netip.MustParseAddr("203.0.113.1"),
+			SrcIP:     netip.MustParseAddr("10.0.0.1").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.1").As4(),
 			DstPort:   443,
 			Protocol:  ProtocolTCP,
-			Timestamp: base.Add(10 * time.Millisecond),
+			Timestamp: base.Add(10 * time.Millisecond).UnixNano(),
 		},
 		{
-			SrcIP:     netip.MustParseAddr("10.0.0.1"),
-			DstIP:     netip.MustParseAddr("203.0.113.1"),
+			SrcIP:     netip.MustParseAddr("10.0.0.1").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.1").As4(),
 			DstPort:   443,
 			Protocol:  ProtocolTCP,
-			Timestamp: base.Add(20 * time.Millisecond),
+			Timestamp: base.Add(20 * time.Millisecond).UnixNano(),
 		},
 		{
-			SrcIP:     netip.MustParseAddr("10.0.0.2"),
-			DstIP:     netip.MustParseAddr("203.0.113.2"),
+			SrcIP:     netip.MustParseAddr("10.0.0.2").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.2").As4(),
 			DstPort:   8443,
 			Protocol:  ProtocolTCP,
-			Timestamp: base.Add(30 * time.Millisecond),
+			Timestamp: base.Add(30 * time.Millisecond).UnixNano(),
 		},
 		{
-			SrcIP:     netip.MustParseAddr("10.0.0.3"),
-			DstIP:     netip.MustParseAddr("203.0.113.3"),
+			SrcIP:     netip.MustParseAddr("10.0.0.3").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.3").As4(),
 			DstPort:   9443,
 			Protocol:  ProtocolTCP,
-			Timestamp: base.Add(40 * time.Millisecond),
+			Timestamp: base.Add(40 * time.Millisecond).UnixNano(),
 		},
 		{
-			SrcIP:     netip.MustParseAddr("10.0.0.3"),
-			DstIP:     netip.MustParseAddr("203.0.113.3"),
+			SrcIP:     netip.MustParseAddr("10.0.0.3").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.3").As4(),
 			DstPort:   9443,
 			Protocol:  ProtocolTCP,
-			Timestamp: base.Add(50 * time.Millisecond),
+			Timestamp: base.Add(50 * time.Millisecond).UnixNano(),
 		},
 		{
-			SrcIP:     netip.MustParseAddr("10.0.0.1"),
-			DstIP:     netip.MustParseAddr("203.0.113.10"),
+			SrcIP:     netip.MustParseAddr("10.0.0.1").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.10").As4(),
 			DstPort:   53,
 			Protocol:  ProtocolUDP,
-			Timestamp: base,
+			Timestamp: base.UnixNano(),
 		},
 		{
-			SrcIP:     netip.MustParseAddr("10.0.0.1"),
-			DstIP:     netip.MustParseAddr("203.0.113.10"),
+			SrcIP:     netip.MustParseAddr("10.0.0.1").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.10").As4(),
 			DstPort:   5353,
 			Protocol:  ProtocolUDP,
-			Timestamp: base.Add(2 * time.Second),
+			Timestamp: base.Add(2 * time.Second).UnixNano(),
 		},
 		{
-			SrcIP:     netip.MustParseAddr("10.0.0.1"),
-			DstIP:     netip.MustParseAddr("203.0.113.11"),
+			SrcIP:     netip.MustParseAddr("10.0.0.1").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.11").As4(),
 			DstPort:   53,
 			Protocol:  ProtocolUDP,
-			Timestamp: base.Add(3 * time.Second),
+			Timestamp: base.Add(3 * time.Second).UnixNano(),
 		},
 		{
-			SrcIP:     netip.MustParseAddr("10.0.0.4"),
-			DstIP:     netip.MustParseAddr("203.0.113.12"),
+			SrcIP:     netip.MustParseAddr("10.0.0.4").As4(),
+			DstIP:     netip.MustParseAddr("203.0.113.12").As4(),
 			DstPort:   123,
 			Protocol:  ProtocolUDP,
-			Timestamp: base.Add(4 * time.Second),
+			Timestamp: base.Add(4 * time.Second).UnixNano(),
 		},
 	}
 	if !reflect.DeepEqual(concurrent, want) {
@@ -340,9 +340,9 @@ func TestScanFilesWithOptionsPacketAdmissionMatchesSequentialAndConcurrent(t *te
 	}
 
 	want := []Record{
-		{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.10"), DstPort: 443, Protocol: ProtocolTCP, Timestamp: base},
-		{SrcIP: netip.MustParseAddr("192.168.1.10"), DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 22, Protocol: ProtocolTCP, Timestamp: base.Add(time.Second)},
-		{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 53, Protocol: ProtocolUDP, Timestamp: base.Add(3 * time.Second)},
+		{SrcIP: netip.MustParseAddr("10.0.0.1").As4(), DstIP: netip.MustParseAddr("203.0.113.10").As4(), DstPort: 443, Protocol: ProtocolTCP, Timestamp: base.UnixNano()},
+		{SrcIP: netip.MustParseAddr("192.168.1.10").As4(), DstIP: netip.MustParseAddr("10.0.0.2").As4(), DstPort: 22, Protocol: ProtocolTCP, Timestamp: base.Add(time.Second).UnixNano()},
+		{SrcIP: netip.MustParseAddr("10.0.0.1").As4(), DstIP: netip.MustParseAddr("10.0.0.2").As4(), DstPort: 53, Protocol: ProtocolUDP, Timestamp: base.Add(3 * time.Second).UnixNano()},
 	}
 	if !reflect.DeepEqual(sequential, want) {
 		t.Fatalf("filtered records = %+v, want %+v", sequential, want)
@@ -520,7 +520,7 @@ func TestScanFileReadsPCAPNG(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("scanFile() returned %d records, want 1", len(records))
 	}
-	if records[0].SrcIP != netip.MustParseAddr("100.64.1.10") {
+	if records[0].SrcAddr() != netip.MustParseAddr("100.64.1.10") {
 		t.Fatalf("src IP = %v, want 100.64.1.10", records[0].SrcIP)
 	}
 }
@@ -542,10 +542,10 @@ func TestScanFilesMixedPCAPAndPCAPNGPreservesLegacyOrdering(t *testing.T) {
 		t.Fatalf("ScanFilesWithOptions() error = %v", err)
 	}
 	want := []Record{
-		{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.10"), DstPort: 443, Protocol: ProtocolTCP, Timestamp: base.Add(time.Second)},
-		{SrcIP: netip.MustParseAddr("10.0.0.2"), DstIP: netip.MustParseAddr("203.0.113.11"), DstPort: 8443, Protocol: ProtocolTCP, Timestamp: base.Add(2 * time.Second)},
-		{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.20"), DstPort: 53, Protocol: ProtocolUDP, Timestamp: base},
-		{SrcIP: netip.MustParseAddr("10.0.0.2"), DstIP: netip.MustParseAddr("203.0.113.21"), DstPort: 5353, Protocol: ProtocolUDP, Timestamp: base.Add(3 * time.Second)},
+		{SrcIP: netip.MustParseAddr("10.0.0.1").As4(), DstIP: netip.MustParseAddr("203.0.113.10").As4(), DstPort: 443, Protocol: ProtocolTCP, Timestamp: base.Add(time.Second).UnixNano()},
+		{SrcIP: netip.MustParseAddr("10.0.0.2").As4(), DstIP: netip.MustParseAddr("203.0.113.11").As4(), DstPort: 8443, Protocol: ProtocolTCP, Timestamp: base.Add(2 * time.Second).UnixNano()},
+		{SrcIP: netip.MustParseAddr("10.0.0.1").As4(), DstIP: netip.MustParseAddr("203.0.113.20").As4(), DstPort: 53, Protocol: ProtocolUDP, Timestamp: base.UnixNano()},
+		{SrcIP: netip.MustParseAddr("10.0.0.2").As4(), DstIP: netip.MustParseAddr("203.0.113.21").As4(), DstPort: 5353, Protocol: ProtocolUDP, Timestamp: base.Add(3 * time.Second).UnixNano()},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ScanFilesWithOptions() = %+v, want %+v", got, want)
@@ -629,6 +629,10 @@ type scanProgressUpdate struct {
 }
 
 func tcp4Packet(ts time.Time, src, dst string, dstPort uint16, syn, ack bool) testPacket {
+	return tcp4PacketWithHeader(ts, src, dst, 49152, dstPort, 1, syn, ack)
+}
+
+func tcp4PacketWithHeader(ts time.Time, src, dst string, srcPort, dstPort uint16, seq uint32, syn, ack bool) testPacket {
 	eth := ethernetLayer(layers.EthernetTypeIPv4)
 	ip := &layers.IPv4{
 		Version:  4,
@@ -638,11 +642,11 @@ func tcp4Packet(ts time.Time, src, dst string, dstPort uint16, syn, ack bool) te
 		DstIP:    net.ParseIP(dst).To4(),
 	}
 	tcp := &layers.TCP{
-		SrcPort: 49152,
+		SrcPort: layers.TCPPort(srcPort),
 		DstPort: layers.TCPPort(dstPort),
 		SYN:     syn,
 		ACK:     ack,
-		Seq:     1,
+		Seq:     seq,
 	}
 	if err := tcp.SetNetworkLayerForChecksum(ip); err != nil {
 		panic(err)

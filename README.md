@@ -435,7 +435,11 @@ Produced when an exact-IP `fleet` or YAML `fleet_subnets` membership source is s
 - malformed IPv4 entries are errors
 - IPv6 entries are errors
 
-The SYN trail is packet-level initiator evidence from raw IPv4 TCP SYN packets.
+The SYN trail records the first eligible IPv4 TCP SYN for each attempt, in file and packet order.
+Across the entire replay, repeated SYNs with the same source and destination IPs and ports,
+packet-time fleet identity, and initial sequence number contribute one observation. The first
+packet supplies its timestamp. A different port, sequence number, or subscriber counts separately.
+An unanswered initial SYN still counts.
 Supplying `--fleet` or YAML `fleet_subnets` constrains packet-derived analysis after the optional RADIUS pass to IPv4
 packets whose source or destination is in that fleet. Non-IPv4 packets and
 packets with two non-fleet endpoints do not seed DNS, SNI, connection,

@@ -306,22 +306,23 @@ func StrongObservedIPDNSPairsFromTransactions(txs []*DNSTransaction) map[string]
 	}
 
 	for _, tx := range txs {
-		if tx == nil || tx.DNSName == "" || len(tx.ResolvedIPs) == 0 {
+		if tx == nil || tx.DNSName == "" || tx.resolvedIPLen() == 0 {
 			continue
 		}
-		for _, ip := range tx.ResolvedIPs {
-			if ip == nil {
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			ip := tx.resolvedIPAt(i)
+			if ip.isNil() {
 				continue
 			}
 			ip4 := ip.To4()
-			if ip4 == nil {
+			if ip4.isNil() {
 				continue
 			}
 			ipStr := ip4.String()
 
 			ev := EvNone
-			if tx.ResolvedIPEvidence != nil {
-				ev = tx.ResolvedIPEvidence[ipStr]
+			if tx.hasResolvedIPEvidence() {
+				ev = tx.resolvedIPEvidenceValue(ipStr)
 			}
 			if ev == EvNone {
 				ev = tx.NameEvidence

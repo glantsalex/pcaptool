@@ -26,20 +26,20 @@ func TestWritePrivateNonFleetEndpointsJSONEmpty(t *testing.T) {
 func TestWritePrivateNonFleetEndpointsJSONAggregatesDistinctDevicesAndSorts(t *testing.T) {
 	serverRecords := []Record{
 		endpointRecord("10.20.0.1", "10.0.0.10", 1883, ProtocolTCP),
-		endpointRecord("10.20.0.1", "10.0.0.10", 1883, Protocol("TCP")),
+		endpointRecord("10.20.0.1", "10.0.0.10", 1883, ProtocolTCP),
 		endpointRecord("10.20.0.2", "10.0.0.10", 1883, ProtocolTCP),
-		endpointRecord("10.20.0.1", "10.0.0.10", 443, ""),
+		endpointRecord("10.20.0.1", "10.0.0.10", 443, 0),
 		endpointRecord("10.20.0.1", "10.0.0.10", 53, ProtocolUDP),
 		endpointRecord("10.20.0.2", "10.0.0.10", 53, ProtocolUDP),
-		endpointRecord("10.20.0.3", "10.0.0.10", 53, Protocol("UDP")),
+		endpointRecord("10.20.0.3", "10.0.0.10", 53, ProtocolUDP),
 		endpointRecord("10.20.0.1", "10.0.0.10", 53, ProtocolTCP),
 		endpointRecord("10.20.0.4", "10.0.0.20", 8443, ProtocolTCP),
 	}
 	probeRecords := []Record{
 		endpointRecord("10.0.0.10", "10.30.0.1", 22, ProtocolTCP),
-		endpointRecord("10.0.0.10", "10.30.0.1", 22, Protocol("TCP")),
+		endpointRecord("10.0.0.10", "10.30.0.1", 22, ProtocolTCP),
 		endpointRecord("10.0.0.10", "10.30.0.2", 22, ProtocolTCP),
-		endpointRecord("10.0.0.10", "10.30.0.1", 8080, ""),
+		endpointRecord("10.0.0.10", "10.30.0.1", 8080, 0),
 		endpointRecord("10.0.0.2", "10.30.0.1", 502, ProtocolTCP),
 	}
 
@@ -107,11 +107,8 @@ func TestWritePrivateNonFleetEndpointsJSONReportsWriteFailure(t *testing.T) {
 	}
 }
 
-func TestWritePrivateNonFleetEndpointsJSONIgnoresNonIPv4Evidence(t *testing.T) {
-	serverRecords := []Record{
-		endpointRecord("10.20.0.1", "2001:db8::1", 443, ProtocolTCP),
-		endpointRecord("2001:db8::2", "10.0.0.1", 443, ProtocolTCP),
-	}
+func TestWritePrivateNonFleetEndpointsJSONRetainsZeroIPv4Evidence(t *testing.T) {
+	serverRecords := []Record{endpointRecord("10.20.0.1", "0.0.0.0", 443, ProtocolTCP)}
 
 	var buffer bytes.Buffer
 	if err := WritePrivateNonFleetEndpointsJSON(&buffer, serverRecords, nil, time.Time{}); err != nil {
@@ -122,8 +119,8 @@ func TestWritePrivateNonFleetEndpointsJSONIgnoresNonIPv4Evidence(t *testing.T) {
 	if err := json.Unmarshal(buffer.Bytes(), &got); err != nil {
 		t.Fatalf("decode private non-fleet endpoints JSON: %v", err)
 	}
-	if len(got.Endpoints) != 0 {
-		t.Fatalf("endpoints = %#v, want empty for non-IPv4 evidence", got.Endpoints)
+	if len(got.Endpoints) != 1 || got.Endpoints[0].IP != "0.0.0.0" {
+		t.Fatalf("endpoints = %#v, want representable zero IPv4 address", got.Endpoints)
 	}
 }
 
@@ -170,8 +167,8 @@ func TestWritePrivateNonFleetEndpointsJSONSnapshotTime(t *testing.T) {
 
 func endpointRecord(srcIP, dstIP string, dstPort uint16, protocol Protocol) Record {
 	return Record{
-		SrcIP:    netip.MustParseAddr(srcIP),
-		DstIP:    netip.MustParseAddr(dstIP),
+		SrcIP:    netip.MustParseAddr(srcIP).As4(),
+		DstIP:    netip.MustParseAddr(dstIP).As4(),
 		DstPort:  dstPort,
 		Protocol: protocol,
 	}

@@ -60,7 +60,7 @@ func ScanFilesWithOptions(ctx context.Context, files []string, opts ScanOptions)
 		cache = NewSyslogCache()
 	}
 	scanner := func(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
-		return ScanFileWithOptions(ctx, path, ScanOptions{PacketAdmission: admit, SyslogCache: cache, SyslogEligible: opts.SyslogEligible, FleetIdentity: opts.FleetIdentity})
+		return ScanPacketBatch(ctx, path, ScanOptions{PacketAdmission: admit, SyslogCache: cache, SyslogEligible: opts.SyslogEligible, FleetIdentity: opts.FleetIdentity})
 	}
 	records, err := scanFilesConcurrentWithScanner(ctx, files, opts.Workers, opts.Progress, opts.PacketAdmission, scanner)
 	ApplySyslogQualifications(records, cache)
@@ -78,7 +78,7 @@ func scanFilesSequential(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		fileRecords, err := ScanFile(ctx, file, admit)
+		fileRecords, err := ScanPacketBatch(ctx, file, ScanOptions{PacketAdmission: admit})
 		if progress != nil {
 			progress(i+1, len(files), file)
 		}
@@ -97,7 +97,9 @@ func scanFilesConcurrent(
 	progress ScanProgressFunc,
 	admit pcaputil.PacketAdmission,
 ) ([]Record, error) {
-	return scanFilesConcurrentWithScanner(ctx, files, workers, progress, admit, ScanFile)
+	return scanFilesConcurrentWithScanner(ctx, files, workers, progress, admit, func(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
+		return ScanPacketBatch(ctx, path, ScanOptions{PacketAdmission: admit})
+	})
 }
 
 type scanFileFunc func(context.Context, string, pcaputil.PacketAdmission) ([]Record, error)
@@ -258,10 +260,12 @@ type scanFileResult struct {
 }
 
 // Accumulator merges completed per-file trail records in file order while
-// preserving TCP observations and globally deduplicating UDP tuples.
+// retaining the first packet for each TCP SYN attempt and the earliest UDP per tuple.
 // Accumulator is not safe for concurrent use; the scan coordinator owns it.
 type Accumulator struct {
-	tcpRecords []Record
+	seenSYNs   synAttempts
+	tcpChunks  []tcpChunk // Completed chunks, in file/packet order.
+	tail       tcpChunk   // Active chunk; the first one grows lazily.
 	udpRecords map[observedRecordKey]Record
 	udpOrder   []observedRecordKey
 }
@@ -273,15 +277,31 @@ func NewAccumulator() *Accumulator {
 	}
 }
 
-// Add merges one completed file's records. Callers must add files in the
-// discovered file order to preserve externally visible trail ordering.
+// Add merges one completed file in discovered order. ScanPacketBatch and
+// Collector.TakePacketBatch provide the headers for replay-wide SYN matching.
+// Plain records supplied without their packet headers retain every occurrence.
 func (a *Accumulator) Add(records []Record) {
-	// The externally visible ordering contract is all TCP observations in
+	// The externally visible ordering contract is first-observed TCP attempts in
 	// file/packet order followed by first-seen UDP tuples. UDP timestamps may
 	// still be replaced by an earlier observation from a later file.
 	for _, record := range records {
 		if record.Protocol != ProtocolUDP {
-			a.tcpRecords = append(a.tcpRecords, record)
+			if !a.seenSYNs.keep(&record) {
+				continue
+			}
+			if len(a.tail.slots) == accumulatorChunkRecords {
+				// Keep completed chunks in place instead of repeatedly copying
+				// the entire capture history into a larger backing array.
+				a.tcpChunks = append(a.tcpChunks, a.tail)
+				a.tail = tcpChunk{slots: make([]compactTCPRecord, 0, accumulatorChunkRecords)}
+			} else if len(a.tail.slots) == cap(a.tail.slots) {
+				// Small captures should not allocate a full chunk for one record.
+				capacity := max(1, min(2*cap(a.tail.slots), accumulatorChunkRecords))
+				grown := make([]compactTCPRecord, len(a.tail.slots), capacity)
+				copy(grown, a.tail.slots)
+				a.tail.slots = grown
+			}
+			a.tail.add(record)
 			continue
 		}
 		addEarliestRecord(a.udpRecords, &a.udpOrder, record)
@@ -291,18 +311,23 @@ func (a *Accumulator) Add(records []Record) {
 // TakeRecords returns the accumulated records and transfers ownership of the
 // returned slice to the caller. The accumulator must not be used afterward.
 func (a *Accumulator) TakeRecords() []Record {
-	// Reuse TCP storage when possible. Otherwise size the one required combined
-	// buffer exactly, rather than growing it geometrically while appending UDP.
-	if len(a.udpOrder) > cap(a.tcpRecords)-len(a.tcpRecords) {
-		combined := make([]Record, len(a.tcpRecords), len(a.tcpRecords)+len(a.udpOrder))
-		copy(combined, a.tcpRecords)
-		a.tcpRecords = combined
+	a.seenSYNs = nil // The destination allocation can trigger GC.
+	tcpCount := len(a.tcpChunks)*accumulatorChunkRecords + len(a.tail.slots)
+	var records []Record
+	if total := tcpCount + len(a.udpOrder); total > 0 {
+		records = make([]Record, tcpCount, total)
 	}
+	offset := 0
+	for i := range a.tcpChunks {
+		offset += a.tcpChunks[i].unpackInto(records[offset:])
+		a.tcpChunks[i] = tcpChunk{}
+	}
+	a.tcpChunks = nil
+	a.tail.unpackInto(records[offset:])
+	a.tail = tcpChunk{}
 	for _, key := range a.udpOrder {
-		a.tcpRecords = append(a.tcpRecords, a.udpRecords[key])
+		records = append(records, a.udpRecords[key])
 	}
-	records := a.tcpRecords
-	a.tcpRecords = nil
 	a.udpRecords = nil
 	a.udpOrder = nil
 	return records
@@ -336,28 +361,45 @@ func NewCollectorWithOptions(opts ScanOptions) *Collector {
 
 // Observe records eligible raw TCP SYN and UDP evidence from packet. All
 // retained fields are copied into stable value types before Observe returns.
-func (c *Collector) Observe(packet gopacket.Packet) {
-	if record, ok := synRecord(packet); ok {
+// A timestamp error rejects the containing file; callers must not commit its batch.
+func (c *Collector) Observe(packet gopacket.Packet) error {
+	record, tcp, err := synRecord(packet)
+	if err != nil {
+		return err
+	}
+	if tcp != nil {
 		if c.fleetIdentity != nil {
 			record.FleetIdentity = c.fleetIdentity(record)
 		}
+		record.hasSYNHeader, record.synSrcPort, record.synSeq = true, uint16(tcp.SrcPort), tcp.Seq
 		c.tcpRecords = append(c.tcpRecords, record)
 	}
-	if record, ok := udpRecord(packet); ok {
+	record, ok, err := udpRecord(packet)
+	if err != nil {
+		return err
+	}
+	if ok {
 		if c.fleetIdentity != nil {
 			record.FleetIdentity = c.fleetIdentity(record)
 		}
-		if c.syslogEligible != nil && c.syslogEligible(record.SrcIP, record.DstIP) {
+		if c.syslogEligible != nil && c.syslogEligible(record.SrcAddr(), record.DstAddr()) {
 			udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
-			record.SyslogQualified = c.syslogCache.Qualify(record.DstIP, record.DstPort, udp.Payload)
+			record.SyslogQualified = c.syslogCache.Qualify(record.DstAddr(), record.DstPort, udp.Payload)
 		}
 		addEarliestRecord(c.udpRecords, &c.udpOrder, record)
 	}
+	return nil
 }
 
 // TakeRecords returns this file's records and transfers ownership of the
 // returned slice to the caller. The collector must not be used afterward.
 func (c *Collector) TakeRecords() []Record {
+	return singleFileRecords(c.TakePacketBatch())
+}
+
+// TakePacketBatch transfers this file's observations, including the TCP wire
+// fields needed by Accumulator.Add to recognize retransmissions across files.
+func (c *Collector) TakePacketBatch() []Record {
 	records := appendOrderedRecords(c.tcpRecords, c.udpRecords, c.udpOrder)
 	ApplySyslogQualifications(records, c.syslogCache)
 	return records
@@ -371,6 +413,15 @@ func ScanFile(ctx context.Context, path string, admit pcaputil.PacketAdmission) 
 
 // ScanFileWithOptions performs a strict file scan with optional syslog evidence.
 func ScanFileWithOptions(ctx context.Context, path string, opts ScanOptions) ([]Record, error) {
+	batch, err := ScanPacketBatch(ctx, path, opts)
+	if err != nil {
+		return nil, err
+	}
+	return singleFileRecords(batch), nil
+}
+
+// ScanPacketBatch strictly reads one file for an ordered Accumulator.Add.
+func ScanPacketBatch(ctx context.Context, path string, opts ScanOptions) ([]Record, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -388,6 +439,7 @@ func ScanFileWithOptions(ctx context.Context, path string, opts ScanOptions) ([]
 	src.NoCopy = true
 
 	collector := NewCollectorWithOptions(opts)
+	packetNumber := 0
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -396,16 +448,19 @@ func ScanFileWithOptions(ctx context.Context, path string, opts ScanOptions) ([]
 
 		packet, err := src.NextPacket()
 		if err == io.EOF {
-			return collector.TakeRecords(), nil
+			return collector.TakePacketBatch(), nil
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read packet from %q: %w", path, err)
 		}
+		packetNumber++
 		if opts.PacketAdmission != nil && !opts.PacketAdmission(packet) {
 			continue
 		}
 
-		collector.Observe(packet)
+		if err := collector.Observe(packet); err != nil {
+			return nil, fmt.Errorf("observe packet %d from %q: %w", packetNumber, path, err)
+		}
 	}
 }
 
@@ -427,101 +482,97 @@ func packetSource(f *os.File) (*gopacket.PacketSource, error) {
 	return gopacket.NewPacketSource(pr, pr.LinkType()), nil
 }
 
-func synRecord(packet gopacket.Packet) (Record, bool) {
+func synRecord(packet gopacket.Packet) (Record, *layers.TCP, error) {
 	ip4Layer := packet.Layer(layers.LayerTypeIPv4)
 	if ip4Layer == nil {
-		return Record{}, false
+		return Record{}, nil, nil
 	}
 	ip4, ok := ip4Layer.(*layers.IPv4)
 	if !ok {
-		return Record{}, false
+		return Record{}, nil, nil
 	}
 
 	tcpLayer := packet.Layer(layers.LayerTypeTCP)
 	if tcpLayer == nil {
-		return Record{}, false
+		return Record{}, nil, nil
 	}
 	tcp, ok := tcpLayer.(*layers.TCP)
 	if !ok {
-		return Record{}, false
+		return Record{}, nil, nil
 	}
 	if !tcp.SYN || tcp.ACK {
-		return Record{}, false
+		return Record{}, nil, nil
 	}
 
 	dstPort := uint16(tcp.DstPort)
 	if dstPort == 0 {
-		return Record{}, false
+		return Record{}, nil, nil
 	}
 
 	srcIP, ok := netipAddrFromIPv4(ip4.SrcIP)
 	if !ok || !isLocalIPv4(srcIP) {
-		return Record{}, false
+		return Record{}, nil, nil
 	}
 	dstIP, ok := netipAddrFromIPv4(ip4.DstIP)
 	if !ok {
-		return Record{}, false
+		return Record{}, nil, nil
 	}
 
 	md := packet.Metadata()
 	if md == nil {
-		return Record{}, false
+		return Record{}, nil, nil
 	}
 
-	return Record{
-		SrcIP:     srcIP,
-		DstIP:     dstIP,
-		DstPort:   dstPort,
-		Protocol:  ProtocolTCP,
-		Timestamp: md.Timestamp.UTC(),
-	}, true
+	record := Record{SrcIP: srcIP.As4(), DstIP: dstIP.As4(), DstPort: dstPort, Protocol: ProtocolTCP}
+	if err := record.SetTimestamp(md.Timestamp); err != nil {
+		return Record{}, nil, err
+	}
+	return record, tcp, nil
 }
 
-func udpRecord(packet gopacket.Packet) (Record, bool) {
+func udpRecord(packet gopacket.Packet) (Record, bool, error) {
 	ip4Layer := packet.Layer(layers.LayerTypeIPv4)
 	if ip4Layer == nil {
-		return Record{}, false
+		return Record{}, false, nil
 	}
 	ip4, ok := ip4Layer.(*layers.IPv4)
 	if !ok {
-		return Record{}, false
+		return Record{}, false, nil
 	}
 
 	udpLayer := packet.Layer(layers.LayerTypeUDP)
 	if udpLayer == nil {
-		return Record{}, false
+		return Record{}, false, nil
 	}
 	udp, ok := udpLayer.(*layers.UDP)
 	if !ok {
-		return Record{}, false
+		return Record{}, false, nil
 	}
 
 	dstPort := uint16(udp.DstPort)
 	if dstPort == 0 {
-		return Record{}, false
+		return Record{}, false, nil
 	}
 
 	srcIP, ok := netipAddrFromIPv4(ip4.SrcIP)
 	if !ok || !isLocalIPv4(srcIP) {
-		return Record{}, false
+		return Record{}, false, nil
 	}
 	dstIP, ok := netipAddrFromIPv4(ip4.DstIP)
 	if !ok || !isEligibleUDPDestination(dstIP) || srcIP == dstIP {
-		return Record{}, false
+		return Record{}, false, nil
 	}
 
 	md := packet.Metadata()
 	if md == nil {
-		return Record{}, false
+		return Record{}, false, nil
 	}
 
-	return Record{
-		SrcIP:     srcIP,
-		DstIP:     dstIP,
-		DstPort:   dstPort,
-		Protocol:  ProtocolUDP,
-		Timestamp: md.Timestamp.UTC(),
-	}, true
+	record := Record{SrcIP: srcIP.As4(), DstIP: dstIP.As4(), DstPort: dstPort, Protocol: ProtocolUDP}
+	if err := record.SetTimestamp(md.Timestamp); err != nil {
+		return Record{}, false, err
+	}
+	return record, true, nil
 }
 
 type observedRecordKey struct {
@@ -535,8 +586,8 @@ type observedRecordKey struct {
 func addEarliestRecord(records map[observedRecordKey]Record, order *[]observedRecordKey, record Record) {
 	key := observedRecordKey{
 		fleetIdentity: record.FleetIdentity,
-		srcIP:         record.SrcIP,
-		dstIP:         record.DstIP,
+		srcIP:         record.SrcAddr(),
+		dstIP:         record.DstAddr(),
 		dstPort:       record.DstPort,
 		protocol:      record.Protocol,
 	}
@@ -546,7 +597,7 @@ func addEarliestRecord(records map[observedRecordKey]Record, order *[]observedRe
 		*order = append(*order, key)
 		return
 	}
-	if record.Timestamp.Before(current.Timestamp) {
+	if record.TimeBefore(current) {
 		records[key] = record
 	}
 }
@@ -586,7 +637,7 @@ func ApplySyslogQualifications(records []Record, cache *SyslogCache) {
 	}
 	for i := range records {
 		if records[i].Protocol == ProtocolUDP {
-			records[i].SyslogQualified = cache.Known(records[i].DstIP, records[i].DstPort)
+			records[i].SyslogQualified = cache.Known(records[i].DstAddr(), records[i].DstPort)
 		}
 	}
 }

@@ -52,16 +52,6 @@ func TestClassify(t *testing.T) {
 			r:    testRecord("10.0.0.1", "10.0.0.2", 0),
 			ok:   false,
 		},
-		{
-			name: "discard IPv6 source",
-			r:    testRecord("2001:db8::1", "10.0.0.2", 443),
-			ok:   false,
-		},
-		{
-			name: "discard IPv6 destination",
-			r:    testRecord("10.0.0.1", "2001:db8::1", 443),
-			ok:   false,
-		},
 	}
 
 	for _, tt := range tests {
@@ -123,8 +113,8 @@ func testFleetSet(ips ...string) FleetSet {
 
 func testRecord(src, dst string, dstPort uint16) Record {
 	return Record{
-		SrcIP:   netip.MustParseAddr(src),
-		DstIP:   netip.MustParseAddr(dst),
+		SrcIP:   netip.MustParseAddr(src).As4(),
+		DstIP:   netip.MustParseAddr(dst).As4(),
 		DstPort: dstPort,
 	}
 }

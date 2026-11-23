@@ -14,11 +14,11 @@ import (
 func TestServerSummaryDuplicateHeavyContract(t *testing.T) {
 	a, b := netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.2")
 	pattern := []Record{
-		{DstIP: b, DstPort: 443, Protocol: ProtocolTCP},
-		{DstIP: a, DstPort: 53, Protocol: ProtocolUDP},
-		{DstIP: b, DstPort: 80, Protocol: ""},
-		{DstIP: a, DstPort: 80, Protocol: ProtocolTCP},
-		{DstIP: b, DstPort: 80, Protocol: ProtocolTCP},
+		{DstIP: b.As4(), DstPort: 443, Protocol: ProtocolTCP},
+		{DstIP: a.As4(), DstPort: 53, Protocol: ProtocolUDP},
+		{DstIP: b.As4(), DstPort: 80, Protocol: 0},
+		{DstIP: a.As4(), DstPort: 80, Protocol: ProtocolTCP},
+		{DstIP: b.As4(), DstPort: 80, Protocol: ProtocolTCP},
 	}
 	records := make([]Record, 0, 5000)
 	for i := 0; i < 1000; i++ {
@@ -38,9 +38,9 @@ func TestServerSummaryDuplicateHeavyContract(t *testing.T) {
 }
 
 func TestSelectLocalityOwnedExactStorage(t *testing.T) {
-	pub := Record{DstIP: netip.MustParseAddr("203.0.113.1")}
-	local := Record{DstIP: netip.MustParseAddr("10.0.0.1")}
-	shared := Record{DstIP: netip.MustParseAddr("100.64.0.1")}
+	pub := Record{DstIP: netip.MustParseAddr("203.0.113.1").As4()}
+	local := Record{DstIP: netip.MustParseAddr("10.0.0.1").As4()}
+	shared := Record{DstIP: netip.MustParseAddr("100.64.0.1").As4()}
 	for _, input := range [][]Record{nil, {}, {pub, pub}, {local, shared}, {pub, local, pub, shared}} {
 		original := append([]Record(nil), input...)
 		for _, private := range []bool{false, true} {
@@ -73,7 +73,7 @@ func benchmarkSummaryRecords(n, distinct int) []Record {
 	records := make([]Record, n)
 	for i := range records {
 		j := i % distinct
-		records[i] = Record{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.AddrFrom4([4]byte{203, byte(j >> 16), byte(j >> 8), byte(j)}), DstPort: 443, Protocol: ProtocolTCP, Timestamp: time.Unix(int64(i), 0)}
+		records[i] = Record{SrcIP: netip.MustParseAddr("10.0.0.1").As4(), DstIP: netip.AddrFrom4([4]byte{203, byte(j >> 16), byte(j >> 8), byte(j)}).As4(), DstPort: 443, Protocol: ProtocolTCP, Timestamp: time.Unix(int64(i), 0).UnixNano()}
 	}
 	return records
 }
@@ -104,7 +104,7 @@ func BenchmarkServerSummaryAllocation(b *testing.B) {
 func BenchmarkLocalitySelectionAllocation(b *testing.B) {
 	records := benchmarkSummaryRecords(100000, 1000)
 	for i := 0; i < len(records); i += 100 {
-		records[i].DstIP = netip.MustParseAddr("10.0.0.2")
+		records[i].DstIP = netip.MustParseAddr("10.0.0.2").As4()
 	}
 	for _, legacy := range []bool{true, false} {
 		b.Run(fmt.Sprintf("baseline_%t", legacy), func(b *testing.B) {
@@ -131,7 +131,7 @@ func baselinePrivateServerTuples(records []Record) []ServerTuple {
 	rows := make([]ServerTuple, 0, len(records))
 	for _, record := range records {
 		row := ServerTuple{
-			DstIP:    record.DstIP,
+			DstIP:    record.DstAddr(),
 			DstPort:  record.DstPort,
 			Protocol: normalizedProtocol(record.Protocol),
 		}
@@ -204,10 +204,10 @@ func TestClassificationExactCapacityAndOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := netip.MustParseAddr("10.0.0.1")
-	public := Record{SrcIP: src, DstIP: netip.MustParseAddr("203.0.113.1"), DstPort: 443, Protocol: ProtocolTCP}
-	peer := Record{SrcIP: src, DstIP: netip.MustParseAddr("10.0.0.2"), DstPort: 80}
-	probe := Record{SrcIP: netip.MustParseAddr("192.168.0.1"), DstIP: src, DstPort: 22}
-	invalid := Record{SrcIP: src, DstIP: public.DstIP, DstPort: 0}
+	public := Record{SrcIP: src.As4(), DstIP: netip.MustParseAddr("203.0.113.1").As4(), DstPort: 443, Protocol: ProtocolTCP}
+	peer := Record{SrcIP: src.As4(), DstIP: netip.MustParseAddr("10.0.0.2").As4(), DstPort: 80}
+	probe := Record{SrcIP: netip.MustParseAddr("192.168.0.1").As4(), DstIP: src.As4(), DstPort: 22}
+	invalid := Record{SrcIP: src.As4(), DstIP: public.DstIP, DstPort: 0}
 	records := []Record{public, probe, public, invalid, peer}
 	original := append([]Record(nil), records...)
 	want := BucketedRecords{BucketFleetToNonFleet: {public, public}, BucketFleetToFleet: {peer}, BucketPrivateNonFleetToFleet: {probe}}
@@ -232,23 +232,19 @@ func TestClassificationExactCapacityAndOwnership(t *testing.T) {
 }
 
 func TestAccumulatorExactExpansionPreservesRecords(t *testing.T) {
-	tcp := Record{SrcIP: netip.MustParseAddr("10.0.0.1"), DstIP: netip.MustParseAddr("203.0.113.1"), DstPort: 443, Protocol: ProtocolTCP}
+	tcp := Record{SrcIP: netip.MustParseAddr("10.0.0.1").As4(), DstIP: netip.MustParseAddr("203.0.113.1").As4(), DstPort: 443, Protocol: ProtocolTCP}
 	udp := tcp
 	udp.Protocol = ProtocolUDP
 	udp.DstPort = 6514
 	udp.SyslogQualified = true
 	acc := NewAccumulator()
-	acc.tcpRecords = make([]Record, 2, 2)
-	acc.tcpRecords[0] = tcp
-	acc.tcpRecords[1] = tcp
+	acc.Add([]Record{tcp, tcp})
 	acc.Add([]Record{udp})
 	got := acc.TakeRecords()
 	if !reflect.DeepEqual(got, []Record{tcp, tcp, udp}) || cap(got) != 3 {
 		t.Fatalf("got %v cap=%d", got, cap(got))
 	}
-	if acc.tcpRecords != nil || acc.udpRecords != nil || acc.udpOrder != nil {
-		t.Fatal("transferred references retained")
-	}
+	assertAccumulatorReleased(t, acc)
 }
 
 func BenchmarkAccumulatorFinalizationAllocation(b *testing.B) {
@@ -260,16 +256,21 @@ func BenchmarkAccumulatorFinalizationAllocation(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
+				b.StopTimer()
 				acc := NewAccumulator()
-				acc.tcpRecords = make([]Record, len(tcp))
-				copy(acc.tcpRecords, tcp)
 				acc.Add([]Record{udp})
 				var records []Record
 				if legacy {
+					records = make([]Record, len(tcp))
+					copy(records, tcp)
+				} else {
+					acc.Add(tcp)
+				}
+				b.StartTimer()
+				if legacy {
 					for _, key := range acc.udpOrder {
-						acc.tcpRecords = append(acc.tcpRecords, acc.udpRecords[key])
+						records = append(records, acc.udpRecords[key])
 					}
-					records = acc.tcpRecords
 				} else {
 					records = acc.TakeRecords()
 				}
@@ -282,13 +283,13 @@ func BenchmarkAccumulatorFinalizationAllocation(b *testing.B) {
 }
 
 func TestServerSummaryMatchesBaselineAcrossInputOrders(t *testing.T) {
-	addresses := []netip.Addr{{}, netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.2"), netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("::ffff:203.0.113.1")}
-	protocols := []Protocol{"", ProtocolTCP, ProtocolUDP, "other"}
+	addresses := []netip.Addr{netip.MustParseAddr("0.0.0.0"), netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("255.255.255.255")}
+	protocols := []Protocol{0, ProtocolTCP, ProtocolUDP}
 	for _, seed := range []int64{1, 42, 401240} {
 		rng := rand.New(rand.NewSource(seed))
 		records := make([]Record, 10000)
 		for i := range records {
-			records[i] = Record{DstIP: addresses[rng.Intn(len(addresses))], DstPort: uint16(rng.Intn(32)), Protocol: protocols[rng.Intn(len(protocols))]}
+			records[i] = Record{DstIP: addresses[rng.Intn(len(addresses))].As4(), DstPort: uint16(rng.Intn(32)), Protocol: protocols[rng.Intn(len(protocols))]}
 		}
 		if got, want := PrivateServerTuples(records), baselinePrivateServerTuples(records); !reflect.DeepEqual(got, want) {
 			t.Fatalf("seed %d: summary changed", seed)

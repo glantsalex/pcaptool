@@ -80,19 +80,20 @@ func ToOutputRecords(txs []*DNSTransaction) []OutputRecord {
 		}
 
 		// --- Dedup resolved IPs while preserving order ---
-		seen := make(map[string]struct{}, len(tx.ResolvedIPs))
+		seen := make(map[string]struct{}, tx.resolvedIPLen())
 
 		// We'll fill sources only when we have at least one non-empty label.
 		var srcMap map[string]string
 
-		for _, ip := range tx.ResolvedIPs {
-			if ip == nil || ip.Equal(net.IP{}) {
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			ip := tx.resolvedIPAt(i)
+			if ip.isNil() || ip.Equal(net.IP{}) {
 				continue
 			}
 
 			// Force IPv4-only here (consistent with your rules).
 			ip4 := ip.To4()
-			if ip4 == nil {
+			if ip4.isNil() {
 				continue
 			}
 			s := ip4.String()
@@ -105,8 +106,8 @@ func ToOutputRecords(txs []*DNSTransaction) []OutputRecord {
 
 			// Evidence label for this IP (best-effort).
 			ev := EvNone
-			if tx.ResolvedIPEvidence != nil {
-				ev = tx.ResolvedIPEvidence[s]
+			if tx.hasResolvedIPEvidence() {
+				ev = tx.resolvedIPEvidenceValue(s)
 			}
 			// Fallback: if map missing, fall back to NameEvidence (dns/sni)
 			if ev == EvNone {

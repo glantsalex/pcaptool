@@ -38,15 +38,15 @@ func TestResponseOnlyDNSAnswerDrivesTopologyAttribution(t *testing.T) {
 			tx.IssuerIP,
 			tx.DNSName,
 			tx.ResolverIP,
-			tx.ResolvedIPs,
+			testResolvedIPs(tx),
 			EvidenceString(tx.NameEvidence),
-			tx.ResolvedIPEvidence,
+			testResolvedEvidence(tx),
 		)
 		if tx.IssuerIP.String() == wantIssuer &&
 			tx.DNSName == wantName &&
-			responseOnlyContainsIPString(tx.ResolvedIPs, wantDst) &&
+			responseOnlyContainsIPString(testResolvedIPs(tx), wantDst) &&
 			tx.NameEvidence == EvDNSAnswer &&
-			tx.ResolvedIPEvidence[wantDst] == EvDNSAnswer {
+			tx.resolvedIPEvidenceValue(wantDst) == EvDNSAnswer {
 			sawResponseOnlyAnswer = true
 		}
 	}

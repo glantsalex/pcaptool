@@ -138,11 +138,11 @@ func TestProtocolTrailRowLessRanksTCPBeforeUDP(t *testing.T) {
 	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
 	tcp := protocolTrailRow{
 		record:   testCSVRecord("10.0.0.10", "10.0.0.10", 8443, ts),
-		protocol: "tcp",
+		protocol: ProtocolTCP,
 	}
 	udp := protocolTrailRow{
 		record:   testCSVRecord("10.0.0.1", "10.0.0.1", 53, ts.Add(-time.Hour)),
-		protocol: "udp",
+		protocol: ProtocolUDP,
 	}
 
 	if !protocolTrailRowLess(tcp, udp) {
@@ -279,10 +279,9 @@ func TestWriteProtocolTrailCSVWritesActualProtocolSortsTCPBeforeUDPAndPreservesI
 	early := time.Date(2024, 3, 5, 12, 0, 0, 123_000_000, time.UTC)
 	late := early.Add(time.Second)
 	records := []Record{
-		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.3", 123, late, Protocol("sctp")),
 		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 53, early, ProtocolUDP),
 		testCSVRecordWithProtocol("10.0.0.10", "10.0.0.1", 443, early, ProtocolTCP),
-		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.9", 8443, late, ""),
+		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.9", 8443, late, 0),
 	}
 	original := append([]Record(nil), records...)
 
@@ -295,8 +294,7 @@ func TestWriteProtocolTrailCSVWritesActualProtocolSortsTCPBeforeUDPAndPreservesI
 		"src_ip,dst_ip,dst_port,protocol,trail_timestamp_utc\n" +
 		"10.0.0.2,10.0.0.9,8443,tcp,2024-03-05 12:00:01.123\n" +
 		"10.0.0.10,10.0.0.1,443,tcp,2024-03-05 12:00:00.123\n" +
-		"10.0.0.2,10.0.0.2,53,udp,2024-03-05 12:00:00.123\n" +
-		"10.0.0.1,10.0.0.3,123,sctp,2024-03-05 12:00:01.123\n"
+		"10.0.0.2,10.0.0.2,53,udp,2024-03-05 12:00:00.123\n"
 	if got := buf.String(); got != want {
 		t.Fatalf("WriteProtocolTrailCSV() = %q, want %q", got, want)
 	}
@@ -308,7 +306,7 @@ func TestWriteProtocolTrailCSVWritesActualProtocolSortsTCPBeforeUDPAndPreservesI
 func TestWriteTCPProtocolTrailCSVExcludesUDPAndTreatsEmptyProtocolAsTCP(t *testing.T) {
 	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
 	records := []Record{
-		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.2", 443, ts, ""),
+		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.2", 443, ts, 0),
 		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.3", 53, ts, ProtocolUDP),
 	}
 
@@ -354,13 +352,11 @@ func TestWritePublicServersCSVNormalizesDedupesSortsAndPreservesInput(t *testing
 	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
 	records := []Record{
 		testCSVRecordWithProtocol("10.0.0.1", "203.0.113.20", 53, ts, ProtocolTCP),
-		testCSVRecordWithProtocol("10.0.0.2", "203.0.113.3", 53, ts, ""),
+		testCSVRecordWithProtocol("10.0.0.2", "203.0.113.3", 53, ts, 0),
 		testCSVRecordWithProtocol("10.0.0.3", "203.0.113.1", 80, ts, ProtocolTCP),
 		testCSVRecordWithProtocol("10.0.0.4", "203.0.113.3", 53, ts.Add(time.Second), ProtocolTCP),
 		testCSVRecordWithProtocol("10.0.0.5", "203.0.113.3", 53, ts, ProtocolUDP),
 		testCSVRecordWithProtocol("10.0.0.6", "203.0.113.2", 1, ts, ProtocolUDP),
-		testCSVRecordWithProtocol("10.0.0.7", "203.0.113.9", 7, ts, Protocol("sctp")),
-		testCSVRecordWithProtocol("10.0.0.8", "203.0.113.9", 7, ts, Protocol("icmp")),
 	}
 	original := append([]Record(nil), records...)
 
@@ -375,9 +371,7 @@ func TestWritePublicServersCSVNormalizesDedupesSortsAndPreservesInput(t *testing
 		"203.0.113.20,53,tcp\n" +
 		"203.0.113.1,80,tcp\n" +
 		"203.0.113.2,1,udp\n" +
-		"203.0.113.3,53,udp\n" +
-		"203.0.113.9,7,icmp\n" +
-		"203.0.113.9,7,sctp\n"
+		"203.0.113.3,53,udp\n"
 	if got := buf.String(); got != want {
 		t.Fatalf("WritePublicServersCSV() = %q, want %q", got, want)
 	}
@@ -390,13 +384,11 @@ func TestPrivateServerTuplesNormalizesDedupesSortsAndPreservesInput(t *testing.T
 	ts := time.Date(2024, 3, 5, 12, 0, 0, 0, time.UTC)
 	records := []Record{
 		testCSVRecordWithProtocol("10.0.0.1", "203.0.113.20", 53, ts, ProtocolTCP),
-		testCSVRecordWithProtocol("10.0.0.2", "203.0.113.3", 53, ts, ""),
+		testCSVRecordWithProtocol("10.0.0.2", "203.0.113.3", 53, ts, 0),
 		testCSVRecordWithProtocol("10.0.0.3", "203.0.113.1", 80, ts, ProtocolTCP),
 		testCSVRecordWithProtocol("10.0.0.4", "203.0.113.3", 53, ts.Add(time.Second), ProtocolTCP),
 		testCSVRecordWithProtocol("10.0.0.5", "203.0.113.3", 53, ts, ProtocolUDP),
 		testCSVRecordWithProtocol("10.0.0.6", "203.0.113.2", 1, ts, ProtocolUDP),
-		testCSVRecordWithProtocol("10.0.0.7", "203.0.113.9", 7, ts, Protocol("sctp")),
-		testCSVRecordWithProtocol("10.0.0.8", "203.0.113.9", 7, ts, Protocol("icmp")),
 	}
 	original := append([]Record(nil), records...)
 
@@ -407,8 +399,6 @@ func TestPrivateServerTuplesNormalizesDedupesSortsAndPreservesInput(t *testing.T
 		{DstIP: netip.MustParseAddr("203.0.113.1"), DstPort: 80, Protocol: ProtocolTCP},
 		{DstIP: netip.MustParseAddr("203.0.113.2"), DstPort: 1, Protocol: ProtocolUDP},
 		{DstIP: netip.MustParseAddr("203.0.113.3"), DstPort: 53, Protocol: ProtocolUDP},
-		{DstIP: netip.MustParseAddr("203.0.113.9"), DstPort: 7, Protocol: Protocol("icmp")},
-		{DstIP: netip.MustParseAddr("203.0.113.9"), DstPort: 7, Protocol: Protocol("sctp")},
 	}
 
 	if !reflect.DeepEqual(got, want) {
@@ -452,11 +442,9 @@ func TestWriteProtocolUniqueCSVNormalizesDedupesSortsAndPreservesInput(t *testin
 		testCSVRecordWithProtocol("10.0.0.10", "10.0.0.2", 443, ts, ProtocolTCP),
 		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.10", 443, ts, ProtocolUDP),
 		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 8443, ts, ProtocolTCP),
-		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 443, ts, ""),
+		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 443, ts, 0),
 		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 443, ts.Add(time.Second), ProtocolTCP),
 		testCSVRecordWithProtocol("10.0.0.2", "10.0.0.2", 443, ts, ProtocolUDP),
-		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.3", 123, ts, Protocol("sctp")),
-		testCSVRecordWithProtocol("10.0.0.1", "10.0.0.3", 123, ts, Protocol("icmp")),
 	}
 	original := append([]Record(nil), records...)
 
@@ -471,9 +459,7 @@ func TestWriteProtocolUniqueCSVNormalizesDedupesSortsAndPreservesInput(t *testin
 		"10.0.0.2,10.0.0.2,8443,tcp\n" +
 		"10.0.0.10,10.0.0.2,443,tcp\n" +
 		"10.0.0.2,10.0.0.2,443,udp\n" +
-		"10.0.0.2,10.0.0.10,443,udp\n" +
-		"10.0.0.1,10.0.0.3,123,icmp\n" +
-		"10.0.0.1,10.0.0.3,123,sctp\n"
+		"10.0.0.2,10.0.0.10,443,udp\n"
 	if got := buf.String(); got != want {
 		t.Fatalf("WriteProtocolUniqueCSV() = %q, want %q", got, want)
 	}
@@ -488,11 +474,11 @@ func testCSVRecord(src, dst string, dstPort uint16, timestamp time.Time) Record 
 
 func testCSVRecordWithProtocol(src, dst string, dstPort uint16, timestamp time.Time, protocol Protocol) Record {
 	return Record{
-		SrcIP:     netip.MustParseAddr(src),
-		DstIP:     netip.MustParseAddr(dst),
+		SrcIP:     netip.MustParseAddr(src).As4(),
+		DstIP:     netip.MustParseAddr(dst).As4(),
 		DstPort:   dstPort,
 		Protocol:  protocol,
-		Timestamp: timestamp,
+		Timestamp: timestamp.UnixNano(),
 	}
 }
 

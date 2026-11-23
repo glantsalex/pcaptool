@@ -407,7 +407,7 @@ func ResolveUnresolvedDNSTransactions(
 		if tx == nil || tx.DNSName == "" {
 			continue
 		}
-		if len(tx.ResolvedIPs) > 0 {
+		if tx.resolvedIPLen() > 0 {
 			continue
 		}
 
@@ -540,7 +540,7 @@ func ResolveUnresolvedDNSTransactions(
 		}
 		for _, tx := range lst {
 			// Only inject if still unresolved
-			if tx == nil || len(tx.ResolvedIPs) > 0 {
+			if tx == nil || tx.resolvedIPLen() > 0 {
 				continue
 			}
 			// Preserve name source if not set (these txs originate from DNS query parsing)
@@ -569,7 +569,7 @@ func buildUnresolvedStatsFromTxs(txs []*DNSTransaction) []DNSUnresolvedStat {
 		if tx == nil || tx.DNSName == "" {
 			continue
 		}
-		if len(tx.ResolvedIPs) > 0 {
+		if tx.resolvedIPLen() > 0 {
 			continue
 		}
 		name := strings.TrimSuffix(strings.TrimSpace(tx.DNSName), ".")

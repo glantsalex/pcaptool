@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -139,6 +140,10 @@ func BuildIMSIIndexFromPCAPs(ctx context.Context, files []string) (*IMSIIndex, e
 		// Progress bar: same style as DNS pass, label shows current file basename.
 		progress.UpdateBar(doneFiles, totalFiles, "RADIUS "+filepath.Base(res.path))
 	}
+
+	// All workers have returned; counters need no lock here.
+	stats := collector.prefilter
+	fmt.Fprintf(os.Stderr, "INFO radius_prefilter scanned=%d matched=%d rejected=%d fallback=%d unsupported_files=%d filter_error_files=%d compile_error=%q\n", stats.scanned, stats.matched, stats.rejected, stats.fallback, stats.unsupportedFiles, stats.filterErrorFiles, stats.compileError)
 
 	if err := ctx.Err(); err != nil {
 		return nil, err

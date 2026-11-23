@@ -29,7 +29,7 @@ type DNSTransaction struct {
 	RequestTime     time.Time
 	IssuerIP        net.IP
 	DNSName         string
-	ResolvedIPs     []net.IP
+	answers         resolvedAnswers
 	CNAMETargets    []string
 	ResolverIP      net.IP
 	DestinationPort *uint16
@@ -53,9 +53,6 @@ type DNSTransaction struct {
 	// For normal DNS transactions: EvDNSAnswer.
 	// For synthetic SNI transactions: EvSNI.
 	NameEvidence Evidence
-
-	// ResolvedIPEvidence maps ip.String() -> evidence flags for that DNSName<->IP mapping.
-	ResolvedIPEvidence map[string]Evidence
 }
 
 // Used during pass 1 to match queries/responses
@@ -119,34 +116,6 @@ type NamePortKey struct {
 	Port uint16
 }
 
-func (tx *DNSTransaction) ensureEvidenceMap() {
-	if tx.ResolvedIPEvidence == nil {
-		tx.ResolvedIPEvidence = make(map[string]Evidence, 4)
-	}
-}
-
-func (tx *DNSTransaction) addResolvedIPLocked(ip net.IP, ev Evidence) {
-	if ip == nil {
-		return
-	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return
-	}
-	s := ip4.String()
-
-	for _, existing := range tx.ResolvedIPs {
-		if existing != nil && existing.To4() != nil && existing.Equal(ip4) {
-			tx.ensureEvidenceMap()
-			tx.ResolvedIPEvidence[s] |= ev
-			return
-		}
-	}
-	tx.ResolvedIPs = append(tx.ResolvedIPs, append(net.IP(nil), ip4...))
-	tx.ensureEvidenceMap()
-	tx.ResolvedIPEvidence[s] |= ev
-}
-
 // AddCNAMETarget records a visible CNAME target from a DNS response.
 func (tx *DNSTransaction) AddCNAMETarget(name string) {
 	name = canonicalDNSName(name)
@@ -161,13 +130,6 @@ func (tx *DNSTransaction) AddCNAMETarget(name string) {
 		}
 	}
 	tx.CNAMETargets = append(tx.CNAMETargets, name)
-}
-
-// AddResolvedIP adds ip to ResolvedIPs if missing and ORs evidence flags.
-func (tx *DNSTransaction) AddResolvedIP(ip net.IP, ev Evidence) {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-	tx.addResolvedIPLocked(ip, ev)
 }
 
 // AddObservedEndpointBinding records a direct endpoint observation for this
@@ -215,38 +177,6 @@ func (tx *DNSTransaction) HasObservedEndpointBinding(dstIP string, proto L4Proto
 	return false
 }
 
-// MarkObservedConn ORs EvObservedConn for ip if present; if ip missing and allowAdd is true, it will add it.
-func (tx *DNSTransaction) MarkObservedConn(ip net.IP, allowAdd bool) {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-
-	if ip == nil {
-		return
-	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return
-	}
-	s := ip4.String()
-
-	for _, existing := range tx.ResolvedIPs {
-		if existing != nil && existing.To4() != nil && existing.Equal(ip4) {
-			tx.ensureEvidenceMap()
-			tx.ResolvedIPEvidence[s] |= EvObservedConn
-			return
-		}
-	}
-	if allowAdd {
-		tx.addResolvedIPLocked(ip4, EvConnInferred|EvObservedConn|tx.NameEvidence)
-	}
-}
-
-func (tx *DNSTransaction) ResolvedIPCount() int {
-	tx.mu.RLock()
-	defer tx.mu.RUnlock()
-	return len(tx.ResolvedIPs)
-}
-
 // Simple index: (issuer,dst) -> []*DNSTransaction
 type TxIndex map[idxKey][]*DNSTransaction
 
@@ -266,7 +196,8 @@ func BuildTxnIndex(txs []*DNSTransaction) TxIndex {
 			continue
 		}
 
-		for _, ip := range tx.ResolvedIPs {
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			ip := tx.resolvedIPAt(i)
 			ipStr := ip.String()
 			if ipStr == "" {
 				continue

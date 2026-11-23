@@ -53,7 +53,8 @@ func ComputeIssuerProfile(txs []*DNSTransaction) []IssuerProfile {
 		a.names[tx.DNSName] = struct{}{}
 
 		// Resolved IPs
-		for _, ip := range tx.ResolvedIPs {
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			ip := tx.resolvedIPAt(i)
 			a.ips[ip.String()] = struct{}{}
 		}
 

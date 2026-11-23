@@ -53,7 +53,7 @@ func BuildIPDNSAppendAuditRecords(txs []*DNSTransaction, pairs []IPDNSPair) []IP
 
 	best := make(map[pairKey]candidate, len(want))
 	for _, tx := range txs {
-		if tx == nil || tx.DNSName == "" || len(tx.ResolvedIPs) == 0 {
+		if tx == nil || tx.DNSName == "" || tx.resolvedIPLen() == 0 {
 			continue
 		}
 
@@ -84,18 +84,19 @@ func BuildIPDNSAppendAuditRecords(txs []*DNSTransaction, pairs []IPDNSPair) []IP
 			observedAt = tx.RequestTime.UTC().Format("2006-01-02 15:04:05.000000000Z07:00")
 		}
 
-		for _, ip := range tx.ResolvedIPs {
-			if ip == nil {
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			ip := tx.resolvedIPAt(i)
+			if ip.isNil() {
 				continue
 			}
 			ip4 := ip.To4()
-			if ip4 == nil {
+			if ip4.isNil() {
 				continue
 			}
 			ipStr := ip4.String()
 			ev := tx.NameEvidence
-			if tx.ResolvedIPEvidence != nil {
-				if e, ok := tx.ResolvedIPEvidence[ipStr]; ok {
+			if tx.hasResolvedIPEvidence() {
+				if e, ok := tx.resolvedIPEvidenceFor(ipStr); ok {
 					ev = e
 				}
 			}

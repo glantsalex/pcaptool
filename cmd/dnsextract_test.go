@@ -1766,11 +1766,11 @@ func TestDnsextractFleetScanWorkersPassedToSYNTrailScanner(t *testing.T) {
 		}
 		return []syntrail.Record{
 			{
-				SrcIP:     netip.MustParseAddr("10.0.0.1"),
-				DstIP:     netip.MustParseAddr("203.0.113.10"),
+				SrcIP:     netip.MustParseAddr("10.0.0.1").As4(),
+				DstIP:     netip.MustParseAddr("203.0.113.10").As4(),
 				DstPort:   443,
 				Protocol:  syntrail.ProtocolTCP,
-				Timestamp: time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC),
+				Timestamp: time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC).UnixNano(),
 			},
 		}, nil
 	}

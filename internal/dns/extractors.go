@@ -146,7 +146,7 @@ func newResponseOnlyDNSTransaction(ts time.Time, issuerIP, resolverIP net.IP, dn
 	for _, cname := range cnames {
 		tx.AddCNAMETarget(cname)
 	}
-	if len(tx.ResolvedIPs) == 0 {
+	if tx.resolvedIPLen() == 0 {
 		return nil
 	}
 	return tx
@@ -378,7 +378,7 @@ func (e *dnsExtractor) OnPacket(pkt gopacket.Packet, fileBase string) {
 			tx.AddCNAMETarget(cname)
 		}
 
-		if len(tx.ResolvedIPs) > 0 {
+		if tx.resolvedIPLen() > 0 {
 			tx.ResolverIP = append(net.IP(nil), srcIP...)
 		}
 	}

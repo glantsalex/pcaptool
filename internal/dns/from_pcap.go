@@ -63,9 +63,10 @@ type FirstPacketInfo struct {
 // The file worker owns Observe and OnReadError; Commit runs later on the scan
 // coordinator in discovered-file order. OnReadError may validate and replace
 // partial observer evidence before libpcap retries a generic read error.
-// Implementations must copy any packet data they retain.
+// Implementations must copy any packet data they retain. An Observe error
+// rejects the file before its edges or observer evidence can be committed.
 type PacketFileObserver struct {
-	Observe     func(gopacket.Packet)
+	Observe     func(gopacket.Packet) error
 	OnReadError func(context.Context, error) error
 	Commit      func()
 }
@@ -389,15 +390,16 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 				if debugDNSFallback && u.fromFallback {
 					s := u.usedDst4.String()
 					had := false
-					for _, rip := range u.tx.ResolvedIPs {
-						if rip != nil && rip.To4() != nil && rip.String() == s {
+					for i := 0; i < u.tx.resolvedIPLen(); i++ {
+						rip := u.tx.resolvedIPAt(i)
+						if !rip.isNil() && !rip.To4().isNil() && rip.String() == s {
 							had = true
 							break
 						}
 					}
 					evBefore := EvNone
-					if u.tx.ResolvedIPEvidence != nil {
-						evBefore = u.tx.ResolvedIPEvidence[s]
+					if u.tx.hasResolvedIPEvidence() {
+						evBefore = u.tx.resolvedIPEvidenceValue(s)
 					}
 					debugDNSFallbackf("before-mark issuer=%s name=%q dst=%s had=%v ev=%s", u.tx.IssuerIP, u.tx.DNSName, s, had, EvidenceString(evBefore))
 				}
@@ -405,21 +407,21 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 				if ip4 != nil {
 					key := ip4.String()
 					had := false
-					if u.tx.ResolvedIPEvidence != nil {
-						_, had = u.tx.ResolvedIPEvidence[key]
+					if u.tx.hasResolvedIPEvidence() {
+						_, had = u.tx.resolvedIPEvidenceFor(key)
 					}
 					u.tx.MarkObservedConn(ip4, u.fromFallback)
 					if debugDNSFallback && u.fromFallback {
 						// If it wasn't known before, this call likely backfilled it.
 						now := false
-						if u.tx.ResolvedIPEvidence != nil {
-							_, now = u.tx.ResolvedIPEvidence[key]
+						if u.tx.hasResolvedIPEvidence() {
+							_, now = u.tx.resolvedIPEvidenceFor(key)
 						}
 						if !had && now {
-							debugDNSFallbackf("backfilled-ip issuer=%s name=%q ip=%s ev=%s", u.tx.IssuerIP, u.tx.DNSName, key, EvidenceString(u.tx.ResolvedIPEvidence[key]))
+							debugDNSFallbackf("backfilled-ip issuer=%s name=%q ip=%s ev=%s", u.tx.IssuerIP, u.tx.DNSName, key, EvidenceString(u.tx.resolvedIPEvidenceValue(key)))
 						}
 					}
-					if !u.fromFallback && u.tx.ResolvedIPEvidence != nil && u.tx.ResolvedIPEvidence[key]&EvDNSAnswer != 0 {
+					if !u.fromFallback && u.tx.hasResolvedIPEvidence() && u.tx.resolvedIPEvidenceValue(key)&EvDNSAnswer != 0 {
 						u.tx.AddObservedEndpointBinding(ObservedEndpointBinding{
 							DstIP:      key,
 							Protocol:   u.cand.Proto,
@@ -507,6 +509,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 			scanErr            error
 			readErrorValidated bool
 			haveFirstPacket    bool
+			packetNumber       int
 		)
 
 		var packets <-chan gopacket.Packet
@@ -553,6 +556,7 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 					packet = nextPacket
 				}
 			}
+			packetNumber++
 			if idx == 0 && !haveFirstPacket {
 				if md := packet.Metadata(); md != nil {
 					firstFilePacketTimestamp = md.Timestamp.UTC()
@@ -563,7 +567,10 @@ func AttachConnectionsAndCollectEdgesFromPCAPsWithOptions(
 				continue
 			}
 			if fileObserver.Observe != nil {
-				fileObserver.Observe(packet)
+				if err := fileObserver.Observe(packet); err != nil {
+					scanErr = fmt.Errorf("observe packet %d from %q: %w", packetNumber, path, err)
+					break packetLoop
+				}
 			}
 
 			md := packet.Metadata()
@@ -1213,7 +1220,7 @@ func scanDNSInFile(ctx context.Context, path string) (map[TxKey][]*DNSTransactio
 				for _, cname := range cnames {
 					tx.AddCNAMETarget(cname)
 				}
-				if len(tx.ResolvedIPs) > 0 {
+				if tx.resolvedIPLen() > 0 {
 					tx.ResolverIP = append(net.IP(nil), srcIP...)
 				}
 			}

@@ -150,12 +150,13 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 				identity = label
 			}
 		}
-		for _, ip := range tx.ResolvedIPs {
-			if ip == nil {
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			ip := tx.resolvedIPAt(i)
+			if ip.isNil() {
 				continue
 			}
 			ip4 := ip.To4()
-			if ip4 == nil {
+			if ip4.isNil() {
 				continue
 			}
 			k := joinKey{issuer: issuerRaw, dstIP: ip4.String()}
@@ -416,8 +417,8 @@ func BuildNetworkTopologyMatrixEntriesWithOptions(
 			src := ""
 			if dnsName != "" {
 				ev := bestTx.NameEvidence
-				if bestTx.ResolvedIPEvidence != nil {
-					ev |= bestTx.ResolvedIPEvidence[dstIP]
+				if bestTx.hasResolvedIPEvidence() {
+					ev |= bestTx.resolvedIPEvidenceValue(dstIP)
 				}
 				if ev != EvNone {
 					ev |= EvObservedConn
@@ -1250,16 +1251,8 @@ func csvNameForIP(ipToDNS map[string][]string, ipStr string, _ bool) (string, bo
 		}
 	}
 
+	// CSV loaders normalize IP keys before insertion; misses stay unresolved.
 	lst := ipToDNS[raw]
-	if len(lst) == 0 {
-		// Defensive: try trimmed-map-key match (handles accidental whitespace in CSV keys)
-		for k, v := range ipToDNS {
-			if strings.TrimSpace(k) == raw && len(v) > 0 {
-				lst = v
-				break
-			}
-		}
-	}
 	if len(lst) == 0 {
 		return "", false
 	}

@@ -158,11 +158,11 @@ func BuildTransactionsWithSNIFromPCAPsWithOptions(
 
 		// Merge SNI synthetic txs with global dedup
 		for _, tx := range res.sniTxs {
-			if tx == nil || tx.IssuerIP == nil || len(tx.ResolvedIPs) == 0 || tx.DestinationPort == nil {
+			if tx == nil || tx.IssuerIP == nil || tx.resolvedIPLen() == 0 || tx.DestinationPort == nil {
 				continue
 			}
-			ip0 := tx.ResolvedIPs[0]
-			if ip0 == nil {
+			ip0 := tx.resolvedIPAt(0)
+			if ip0.isNil() {
 				continue
 			}
 			k := sniKey{

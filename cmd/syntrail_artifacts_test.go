@@ -55,7 +55,7 @@ func TestWriteSYNTrailArtifactsWritesAllFilesManifestKeysAndBucketRows(t *testin
 			testSYNTrailRecordWithProtocol("10.0.0.1", "10.4.0.230", 53, ts, syntrail.ProtocolUDP),
 		},
 		syntrail.BucketFleetToFleet: {
-			testSYNTrailRecordWithProtocol("10.0.0.1", "10.0.0.2", 9443, ts.Add(2*time.Second), ""),
+			testSYNTrailRecordWithProtocol("10.0.0.1", "10.0.0.2", 9443, ts.Add(2*time.Second), 0),
 			testSYNTrailRecordWithProtocol("10.0.0.1", "10.0.0.3", 53, ts.Add(time.Second), syntrail.ProtocolUDP),
 		},
 		syntrail.BucketPrivateNonFleetToFleet: {
@@ -405,7 +405,7 @@ func TestFilterPassiveFTPServerSummaryRecords(t *testing.T) {
 		},
 		{
 			name:    "same pair empty protocol passive port is suppressed",
-			records: []syntrail.Record{control, testSYNTrailRecordWithProtocol("10.0.0.1", "192.168.1.20", 30001, ts, "")},
+			records: []syntrail.Record{control, testSYNTrailRecordWithProtocol("10.0.0.1", "192.168.1.20", 30001, ts, 0)},
 			want:    []syntrail.Record{control},
 		},
 		{
@@ -497,7 +497,7 @@ func TestFilterUDPServerSummaryRecords(t *testing.T) {
 	udpExcluded := testSYNTrailRecordWithProtocol("10.0.0.1", "203.0.113.10", 33434, ts, syntrail.ProtocolUDP)
 	udpRetained := testSYNTrailRecordWithProtocol("10.0.0.1", "203.0.113.10", 33535, ts, syntrail.ProtocolUDP)
 	tcpSamePort := testSYNTrailRecord("10.0.0.1", "203.0.113.10", 33434, ts)
-	emptyProtocolSamePort := testSYNTrailRecordWithProtocol("10.0.0.1", "203.0.113.10", 33435, ts, "")
+	emptyProtocolSamePort := testSYNTrailRecordWithProtocol("10.0.0.1", "203.0.113.10", 33435, ts, 0)
 
 	tests := []struct {
 		name     string
@@ -615,7 +615,7 @@ func TestWriteSYNTrailArtifactsExcludesUDPPortsOnlyFromServerSummaries(t *testin
 			testSYNTrailRecordWithProtocol("10.0.0.1", "203.0.113.10", 33534, ts.Add(2*time.Second), syntrail.ProtocolUDP),
 			testSYNTrailRecordWithProtocol("10.0.0.1", "203.0.113.10", 33535, ts.Add(3*time.Second), syntrail.ProtocolUDP),
 			testSYNTrailRecord("10.0.0.1", "203.0.113.10", 33434, ts.Add(4*time.Second)),
-			testSYNTrailRecordWithProtocol("10.0.0.1", "203.0.113.10", 33534, ts.Add(5*time.Second), ""),
+			testSYNTrailRecordWithProtocol("10.0.0.1", "203.0.113.10", 33534, ts.Add(5*time.Second), 0),
 			testSYNTrailRecordWithProtocol("10.0.0.2", "192.168.1.20", 33433, ts.Add(6*time.Second), syntrail.ProtocolUDP),
 			testSYNTrailRecordWithProtocol("10.0.0.2", "192.168.1.20", 33434, ts.Add(7*time.Second), syntrail.ProtocolUDP),
 			testSYNTrailRecordWithProtocol("10.0.0.2", "192.168.1.20", 33534, ts.Add(8*time.Second), syntrail.ProtocolUDP),
@@ -872,11 +872,14 @@ func testSYNTrailRecord(src, dst string, dstPort uint16, timestamp time.Time) sy
 }
 
 func testSYNTrailRecordWithProtocol(src, dst string, dstPort uint16, timestamp time.Time, protocol syntrail.Protocol) syntrail.Record {
-	return syntrail.Record{
-		SrcIP:     netip.MustParseAddr(src),
-		DstIP:     netip.MustParseAddr(dst),
-		DstPort:   dstPort,
-		Protocol:  protocol,
-		Timestamp: timestamp,
+	record := syntrail.Record{
+		SrcIP:    netip.MustParseAddr(src).As4(),
+		DstIP:    netip.MustParseAddr(dst).As4(),
+		DstPort:  dstPort,
+		Protocol: protocol,
 	}
+	if err := record.SetTimestamp(timestamp); err != nil {
+		panic(err)
+	}
+	return record
 }

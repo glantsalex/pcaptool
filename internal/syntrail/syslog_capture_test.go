@@ -43,11 +43,14 @@ func TestOperationalSyslogSample(t *testing.T) {
 		if !RecognizeSyslog(udp.Payload) {
 			t.Fatalf("packet %d header not recognized", count+1)
 		}
-		r, ok := udpRecord(packet)
+		r, ok, err := udpRecord(packet)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if !ok {
 			t.Fatal("UDP record rejected")
 		}
-		endpoints[syslogEndpoint{r.DstIP, r.DstPort}] = true
+		endpoints[syslogEndpoint{r.DstAddr(), r.DstPort}] = true
 		count++
 		if packet.Metadata().CaptureLength < packet.Metadata().Length {
 			truncated++

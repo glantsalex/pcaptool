@@ -44,7 +44,7 @@ func ComputeConnectivityMatrix(txs []*DNSTransaction) []ConnectivityEntry {
 		if tx.DestinationPort == nil || *tx.DestinationPort == 0 {
 			continue
 		}
-		if len(tx.ResolvedIPs) == 0 {
+		if tx.resolvedIPLen() == 0 {
 			// No resolved IP to show; skip for connectivity matrix
 			continue
 		}
@@ -59,8 +59,9 @@ func ComputeConnectivityMatrix(txs []*DNSTransaction) []ConnectivityEntry {
 
 		port := uint16(*tx.DestinationPort)
 
-		for _, ip := range tx.ResolvedIPs {
-			if ip == nil || ip.Equal(net.IP{}) {
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			ip := tx.resolvedIPAt(i)
+			if ip.isNil() || ip.Equal(net.IP{}) {
 				continue
 			}
 			ipStr := ip.String()

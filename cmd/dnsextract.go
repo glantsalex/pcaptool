@@ -318,11 +318,11 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 	var fleetIdentity func(syntrail.Record) string
 	if opts.RadiusIMSI && fleet != nil {
 		fleetIdentity = func(record syntrail.Record) string {
-			ip := record.SrcIP
+			ip := record.SrcAddr()
 			if !fleet.Contains(ip) {
-				ip = record.DstIP
+				ip = record.DstAddr()
 			}
-			identity, _ := imsiIndex.LookupAddr(ip, record.Timestamp)
+			identity, _ := imsiIndex.LookupAddr(ip, record.CaptureTime())
 			return identity
 		}
 	}
@@ -418,10 +418,11 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 			var replacement []syntrail.Record
 			fallbackValidated := false
 			return dns.PacketFileObserver{
-				Observe: func(packet gopacket.Packet) {
+				Observe: func(packet gopacket.Packet) error {
 					if !fallbackValidated {
-						collector.Observe(packet)
+						return collector.Observe(packet)
 					}
+					return nil
 				},
 				OnReadError: func(ctx context.Context, readErr error) error {
 					records, err := scanSYNTrailFile(ctx, path, sharedFleetOptions)
@@ -440,7 +441,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 						replacement = nil
 						return
 					}
-					sharedFleetAccumulator.Add(collector.TakeRecords())
+					sharedFleetAccumulator.Add(collector.TakePacketBatch())
 					collector = nil
 				},
 			}

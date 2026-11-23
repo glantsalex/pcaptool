@@ -82,6 +82,7 @@ func TestSharedPacketObserverMatchesLegacyFleetScanAcrossClassicPCAPPrecisionsAn
 	nanosPath := filepath.Join(t.TempDir(), "second.pcap")
 	writeSharedObserverNanosPCAP(t, nanosPath, []dnsAdmissionPacket{
 		{ts: base.Add(2 * time.Second), data: buildConnectionInferenceTestTCPPacket(t, "10.0.0.2", "203.0.113.13", 40000, 9443, true, false)},
+		{ts: base.Add(2 * time.Hour), data: buildConnectionInferenceTestTCPPacket(t, "10.0.0.1", "203.0.113.10", 40000, 443, true, false)},
 		{ts: base, data: buildSharedObserverUDP(t, "10.0.0.1", "203.0.113.20", 40000, 5353)},
 		{ts: base.Add(time.Second), data: buildSharedObserverUDP(t, "10.0.0.2", "203.0.113.21", 40000, 123)},
 	})
@@ -121,7 +122,7 @@ func TestSharedPacketObserverMatchesLegacyFleetScanAcrossClassicPCAPPrecisionsAn
 				collector := syntrail.NewCollector()
 				return PacketFileObserver{
 					Observe: collector.Observe,
-					Commit:  func() { accumulator.Add(collector.TakeRecords()) },
+					Commit:  func() { accumulator.Add(collector.TakePacketBatch()) },
 				}
 			},
 		},
@@ -133,7 +134,7 @@ func TestSharedPacketObserverMatchesLegacyFleetScanAcrossClassicPCAPPrecisionsAn
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("shared records = %+v, want legacy %+v", got, want)
 	}
-	if len(got) < 4 || got[3].DstPort != 9443 || got[3].Timestamp.Nanosecond() != 123456789 {
+	if len(got) != 5 || got[2].DstPort != 9443 || got[2].CaptureTime().Nanosecond() != 123456789 {
 		t.Fatalf("nanosecond-resolution PCAP timestamp precision changed: %+v", got)
 	}
 }
@@ -162,7 +163,7 @@ func TestSharedPacketObserverMatchesLegacySingleInterfacePCAPNGWithoutRecovery(t
 					readErrors++
 					return nil
 				},
-				Commit: func() { accumulator.Add(collector.TakeRecords()) },
+				Commit: func() { accumulator.Add(collector.TakePacketBatch()) },
 			}
 		}},
 	)
@@ -223,11 +224,12 @@ func TestSharedPacketObserverCancellationDoesNotCommitPartialRecords(t *testing.
 		ctx, []string{path}, nil, false, false, nil, false, nil, nil, 0,
 		PacketScanOptions{NewFileObserver: func(_ int, _ string) PacketFileObserver {
 			return PacketFileObserver{
-				Observe: func(gopacket.Packet) {
+				Observe: func(gopacket.Packet) error {
 					seen++
 					if seen == 5 {
 						cancel()
 					}
+					return nil
 				},
 				Commit: func() { committed = true },
 			}

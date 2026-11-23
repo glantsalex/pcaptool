@@ -179,8 +179,9 @@ func ComputeTableStatsFromTx(txs []*DNSTransaction, usedRecords []OutputRecord) 
 		}
 
 		// resolved IPs from this tx
-		for _, ip := range tx.ResolvedIPs {
-			if ip == nil || len(ip) == 0 {
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			ip := tx.resolvedIPAt(i)
+			if ip.isNil() || ip.isEmpty() {
 				continue
 			}
 			a.resolvedIPs[ip.String()] = struct{}{}
@@ -255,7 +256,7 @@ func ComputeUnresolvedDNSFirstSeen(txs []*DNSTransaction) []DNSUnresolvedStat {
 		if name == "" {
 			continue
 		}
-		if len(tx.ResolvedIPs) > 0 {
+		if tx.resolvedIPLen() > 0 {
 			nameHasResolved[name] = true
 		}
 

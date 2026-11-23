@@ -42,10 +42,10 @@ func TestBuildTransactionsFromEventsSetsDNSAnswerEvidence(t *testing.T) {
 	if tx.NameEvidence != EvDNSAnswer {
 		t.Fatalf("NameEvidence = %v, want EvDNSAnswer", tx.NameEvidence)
 	}
-	if len(tx.ResolvedIPs) != 1 || !tx.ResolvedIPs[0].Equal(answerIP.To4()) {
-		t.Fatalf("ResolvedIPs = %#v, want %s", tx.ResolvedIPs, answerIP.To4())
+	if tx.resolvedIPLen() != 1 || !tx.resolvedIPAt(0).Equal(answerIP.To4()) {
+		t.Fatalf("ResolvedIPs = %#v, want %s", testResolvedIPs(tx), answerIP.To4())
 	}
-	if got := tx.ResolvedIPEvidence[answerIP.To4().String()]; got != EvDNSAnswer {
+	if got := tx.resolvedIPEvidenceValue(answerIP.To4().String()); got != EvDNSAnswer {
 		t.Fatalf("ResolvedIPEvidence = %v, want EvDNSAnswer", got)
 	}
 }

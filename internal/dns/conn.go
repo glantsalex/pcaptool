@@ -23,13 +23,14 @@ func AttachConnections(events []pce.Event, txs []*DNSTransaction) error {
 
 	ci := 0
 	for _, tx := range txs {
-		if len(tx.ResolvedIPs) == 0 {
+		if tx.resolvedIPLen() == 0 {
 			continue
 		}
 		issuer := tx.IssuerIP.String()
 
-		ipSet := make(map[string]struct{}, len(tx.ResolvedIPs))
-		for _, ip := range tx.ResolvedIPs {
+		ipSet := make(map[string]struct{}, tx.resolvedIPLen())
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			ip := tx.resolvedIPAt(i)
 			ipSet[ip.String()] = struct{}{}
 		}
 

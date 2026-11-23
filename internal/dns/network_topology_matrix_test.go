@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -189,12 +190,11 @@ func TestNetworkTopologyMatrixDoesNotEmitDNSNameWithoutSource(t *testing.T) {
 		name   = "settings-win.data.microsoft.com"
 	)
 	txTime := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
-	txs := []*DNSTransaction{{
+	txs := []*DNSTransaction{withTestResolvedAnswers(&DNSTransaction{
 		RequestTime: txTime,
 		IssuerIP:    net.ParseIP(issuer),
 		DNSName:     name,
-		ResolvedIPs: []net.IP{net.ParseIP(dst)},
-	}}
+	}, []net.IP{net.ParseIP(dst)}, nil)}
 	edges := []connectivity.Edge{{
 		IssuerIP:  issuer,
 		DstIP:     dst,
@@ -297,16 +297,15 @@ func TestNetworkTopologyMatrixAllowsDirectDNSAttributionForPrivateDestination(t 
 	)
 	dnsTime := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 
-	txs := []*DNSTransaction{{
-		RequestTime:  dnsTime,
-		IssuerIP:     net.ParseIP(issuer),
-		DNSName:      name,
-		ResolvedIPs:  []net.IP{net.ParseIP(dst)},
+	txs := []*DNSTransaction{withTestResolvedAnswers(&DNSTransaction{
+		RequestTime: dnsTime,
+		IssuerIP:    net.ParseIP(issuer),
+		DNSName:     name,
+
 		NameEvidence: EvDNSAnswer,
-		ResolvedIPEvidence: map[string]Evidence{
-			dst: EvDNSAnswer,
-		},
-	}}
+	}, []net.IP{net.ParseIP(dst)}, map[string]Evidence{
+		dst: EvDNSAnswer,
+	})}
 	edges := []connectivity.Edge{{
 		IssuerIP:  issuer,
 		DstIP:     dst,
@@ -505,7 +504,7 @@ func TestCompleteTopologyWithActiveDNSDoesNotMutateTransactionsOrCSVLearning(t *
 	if got[0].DNSName != "api.example.com" || got[0].DNSSource != "active+matrix" {
 		t.Fatalf("topology was not completed: %#v", got)
 	}
-	if len(tx.ResolvedIPs) != 0 || tx.NameEvidence != EvNone {
+	if tx.resolvedIPLen() != 0 || tx.NameEvidence != EvNone {
 		t.Fatalf("active matrix completion mutated transaction: %#v", tx)
 	}
 	if learned := StrongObservedIPDNSPairsFromTransactions([]*DNSTransaction{tx}); len(learned) != 0 {
@@ -604,16 +603,15 @@ func TestNetworkTopologyMatrixCanAttributeEndpointSeenBeforeDNSWhenLaterObservat
 	laterSyn := dnsTime.Add(500 * time.Millisecond)
 
 	txs := []*DNSTransaction{
-		{
-			RequestTime:  dnsTime,
-			IssuerIP:     net.ParseIP(issuer),
-			DNSName:      name,
-			ResolvedIPs:  []net.IP{net.ParseIP(dst)},
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: dnsTime,
+			IssuerIP:    net.ParseIP(issuer),
+			DNSName:     name,
+
 			NameEvidence: EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				dst: EvDNSAnswer,
-			},
-		},
+		}, []net.IP{net.ParseIP(dst)}, map[string]Evidence{
+			dst: EvDNSAnswer,
+		}),
 	}
 	edges := []connectivity.Edge{
 		{
@@ -658,17 +656,16 @@ func TestNetworkTopologyMatrixUsesLaterObservationForMultiAResponse(t *testing.T
 	laterSyn := dnsTime.Add(121 * time.Millisecond)
 
 	txs := []*DNSTransaction{
-		{
-			RequestTime:  dnsTime,
-			IssuerIP:     net.ParseIP(issuer),
-			DNSName:      name,
-			ResolvedIPs:  []net.IP{net.ParseIP(dst), net.ParseIP(otherA)},
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: dnsTime,
+			IssuerIP:    net.ParseIP(issuer),
+			DNSName:     name,
+
 			NameEvidence: EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				dst:    EvDNSAnswer,
-				otherA: EvDNSAnswer,
-			},
-		},
+		}, []net.IP{net.ParseIP(dst), net.ParseIP(otherA)}, map[string]Evidence{
+			dst:    EvDNSAnswer,
+			otherA: EvDNSAnswer,
+		}),
 	}
 	edges := []connectivity.Edge{
 		{
@@ -718,9 +715,6 @@ func TestDNSAnswerDoesNotAttributeUnobservedPort(t *testing.T) {
 		DestinationPort: &p443,
 		ProtocolL4:      L4ProtoTCP,
 		NameEvidence:    EvDNSAnswer,
-		ResolvedIPEvidence: map[string]Evidence{
-			dst: EvDNSAnswer | EvObservedConn,
-		},
 	}
 	tx.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer|EvObservedConn)
 	tx.AddObservedEndpointBinding(ObservedEndpointBinding{DstIP: dst, Protocol: L4ProtoTCP, Port: 443, ObservedAt: t443})
@@ -762,9 +756,6 @@ func TestObservedBindingMustMatchEdgeObservationTime(t *testing.T) {
 		DestinationPort: &p443,
 		ProtocolL4:      L4ProtoTCP,
 		NameEvidence:    EvDNSAnswer,
-		ResolvedIPEvidence: map[string]Evidence{
-			dst: EvDNSAnswer | EvObservedConn,
-		},
 	}
 	tx.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer|EvObservedConn)
 	tx.AddObservedEndpointBinding(ObservedEndpointBinding{DstIP: dst, Protocol: L4ProtoTCP, Port: 443, ObservedAt: bindingTime})
@@ -812,9 +803,6 @@ func TestMultipleDNSNamesSameIPDoNotCrossAttributePortsWithoutEvidence(t *testin
 		DestinationPort: &p443,
 		ProtocolL4:      L4ProtoTCP,
 		NameEvidence:    EvDNSAnswer,
-		ResolvedIPEvidence: map[string]Evidence{
-			dst: EvDNSAnswer | EvObservedConn,
-		},
 	}
 	txA.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer|EvObservedConn)
 	txA.AddObservedEndpointBinding(ObservedEndpointBinding{DstIP: dst, Protocol: L4ProtoTCP, Port: 443, ObservedAt: t1})
@@ -826,9 +814,6 @@ func TestMultipleDNSNamesSameIPDoNotCrossAttributePortsWithoutEvidence(t *testin
 		DestinationPort: &p80,
 		ProtocolL4:      L4ProtoTCP,
 		NameEvidence:    EvDNSAnswer,
-		ResolvedIPEvidence: map[string]Evidence{
-			dst: EvDNSAnswer | EvObservedConn,
-		},
 	}
 	txB.AddResolvedIP(net.ParseIP(dst), EvDNSAnswer|EvObservedConn)
 	txB.AddObservedEndpointBinding(ObservedEndpointBinding{DstIP: dst, Protocol: L4ProtoTCP, Port: 80, ObservedAt: t3})
@@ -1131,18 +1116,17 @@ func TestBuildNetworkTopologyMatrixEntries_StrongDNSSuppressesCSVConnSameTuple(t
 	txTime := time.Date(2026, 3, 3, 10, 0, 1, 0, time.UTC)
 
 	txs := []*DNSTransaction{
-		{
-			RequestTime:     txTime,
-			IssuerIP:        net.ParseIP("100.84.31.44"),
-			DNSName:         "mpush3.whatspos.com",
-			ResolvedIPs:     []net.IP{net.ParseIP("54.154.187.160")},
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: txTime,
+			IssuerIP:    net.ParseIP("100.84.31.44"),
+			DNSName:     "mpush3.whatspos.com",
+
 			DestinationPort: &p3000,
 			ProtocolL4:      L4ProtoTCP,
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"54.154.187.160": EvDNSAnswer,
-			},
-		},
+		}, []net.IP{net.ParseIP("54.154.187.160")}, map[string]Evidence{
+			"54.154.187.160": EvDNSAnswer,
+		}),
 	}
 
 	edges := []connectivity.Edge{
@@ -1194,18 +1178,17 @@ func TestBuildNetworkTopologyMatrixEntries_UniqueCSVMidSurvivesConflictingStrong
 	txTime := time.Date(2026, 3, 4, 10, 0, 1, 0, time.UTC)
 
 	txs := []*DNSTransaction{
-		{
-			RequestTime:     txTime,
-			IssuerIP:        net.ParseIP("10.93.3.28"),
-			DNSName:         "different.example.com",
-			ResolvedIPs:     []net.IP{net.ParseIP("63.184.210.25")},
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: txTime,
+			IssuerIP:    net.ParseIP("10.93.3.28"),
+			DNSName:     "different.example.com",
+
 			DestinationPort: &p9999,
 			ProtocolL4:      L4ProtoTCP,
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"63.184.210.25": EvDNSAnswer,
-			},
-		},
+		}, []net.IP{net.ParseIP("63.184.210.25")}, map[string]Evidence{
+			"63.184.210.25": EvDNSAnswer,
+		}),
 	}
 
 	edges := []connectivity.Edge{
@@ -1552,18 +1535,17 @@ func TestCompleteTopologyWithDNSDonationUsesUniqueDirectDonor(t *testing.T) {
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
 	txs := []*DNSTransaction{
-		{
-			RequestTime:     txTime,
-			IssuerIP:        net.ParseIP("10.116.12.67"),
-			DNSName:         "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c",
-			ResolvedIPs:     []net.IP{net.ParseIP("13.55.209.128")},
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: txTime,
+			IssuerIP:    net.ParseIP("10.116.12.67"),
+			DNSName:     "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c",
+
 			DestinationPort: &p8883,
 			ProtocolL4:      L4ProtoTCP,
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"13.55.209.128": EvDNSAnswer,
-			},
-		},
+		}, []net.IP{net.ParseIP("13.55.209.128")}, map[string]Evidence{
+			"13.55.209.128": EvDNSAnswer,
+		}),
 	}
 
 	edges := []connectivity.Edge{
@@ -1616,18 +1598,17 @@ func TestCompleteTopologyWithDNSDonationDoesNotCrossDestinationIP(t *testing.T) 
 	p443 := uint16(443)
 	txTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	txs := []*DNSTransaction{
-		{
-			RequestTime:     txTime,
-			IssuerIP:        net.ParseIP("10.116.12.67"),
-			DNSName:         "direct.example.com",
-			ResolvedIPs:     []net.IP{net.ParseIP("13.55.209.128")},
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: txTime,
+			IssuerIP:    net.ParseIP("10.116.12.67"),
+			DNSName:     "direct.example.com",
+
 			DestinationPort: &p443,
 			ProtocolL4:      L4ProtoTCP,
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"13.55.209.128": EvDNSAnswer,
-			},
-		},
+		}, []net.IP{net.ParseIP("13.55.209.128")}, map[string]Evidence{
+			"13.55.209.128": EvDNSAnswer,
+		}),
 	}
 	edges := []connectivity.Edge{
 		{
@@ -1671,18 +1652,17 @@ func TestCompleteTopologyWithDNSDonationDoesNotUseUniqueInferredDonor(t *testing
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
 	txs := []*DNSTransaction{
-		{
-			RequestTime:     txTime,
-			IssuerIP:        net.ParseIP("10.116.12.67"),
-			DNSName:         "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c",
-			ResolvedIPs:     []net.IP{net.ParseIP("13.55.209.128")},
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: txTime,
+			IssuerIP:    net.ParseIP("10.116.12.67"),
+			DNSName:     "a3ikz8tra5nexo.iot.ap-southeast-2.amazonaws.c",
+
 			DestinationPort: &p8883,
 			ProtocolL4:      L4ProtoTCP,
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"13.55.209.128": EvDNSAnswer | EvConnInferred,
-			},
-		},
+		}, []net.IP{net.ParseIP("13.55.209.128")}, map[string]Evidence{
+			"13.55.209.128": EvDNSAnswer | EvConnInferred,
+		}),
 	}
 
 	edges := []connectivity.Edge{
@@ -1738,30 +1718,28 @@ func TestCompleteTopologyWithDNSDonationRejectsInferredDonationOnExactDestinatio
 	p443 := uint16(443)
 	txTime := time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)
 	txs := []*DNSTransaction{
-		{
-			RequestTime:     txTime,
-			IssuerIP:        net.ParseIP("10.245.200.86"),
-			DNSName:         "www.cisco.com",
-			ResolvedIPs:     []net.IP{net.ParseIP("3.5.120.27")},
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: txTime,
+			IssuerIP:    net.ParseIP("10.245.200.86"),
+			DNSName:     "www.cisco.com",
+
 			DestinationPort: &p443,
 			ProtocolL4:      L4ProtoTCP,
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"3.5.120.27": EvDNSAnswer | EvConnInferred,
-			},
-		},
-		{
-			RequestTime:     txTime.Add(time.Second),
-			IssuerIP:        net.ParseIP("10.118.217.9"),
-			DNSName:         "www.cisco.com",
-			ResolvedIPs:     []net.IP{net.ParseIP("52.219.170.186")},
+		}, []net.IP{net.ParseIP("3.5.120.27")}, map[string]Evidence{
+			"3.5.120.27": EvDNSAnswer | EvConnInferred,
+		}),
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: txTime.Add(time.Second),
+			IssuerIP:    net.ParseIP("10.118.217.9"),
+			DNSName:     "www.cisco.com",
+
 			DestinationPort: &p443,
 			ProtocolL4:      L4ProtoTCP,
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"52.219.170.186": EvDNSAnswer | EvConnInferred,
-			},
-		},
+		}, []net.IP{net.ParseIP("52.219.170.186")}, map[string]Evidence{
+			"52.219.170.186": EvDNSAnswer | EvConnInferred,
+		}),
 	}
 	edges := []connectivity.Edge{
 		{IssuerIP: "10.245.200.86", DstIP: "3.5.120.27", Protocol: connectivity.ProtoTCP, Port: 443, FirstSeen: txTime.Add(2 * time.Second)},
@@ -1820,30 +1798,28 @@ func TestCompleteTopologyWithDNSDonationSkipsAmbiguousDonors(t *testing.T) {
 	txTime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
 
 	txs := []*DNSTransaction{
-		{
-			RequestTime:     txTime,
-			IssuerIP:        net.ParseIP("10.116.12.67"),
-			DNSName:         "one.example",
-			ResolvedIPs:     []net.IP{net.ParseIP("13.55.209.128")},
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: txTime,
+			IssuerIP:    net.ParseIP("10.116.12.67"),
+			DNSName:     "one.example",
+
 			DestinationPort: &p8883,
 			ProtocolL4:      L4ProtoTCP,
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"13.55.209.128": EvDNSAnswer,
-			},
-		},
-		{
-			RequestTime:     txTime.Add(1 * time.Second),
-			IssuerIP:        net.ParseIP("10.116.12.68"),
-			DNSName:         "two.example",
-			ResolvedIPs:     []net.IP{net.ParseIP("13.55.209.128")},
+		}, []net.IP{net.ParseIP("13.55.209.128")}, map[string]Evidence{
+			"13.55.209.128": EvDNSAnswer,
+		}),
+		withTestResolvedAnswers(&DNSTransaction{
+			RequestTime: txTime.Add(1 * time.Second),
+			IssuerIP:    net.ParseIP("10.116.12.68"),
+			DNSName:     "two.example",
+
 			DestinationPort: &p8883,
 			ProtocolL4:      L4ProtoTCP,
 			NameEvidence:    EvDNSAnswer,
-			ResolvedIPEvidence: map[string]Evidence{
-				"13.55.209.128": EvDNSAnswer,
-			},
-		},
+		}, []net.IP{net.ParseIP("13.55.209.128")}, map[string]Evidence{
+			"13.55.209.128": EvDNSAnswer,
+		}),
 	}
 
 	edges := []connectivity.Edge{
@@ -1918,5 +1894,41 @@ func TestSquashNetworkTopologyShort_PrivateDestinationIsLastWithinIssuer(t *test
 	}
 	if out[1].DestinationIP != "10.4.100.58" {
 		t.Fatalf("expected private destination last, got last=%q", out[1].DestinationIP)
+	}
+}
+
+func TestCSVNameForIP_MissingCanonicalKeyStaysUnresolved(t *testing.T) {
+	for name, mapping := range map[string]map[string][]string{
+		"nil":               nil,
+		"empty":             {},
+		"absent":            {"203.0.113.11": {"other.example"}},
+		"unnormalized_key":  {" 203.0.113.10 ": {"unexpected.example"}},
+		"empty_exact_value": {"203.0.113.10": {}, " 203.0.113.10 ": {"unexpected.example"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, midSession := range []bool{false, true} {
+				if got, ok := csvNameForIP(mapping, "203.0.113.10", midSession); ok || got != "" {
+					t.Fatalf("missing canonical key resolved to (%q, %v)", got, ok)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkCSVNameForIP_Missing(b *testing.B) {
+	for _, size := range []int{1, 1000, 30000} {
+		b.Run(fmt.Sprintf("entries_%d", size), func(b *testing.B) {
+			mapping := make(map[string][]string, size)
+			for i := 0; i < size; i++ {
+				mapping[net.IPv4(198, 18, byte(i>>8), byte(i)).String()] = []string{"service.example"}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if name, ok := csvNameForIP(mapping, "203.0.113.10", false); ok || name != "" {
+					b.Fatalf("missing key resolved to (%q, %v)", name, ok)
+				}
+			}
+		})
 	}
 }

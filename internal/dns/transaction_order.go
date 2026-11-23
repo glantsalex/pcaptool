@@ -15,13 +15,13 @@ func transactionTieLess(a, b *DNSTransaction) bool {
 	if a.NameEvidence != b.NameEvidence {
 		return a.NameEvidence < b.NameEvidence
 	}
-	if len(a.ResolvedIPs) > 0 && len(b.ResolvedIPs) > 0 {
-		if c := bytes.Compare(a.ResolvedIPs[0], b.ResolvedIPs[0]); c != 0 {
+	if a.resolvedIPLen() > 0 && b.resolvedIPLen() > 0 {
+		if c := a.resolvedIPAt(0).compare(b.resolvedIPAt(0)); c != 0 {
 			return c < 0
 		}
 	}
-	if len(a.ResolvedIPs) != len(b.ResolvedIPs) {
-		return len(a.ResolvedIPs) < len(b.ResolvedIPs)
+	if a.resolvedIPLen() != b.resolvedIPLen() {
+		return a.resolvedIPLen() < b.resolvedIPLen()
 	}
 	var ap, bp uint16
 	if a.DestinationPort != nil {

@@ -94,9 +94,9 @@ func TestSplitFleetToNonFleetByDestinationLocalitySeparatesPublicAndPrivateDesti
 
 func testSplitRecord(src, dst string, dstPort uint16, timestamp time.Time) Record {
 	return Record{
-		SrcIP:     netip.MustParseAddr(src),
-		DstIP:     netip.MustParseAddr(dst),
+		SrcIP:     netip.MustParseAddr(src).As4(),
+		DstIP:     netip.MustParseAddr(dst).As4(),
 		DstPort:   dstPort,
-		Timestamp: timestamp,
+		Timestamp: timestamp.UnixNano(),
 	}
 }

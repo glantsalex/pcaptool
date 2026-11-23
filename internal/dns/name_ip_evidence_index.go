@@ -49,19 +49,20 @@ func BuildNameIPEvidenceIndex(txs []*DNSTransaction) map[string]Evidence {
 		}
 
 		// Iterate resolved IPv4s only.
-		for _, ip := range tx.ResolvedIPs {
-			if ip == nil {
+		for i := 0; i < tx.resolvedIPLen(); i++ {
+			ip := tx.resolvedIPAt(i)
+			if ip.isNil() {
 				continue
 			}
 			ip4 := ip.To4()
-			if ip4 == nil {
+			if ip4.isNil() {
 				continue
 			}
 			ipStr := ip4.String()
 
 			ev := EvNone
-			if tx.ResolvedIPEvidence != nil {
-				ev = tx.ResolvedIPEvidence[ipStr]
+			if tx.hasResolvedIPEvidence() {
+				ev = tx.resolvedIPEvidenceValue(ipStr)
 			}
 
 			// OR name-level evidence as a safety net.
