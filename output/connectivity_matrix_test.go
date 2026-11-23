@@ -103,6 +103,39 @@ func TestTextOutputUsesEffectiveDNSOnly(t *testing.T) {
 	}
 }
 
+func TestRankedTextMatrixCountsTransportEndpoints(t *testing.T) {
+	row := func(issuer, dst, protocol string, port uint16, name string) dns.TopologyEntry {
+		return dns.TopologyEntry{IssuerIP: issuer, DestinationIP: dst, Protocol: protocol, Port: port, DNSName: name}
+	}
+	entries := []dns.TopologyEntry{
+		row("A", "192.0.2.1", "tcp", 443, "a.example"),
+		row("A", "192.0.2.1", "tcp", 443, "b.example"),
+		row("A", "192.0.2.1", "tcp", 443, "c.example"),
+		row("B", "192.0.2.1", "tcp", 443, ""),
+		row("B", "192.0.2.1", "udp", 443, ""),
+		row("C", "192.0.2.1", "tcp", 80, ""),
+		row("C", "192.0.2.1", "tcp", 443, ""),
+		row("C", "192.0.2.2", "tcp", 443, ""),
+		row("D", "192.0.2.1", "tcp", 80, ""),
+		row("D", "192.0.2.1", "tcp", 443, ""),
+	}
+	original := append([]dns.TopologyEntry(nil), entries...)
+	wantOrder := []dns.TopologyEntry{entries[5], entries[6], entries[7], entries[3], entries[4], entries[8], entries[9], entries[0], entries[1], entries[2]}
+	var got, want bytes.Buffer
+	if err := WriteNetworkTopologyMatrix(&want, wantOrder); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRankedNetworkTopologyMatrix(&got, entries); err != nil {
+		t.Fatal(err)
+	}
+	if got.String() != want.String() {
+		t.Errorf("ranked text mismatch:\ngot:\n%s\nwant:\n%s", &got, &want)
+	}
+	if !reflect.DeepEqual(entries, original) {
+		t.Error("text rendering changed shared matrix entries")
+	}
+}
+
 func TestJSONOutputPreservesObservedAndNormalizedDNS(t *testing.T) {
 	entries := []dns.TopologyEntry{{
 		IssuerIP:            "10.116.194.47",

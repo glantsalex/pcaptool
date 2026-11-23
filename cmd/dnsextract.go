@@ -177,7 +177,7 @@ func newDNSExtractCommandWithExecutor(opts *DNSExtractOptions, executor dnsExtra
 		&opts.Unsorted,
 		"unsorted",
 		defaults.Unsorted,
-		"Accepted for existing configurations. Device/service rows use deterministic key order.",
+		"Accepted for existing configurations. Output ordering is deterministic.",
 	)
 	cmd.Flags().BoolVar(
 		&opts.Debug,
@@ -747,7 +747,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 		defer mf.Close()
 		networkTopologyPath = mf.Name()
 
-		if err := output.WriteNetworkTopologyMatrix(mf, topo); err != nil {
+		if err := output.WriteRankedNetworkTopologyMatrix(mf, topo); err != nil {
 			return fmt.Errorf("write network topology matrix: %w", err)
 		}
 

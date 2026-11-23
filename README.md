@@ -214,6 +214,10 @@ Current top-level fields:
 
 Issuer-to-destination connectivity matrix with DNS attribution source.
 
+Issuers with more distinct destination IP, protocol, and port combinations appear first.
+Hostnames sharing one such endpoint remain separate rows and count once toward the rank.
+Ties use lexical issuer order. JSON artifacts keep their canonical relationship order.
+
 Columns are effectively:
 
 - issuer
@@ -800,7 +804,7 @@ This policy is designed to reduce CSV contamination from:
 | `--tls-cert-lookup` | bool | `false` | probe unresolved public TLS endpoints, decorate exact matching matrix rows, and write a certificate audit CSV |
 | `--tls-cert-lookup-timeout` | integer seconds | `15` | per-endpoint TCP connection plus TLS certificate handshake timeout; valid range `5..30` |
 | `--disable-sni` | bool | `false` | skip TLS ClientHello/SNI scan |
-| `--unsorted` | bool | `false` | accepted for compatibility; output uses stable relationship order |
+| `--unsorted` | bool | `false` | accepted for compatibility; output ordering is deterministic |
 | `--debug` | bool | `false` | emit additional debug artifacts, including detailed fleet trail/unique CSVs and CSV append audit |
 | `--manifest-out` | string | empty | write an extra copy of `_run-artifacts.json` |
 | `--post-hook` | string array | empty | shell command(s) to run after extraction completes |

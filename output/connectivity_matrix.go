@@ -24,6 +24,43 @@ import (
 // WriteNetworkTopologyMatrix prints a topology matrix grouped by issuer.
 // Unique row key is: Issuer | Destination IP | DNS Name | Protocol | Port.
 func WriteNetworkTopologyMatrix(w io.Writer, entries []dns.TopologyEntry) error {
+	return writeNetworkTopologyMatrix(w, entries, []matrixGroup{{end: len(entries)}})
+}
+
+type matrixGroup struct {
+	start, end int
+	endpoints  int
+}
+
+// WriteRankedNetworkTopologyMatrix prints finalized UniqueFacts rows by descending
+// transport endpoint count. Equal counts use lexical issuer order. It only sorts
+// group boundaries so other writers can keep using the original slice.
+func WriteRankedNetworkTopologyMatrix(w io.Writer, entries []dns.TopologyEntry) error {
+	var groups []matrixGroup
+	for i := range entries {
+		row := &entries[i]
+		if i == 0 || row.IssuerIP != entries[i-1].IssuerIP {
+			groups = append(groups, matrixGroup{start: i})
+		}
+		group := &groups[len(groups)-1]
+		group.end = i + 1
+		// UniqueFacts groups each transport endpoint's hostname variants together.
+		if i == group.start || row.DestinationIP != entries[i-1].DestinationIP ||
+			row.Protocol != entries[i-1].Protocol || row.Port != entries[i-1].Port {
+			group.endpoints++
+		}
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		a, b := groups[i], groups[j]
+		if a.endpoints != b.endpoints {
+			return a.endpoints > b.endpoints
+		}
+		return entries[a.start].IssuerIP < entries[b.start].IssuerIP
+	})
+	return writeNetworkTopologyMatrix(w, entries, groups)
+}
+
+func writeNetworkTopologyMatrix(w io.Writer, entries []dns.TopologyEntry, groups []matrixGroup) error {
 	if len(entries) == 0 {
 		_, err := fmt.Fprintln(w, "No network topology entries found.")
 		return err
@@ -81,24 +118,28 @@ func WriteNetworkTopologyMatrix(w io.Writer, entries []dns.TopologyEntry) error 
 		sep(sourceWidth), sep(protoWidth), sep(portWidth))
 
 	currentIssuer := ""
-	for idx, e := range entries {
-		issuerCol := ""
-		if idx == 0 || e.IssuerIP != currentIssuer {
-			if idx > 0 {
-				fmt.Fprintln(w)
+	firstRow := true
+	for _, group := range groups {
+		for _, e := range entries[group.start:group.end] {
+			issuerCol := ""
+			if firstRow || e.IssuerIP != currentIssuer {
+				if !firstRow {
+					fmt.Fprintln(w)
+				}
+				firstRow = false
+				currentIssuer = e.IssuerIP
+				issuerCol = e.IssuerIP
 			}
-			currentIssuer = e.IssuerIP
-			issuerCol = e.IssuerIP
-		}
 
-		fmt.Fprintf(w, "%-*s  %-*s  %-*s  %-*s  %-*s  %-*d\n",
-			issuerWidth, issuerCol,
-			dstWidth, e.DestinationIP,
-			dnsWidth, e.DNSName,
-			sourceWidth, e.DNSSource,
-			protoWidth, e.Protocol,
-			portWidth, e.Port,
-		)
+			fmt.Fprintf(w, "%-*s  %-*s  %-*s  %-*s  %-*s  %-*d\n",
+				issuerWidth, issuerCol,
+				dstWidth, e.DestinationIP,
+				dnsWidth, e.DNSName,
+				sourceWidth, e.DNSSource,
+				protoWidth, e.Protocol,
+				portWidth, e.Port,
+			)
+		}
 	}
 
 	fmt.Fprintf(w, "\n%s  %s  %s  %s  %s  %s\n",
