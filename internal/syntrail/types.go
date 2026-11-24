@@ -25,6 +25,8 @@ type Record struct {
 	DstPort         uint16
 	Protocol        Protocol
 	Timestamp       time.Time
+	pollPorts       *pollPorts // Manager source ports for one aggregated outbound UDP/161 tuple.
+	returnEvidence  returnEvidence
 	SyslogQualified bool // Positive payload evidence or trusted registry seed for destination.
 }
 

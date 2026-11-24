@@ -469,7 +469,17 @@ With `--debug`, the sidecar additionally writes these detailed artifacts:
 - `private-nonfleet-to-fleet-trail.csv`
 - `private-nonfleet-to-fleet-tcp-syn-unique.csv`
 
-`private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses without RADIUS, or resolved IMSIs with RADIUS, for that exact role/protocol/port behavior. RADIUS output declares `fleet_identity_basis: imsi` and reports unresolved addresses separately. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Probe targets retain the existing TCP-only qualification.
+`private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses without RADIUS, or resolved IMSIs with RADIUS, for that exact role/protocol/port behavior. RADIUS output declares `fleet_identity_basis: imsi` and reports unresolved addresses separately. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Daily probe targets include TCP SYNs and private non-fleet traffic to fleet UDP/161.
+A complete, recognizable plaintext SNMP Response from fleet UDP/161 also counts
+the responding fleet identity toward the private peer's UDP/161 target. Fleet
+traffic to UDP/162 takes precedence as listener evidence. Other UDP/161 returns
+are reconciled with the exact reversed ports, addresses and fleet identity
+across the capture files in this run. A decoded response or a matched return
+does not create a listener on the return port. Unmatched inconclusive traffic
+and independent traffic to that port retain their ordinary listener behavior.
+These observations carry no SNMP label. The direction registry reader accepts
+the daily UDP/161 target, but registry learning and SQL correction retain their
+existing qualification rules. Upgrade daily artifact readers before rollout.
 
 The top-level `snapshot_time` is an integer Unix timestamp in milliseconds,
 aligned to 00:00:00 UTC on the date of the first packet in the first capture
@@ -494,7 +504,7 @@ Bucket meanings:
 - private non-fleet endpoint summary
   - `private-nonfleet-endpoints.json` merges server and probe behavior by private non-fleet IPv4 address
   - server listeners come from the fleet-to-private-nonfleet split; TCP rows and non-excluded UDP rows are retained
-  - probe targets come from the private-nonfleet-to-fleet TCP evidence path
+  - probe targets include private-to-fleet TCP SYNs and daily UDP/161 target evidence
   - repeated observations of the same counted identity (IPv4 without RADIUS; IMSI with RADIUS) contribute one device to that behavior's `fleet_devices_count`
   - TCP passive FTP data ports are suppressed only when a matching control connection is observed
   - configured UDP destination ports are suppressed only from server summary artifacts

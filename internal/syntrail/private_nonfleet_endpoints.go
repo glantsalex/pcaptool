@@ -66,7 +66,7 @@ type endpointAccumulator struct {
 
 // WritePrivateNonFleetEndpointsJSON writes schema v1 endpoint behavior JSON.
 // Server records must already have the existing server-summary filters applied;
-// probe records must already be restricted to the existing TCP qualification path.
+// probe records must already be restricted to eligible TCP and UDP/161 targets.
 // firstPacket is the first packet timestamp in the first discovered capture,
 // before admission filtering. Its UTC calendar day is encoded as Unix milliseconds;
 // a zero timestamp produces snapshot_time 0 (unknown).

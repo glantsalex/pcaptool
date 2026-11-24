@@ -35,6 +35,7 @@ type ScanOptions struct {
 	// PacketAdmission, when non-nil, is applied immediately after packet
 	// decoding. Rejected packets cannot contribute trail evidence.
 	PacketAdmission pcaputil.PacketAdmission
+	PrivateUDPFleet *FleetSet // Enables private endpoint UDP/161 tracking.
 	SyslogCache     *SyslogCache
 	// SyslogEligible restricts qualification to fleet -> private nonfleet.
 	SyslogEligible func(src, dst netip.Addr) bool
@@ -60,7 +61,9 @@ func ScanFilesWithOptions(ctx context.Context, files []string, opts ScanOptions)
 		cache = NewSyslogCache()
 	}
 	scanner := func(ctx context.Context, path string, admit pcaputil.PacketAdmission) ([]Record, error) {
-		return ScanFileWithOptions(ctx, path, ScanOptions{PacketAdmission: admit, SyslogCache: cache, SyslogEligible: opts.SyslogEligible, FleetIdentity: opts.FleetIdentity})
+		fileOptions := opts
+		fileOptions.PacketAdmission, fileOptions.SyslogCache = admit, cache
+		return ScanFileWithOptions(ctx, path, fileOptions)
 	}
 	records, err := scanFilesConcurrentWithScanner(ctx, files, opts.Workers, opts.Progress, opts.PacketAdmission, scanner)
 	ApplySyslogQualifications(records, cache)
@@ -311,12 +314,13 @@ func (a *Accumulator) TakeRecords() []Record {
 // Collector extracts trail evidence from one decoded capture file. Collector
 // is owned by one file worker and is not safe for concurrent use.
 type Collector struct {
-	fleetIdentity  func(Record) string
-	syslogCache    *SyslogCache
-	syslogEligible func(netip.Addr, netip.Addr) bool
-	tcpRecords     []Record
-	udpRecords     map[observedRecordKey]Record
-	udpOrder       []observedRecordKey
+	privateUDPFleet *FleetSet
+	fleetIdentity   func(Record) string
+	syslogCache     *SyslogCache
+	syslogEligible  func(netip.Addr, netip.Addr) bool
+	tcpRecords      []Record
+	udpRecords      map[observedRecordKey]Record
+	udpOrder        []observedRecordKey
 }
 
 // NewCollector returns an empty per-file packet collector.
@@ -331,7 +335,7 @@ func NewCollectorWithOptions(opts ScanOptions) *Collector {
 	if cache == nil {
 		cache = NewSyslogCache()
 	}
-	return &Collector{fleetIdentity: opts.FleetIdentity, udpRecords: make(map[observedRecordKey]Record), syslogCache: cache, syslogEligible: opts.SyslogEligible}
+	return &Collector{privateUDPFleet: opts.PrivateUDPFleet, fleetIdentity: opts.FleetIdentity, udpRecords: make(map[observedRecordKey]Record), syslogCache: cache, syslogEligible: opts.SyslogEligible}
 }
 
 // Observe records eligible raw TCP SYN and UDP evidence from packet. All
@@ -347,8 +351,9 @@ func (c *Collector) Observe(packet gopacket.Packet) {
 		if c.fleetIdentity != nil {
 			record.FleetIdentity = c.fleetIdentity(record)
 		}
+		udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
+		c.observePrivateUDP(&record, uint16(udp.SrcPort), udp.Payload)
 		if c.syslogEligible != nil && c.syslogEligible(record.SrcIP, record.DstIP) {
-			udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
 			record.SyslogQualified = c.syslogCache.Qualify(record.DstIP, record.DstPort, udp.Payload)
 		}
 		addEarliestRecord(c.udpRecords, &c.udpOrder, record)
@@ -547,8 +552,26 @@ func addEarliestRecord(records map[observedRecordKey]Record, order *[]observedRe
 		return
 	}
 	if record.Timestamp.Before(current.Timestamp) {
-		records[key] = record
+		current.Timestamp = record.Timestamp
 	}
+	if record.pollPorts != nil && record.pollPorts != current.pollPorts {
+		if current.pollPorts == nil {
+			current.pollPorts = record.pollPorts
+		} else {
+			for port := range record.pollPorts.ports {
+				current.pollPorts.ports[port] = struct{}{}
+			}
+		}
+	}
+	if current.returnEvidence != record.returnEvidence {
+		// Zero denotes ordinary traffic. Preserve its listener even if the
+		// same daily tuple also carried responses from source port 161.
+		if current.returnEvidence == 0 || record.returnEvidence == 0 {
+			current.returnEvidence |= ordinaryUDP
+		}
+		current.returnEvidence |= record.returnEvidence
+	}
+	records[key] = current
 }
 
 func appendOrderedRecords(prefix []Record, records map[observedRecordKey]Record, order []observedRecordKey) []Record {
