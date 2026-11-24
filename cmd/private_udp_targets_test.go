@@ -82,8 +82,13 @@ func TestDailyPrivateUDPTargets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if rules := directionRules(known); len(rules) != 0 {
-				t.Fatalf("daily-only evidence learned: %v", rules)
+			wantRules := []directionRule{
+				{"udp", directionSource, manager, directionSource, 162},
+				{"udp", directionSource, manager, directionSource, 1194},
+				{"udp", directionDestination, manager, directionSource, 161},
+			}
+			if rules := directionRules(known); !reflect.DeepEqual(rules, wantRules) {
+				t.Fatalf("direction rules = %+v, want %+v", rules, wantRules)
 			}
 			var got syntrail.PrivateNonFleetEndpointsDocument
 			if err := json.Unmarshal(raw, &got); err != nil {

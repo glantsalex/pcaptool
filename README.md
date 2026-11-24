@@ -478,8 +478,9 @@ across the capture files in this run. A decoded response or a matched return
 does not create a listener on the return port. Unmatched inconclusive traffic
 and independent traffic to that port retain their ordinary listener behavior.
 These observations carry no SNMP label. The direction registry reader accepts
-the daily UDP/161 target, but registry learning and SQL correction retain their
-existing qualification rules. Upgrade daily artifact readers before rollout.
+the daily UDP/161 target. Daily direction SQL uses these targets and observed
+UDP/162 and UDP/1194 listeners. The cumulative registry continues to learn TCP
+and qualified syslog behaviors. Upgrade daily artifact readers before rollout.
 
 For UDP/1194, fleet traffic to a private non-fleet server counts toward its
 UDP/1194 listener. In the daily private endpoint summary, a packet from fleet

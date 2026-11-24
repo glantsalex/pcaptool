@@ -173,7 +173,7 @@ decide AS (
         AND src_port = 53
         AND dst_port != 53
         THEN 'udp_dns_response'
-      -- DNS preservation must precede learned syslog UDP correction.
+      -- DNS preservation must precede learned UDP correction.
       WHEN src_is_private AND dst_is_private
         AND protocol_lc = 'udp'
         AND (src_port = 53 OR dst_port = 53)

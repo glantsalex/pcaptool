@@ -20,6 +20,9 @@ func TestDirectionSQLRowSemantics(t *testing.T) {
 		{IP: "10.4.100.58", Server: direction.Server{Listeners: []direction.Behavior{
 			{Protocol: "tcp", Port: 1883}, {Protocol: "udp", Port: 6514, Evidence: "syslog"}, {Protocol: "udp", Port: 9000},
 		}}, Probe: direction.Probe{Targets: []direction.Behavior{{Protocol: "tcp", Port: 22}}}},
+		{IP: "10.61.8.71", Server: direction.Server{Listeners: []direction.Behavior{{Protocol: "udp", Port: 162}}},
+			Probe: direction.Probe{Targets: []direction.Behavior{{Protocol: "udp", Port: 161}}}},
+		{IP: "10.61.47.27", Server: direction.Server{Listeners: []direction.Behavior{{Protocol: "udp", Port: 1194}}}},
 	}}
 	path := filepath.Join(t.TempDir(), "query.sql")
 	if err := os.WriteFile(path, []byte(flowDirectionCorrectionSQLForDocument("s", d)), 0600); err != nil {
@@ -50,7 +53,20 @@ c.create_function('IF',3,lambda cond,yes,no: yes if cond else no)
 columns = ['device_id','start_time','end_time','src_ip','dst_ip','src_port','dst_port','protocol','bytes_to_srv','bytes_to_client','pckt_to_srv','pckt_to_client']
 c.execute('CREATE TABLE flows ('+','.join(columns)+')')
 server, device = '10.4.100.58', '10.2.3.4'
+manager, vpn = '10.61.8.71', '10.61.47.27'
 cases = [
+ ('poll',manager,device,45000,161,'udp',False),
+ ('poll_response',device,manager,161,45000,'udp',True),
+ ('trap',device,manager,45000,162,'udp',False),
+ ('trap_reversed',manager,device,162,45000,'udp',True),
+ ('trap_from_161_conflict',device,manager,161,162,'udp',False),
+ ('vpn_request',device,vpn,49153,1194,'udp',False),
+ ('vpn_return',vpn,device,1194,49153,'udp',True),
+ ('vpn_unobserved_server',device,server,1194,49153,'udp',False),
+ ('snmp_unobserved_manager',device,server,161,45000,'udp',False),
+ ('snmp_wrong_ip_side',manager,device,161,45000,'udp',False),
+ ('vpn_tcp',vpn,device,1194,49153,'tcp',False),
+ ('dns_before_vpn',vpn,device,1194,53,'udp',False),
  ('server_response',server,device,1883,50000,'TCP',True),
  ('server_request',device,server,50000,1883,'tcp',False),
  ('probe_request',server,device,50000,22,'tcp',False),

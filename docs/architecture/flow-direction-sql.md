@@ -31,7 +31,11 @@ Stored registry order and merge behavior have not changed.
    match is false. TRUE/TRUE conflicts and TRUE/NULL uncertainty preserve the row.
 5. Everything else retains orientation.
 
-TCP and positively qualified syslog UDP are supported. The DNS preservation
+Daily SQL uses TCP, positively qualified syslog UDP, observed UDP/162 and UDP/1194
+listeners, and observed UDP/161 probe targets. A UDP/161 return matches the
+manager as destination IP and the fleet device’s 161 as source port. A listener
+return matches both source IP and source port on the observed receiver or server.
+Other ordinary UDP listeners do not supply direction evidence. The DNS preservation
 branch is redundant for TCP-only or empty collections and omitted there. It is
 **not redundant with learned UDP**: for example, a syslog server's UDP/6514 to
 port 53 must still be preserved. Protocol checks are factored into decisions,
