@@ -35,7 +35,7 @@ type ScanOptions struct {
 	// PacketAdmission, when non-nil, is applied immediately after packet
 	// decoding. Rejected packets cannot contribute trail evidence.
 	PacketAdmission pcaputil.PacketAdmission
-	PrivateUDPFleet *FleetSet // Enables private endpoint UDP/161 tracking.
+	PrivateUDPFleet *FleetSet // Enables private UDP endpoint reconciliation.
 	SyslogCache     *SyslogCache
 	// SyslogEligible restricts qualification to fleet -> private nonfleet.
 	SyslogEligible func(src, dst netip.Addr) bool
@@ -554,18 +554,18 @@ func addEarliestRecord(records map[observedRecordKey]Record, order *[]observedRe
 	if record.Timestamp.Before(current.Timestamp) {
 		current.Timestamp = record.Timestamp
 	}
-	if record.pollPorts != nil && record.pollPorts != current.pollPorts {
-		if current.pollPorts == nil {
-			current.pollPorts = record.pollPorts
+	if record.clientPorts != nil && record.clientPorts != current.clientPorts {
+		if current.clientPorts == nil {
+			current.clientPorts = record.clientPorts
 		} else {
-			for port := range record.pollPorts.ports {
-				current.pollPorts.ports[port] = struct{}{}
+			for port := range record.clientPorts.ports {
+				current.clientPorts.ports[port] = struct{}{}
 			}
 		}
 	}
 	if current.returnEvidence != record.returnEvidence {
 		// Zero denotes ordinary traffic. Preserve its listener even if the
-		// same daily tuple also carried responses from source port 161.
+		// same daily tuple also carried service return traffic.
 		if current.returnEvidence == 0 || record.returnEvidence == 0 {
 			current.returnEvidence |= ordinaryUDP
 		}

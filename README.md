@@ -481,6 +481,15 @@ These observations carry no SNMP label. The direction registry reader accepts
 the daily UDP/161 target, but registry learning and SQL correction retain their
 existing qualification rules. Upgrade daily artifact readers before rollout.
 
+For UDP/1194, fleet traffic to a private non-fleet server counts toward its
+UDP/1194 listener. A private non-fleet client can also contact a fleet IP on
+UDP/1194. If a packet from that fleet IP's UDP/1194 returns to the exact
+client IP and source port (1024 or higher, excluding 1194), the daily summary
+omits that return as listener evidence. Matching spans capture files within
+the run and uses the fleet identity when available. One-sided observations and
+independent traffic to the same client port retain their ordinary behavior.
+This is a transport observation and adds no application label or probe target.
+
 The top-level `snapshot_time` is an integer Unix timestamp in milliseconds,
 aligned to 00:00:00 UTC on the date of the first packet in the first capture
 in lexicographically sorted discovery order. This uses the raw first packet,

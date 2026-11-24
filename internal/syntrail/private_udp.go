@@ -2,10 +2,10 @@ package syntrail
 
 import "net/netip"
 
-// pollPorts is shared by records aggregated under one manager/device key.
-type pollPorts struct{ ports map[uint16]struct{} }
+// clientPorts is shared by records aggregated under one private client/fleet service key.
+type clientPorts struct{ ports map[uint16]struct{} }
 
-func (p *pollPorts) contains(port uint16) bool {
+func (p *clientPorts) contains(port uint16) bool {
 	if p == nil {
 		return false
 	}
@@ -19,30 +19,39 @@ const (
 	unverifiedReturn returnEvidence = 1 << iota
 	decodedResponse
 	ordinaryUDP
+	vpnReturn
 )
 
 func (c *Collector) observePrivateUDP(r *Record, srcPort uint16, payload []byte) {
 	fleet := c.privateUDPFleet
-	if fleet == nil || r.DstPort == 162 || (r.DstPort != 161 && srcPort != 161) {
+	if fleet == nil || r.DstPort == 162 {
 		return
 	}
-	if r.DstPort == 161 && fleet.Contains(r.DstIP) && !fleet.Contains(r.SrcIP) {
-		key := observedRecordKey{fleetIdentity: r.FleetIdentity, srcIP: r.SrcIP, dstIP: r.DstIP, dstPort: 161, protocol: ProtocolUDP}
-		ports := c.udpRecords[key].pollPorts
+	// Only a high client port opposite UDP/1194 participates in VPN
+	// reconciliation. In particular, keep 1194-to-1194 as ambiguous.
+	vpnOutbound := r.DstPort == 1194 && highVPNClientPort(srcPort)
+	vpnInbound := srcPort == 1194 && highVPNClientPort(r.DstPort)
+	if (r.DstPort == 161 || vpnOutbound) && fleet.Contains(r.DstIP) && !fleet.Contains(r.SrcIP) {
+		key := observedRecordKey{fleetIdentity: r.FleetIdentity, srcIP: r.SrcIP, dstIP: r.DstIP, dstPort: r.DstPort, protocol: ProtocolUDP}
+		ports := c.udpRecords[key].clientPorts
 		if ports == nil {
-			ports = &pollPorts{ports: make(map[uint16]struct{})}
+			ports = &clientPorts{ports: make(map[uint16]struct{})}
 		}
 		ports.ports[srcPort] = struct{}{}
-		r.pollPorts = ports
+		r.clientPorts = ports
 		return
 	}
-	if srcPort != 161 || !fleet.Contains(r.SrcIP) || fleet.Contains(r.DstIP) || !isLocalIPv4(r.DstIP) {
+	if (srcPort != 161 && !vpnInbound) || !fleet.Contains(r.SrcIP) || fleet.Contains(r.DstIP) || !isLocalIPv4(r.DstIP) {
+		return
+	}
+	if vpnInbound {
+		r.returnEvidence = vpnReturn
 		return
 	}
 	r.returnEvidence = unverifiedReturn
 	// A poll observed in this file already establishes this reverse tuple.
 	key := observedRecordKey{fleetIdentity: r.FleetIdentity, srcIP: r.DstIP, dstIP: r.SrcIP, dstPort: 161, protocol: ProtocolUDP}
-	if c.udpRecords[key].pollPorts.contains(r.DstPort) {
+	if c.udpRecords[key].clientPorts.contains(r.DstPort) {
 		return
 	}
 	if isSNMPResponse(payload) {
@@ -50,21 +59,26 @@ func (c *Collector) observePrivateUDP(r *Record, srcPort uint16, payload []byte)
 	}
 }
 
+func highVPNClientPort(port uint16) bool {
+	return port >= 1024 && port != 1194
+}
+
 // PrivateEndpointBehaviors selects daily targets and removes reply-only
 // listeners. servers is an owned slice. inbound is borrowed. Reconciliation
 // runs after the file workers merge, independent of packet processing order.
 func PrivateEndpointBehaviors(servers, inbound []Record) (listeners, targets []Record) {
 	type peer struct {
-		manager, device netip.Addr
-		identity        string
+		client, device netip.Addr
+		servicePort    uint16
+		identity       string
 	}
-	polls := make(map[peer]*pollPorts)
+	contacts := make(map[peer]*clientPorts)
 	for _, r := range inbound {
 		if r.Protocol == ProtocolTCP || r.Protocol == "" || (r.Protocol == ProtocolUDP && r.DstPort == 161) {
 			targets = append(targets, r)
 		}
-		if r.pollPorts != nil {
-			polls[peer{r.SrcIP, r.DstIP, r.FleetIdentity}] = r.pollPorts
+		if r.clientPorts != nil {
+			contacts[peer{r.SrcIP, r.DstIP, r.DstPort, r.FleetIdentity}] = r.clientPorts
 		}
 	}
 	listeners = servers[:0]
@@ -74,10 +88,11 @@ func PrivateEndpointBehaviors(servers, inbound []Record) (listeners, targets []R
 			targets = append(targets, Record{SrcIP: r.DstIP, DstIP: r.SrcIP, Protocol: ProtocolUDP, DstPort: 161, FleetIdentity: r.FleetIdentity, Timestamp: r.Timestamp})
 		}
 		if ev != 0 && ev&ordinaryUDP == 0 {
-			if ev&unverifiedReturn == 0 {
-				continue
-			}
-			if polls[peer{r.DstIP, r.SrcIP, r.FleetIdentity}].contains(r.DstPort) {
+			// Multiple service source ports can contribute to one aggregated
+			// listener. Every candidate must be accounted for before removal.
+			unmatchedSNMP := ev&unverifiedReturn != 0 && !contacts[peer{r.DstIP, r.SrcIP, 161, r.FleetIdentity}].contains(r.DstPort)
+			unmatchedVPN := ev&vpnReturn != 0 && !contacts[peer{r.DstIP, r.SrcIP, 1194, r.FleetIdentity}].contains(r.DstPort)
+			if !unmatchedSNMP && !unmatchedVPN {
 				continue
 			}
 		}

@@ -7,8 +7,8 @@ import (
 
 func TestPrivateUDPReconciliationRespectsTimedFleetIdentity(t *testing.T) {
 	manager, device := netip.MustParseAddr("10.61.8.71"), netip.MustParseAddr("10.0.0.1")
-	ports := &pollPorts{ports: map[uint16]struct{}{45000: {}}}
-	request := Record{SrcIP: manager, DstIP: device, DstPort: 161, Protocol: ProtocolUDP, FleetIdentity: "imsi-a", pollPorts: ports}
+	ports := &clientPorts{ports: map[uint16]struct{}{45000: {}}}
+	request := Record{SrcIP: manager, DstIP: device, DstPort: 161, Protocol: ProtocolUDP, FleetIdentity: "imsi-a", clientPorts: ports}
 	oldReturn := Record{SrcIP: device, DstIP: manager, DstPort: 45000, Protocol: ProtocolUDP, FleetIdentity: "imsi-a", returnEvidence: unverifiedReturn}
 	newReturn := oldReturn
 	newReturn.FleetIdentity = "imsi-b"
