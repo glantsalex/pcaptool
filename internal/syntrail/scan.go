@@ -353,7 +353,7 @@ func (c *Collector) Observe(packet gopacket.Packet) {
 		}
 		udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
 		c.observePrivateUDP(&record, uint16(udp.SrcPort), udp.Payload)
-		if c.syslogEligible != nil && c.syslogEligible(record.SrcIP, record.DstIP) {
+		if record.returnEvidence != ignoredVPNReturn && c.syslogEligible != nil && c.syslogEligible(record.SrcIP, record.DstIP) {
 			record.SyslogQualified = c.syslogCache.Qualify(record.DstIP, record.DstPort, udp.Payload)
 		}
 		addEarliestRecord(c.udpRecords, &c.udpOrder, record)

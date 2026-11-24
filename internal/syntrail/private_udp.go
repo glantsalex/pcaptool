@@ -19,7 +19,7 @@ const (
 	unverifiedReturn returnEvidence = 1 << iota
 	decodedResponse
 	ordinaryUDP
-	vpnReturn
+	ignoredVPNReturn
 )
 
 func (c *Collector) observePrivateUDP(r *Record, srcPort uint16, payload []byte) {
@@ -27,11 +27,14 @@ func (c *Collector) observePrivateUDP(r *Record, srcPort uint16, payload []byte)
 	if fleet == nil || r.DstPort == 162 {
 		return
 	}
-	// Only a high client port opposite UDP/1194 participates in VPN
-	// reconciliation. In particular, keep 1194-to-1194 as ambiguous.
-	vpnOutbound := r.DstPort == 1194 && highVPNClientPort(srcPort)
-	vpnInbound := srcPort == 1194 && highVPNClientPort(r.DstPort)
-	if (r.DstPort == 161 || vpnOutbound) && fleet.Contains(r.DstIP) && !fleet.Contains(r.SrcIP) {
+	// Exclude fleet UDP/1194 to private client ports from daily listener
+	// evidence at observation time, even when only this direction is captured.
+	if srcPort == 1194 && highVPNClientPort(r.DstPort) && fleet.Contains(r.SrcIP) &&
+		isLocalIPv4(r.DstIP) && !fleet.Contains(r.DstIP) {
+		r.returnEvidence = ignoredVPNReturn
+		return
+	}
+	if r.DstPort == 161 && fleet.Contains(r.DstIP) && !fleet.Contains(r.SrcIP) {
 		key := observedRecordKey{fleetIdentity: r.FleetIdentity, srcIP: r.SrcIP, dstIP: r.DstIP, dstPort: r.DstPort, protocol: ProtocolUDP}
 		ports := c.udpRecords[key].clientPorts
 		if ports == nil {
@@ -41,11 +44,7 @@ func (c *Collector) observePrivateUDP(r *Record, srcPort uint16, payload []byte)
 		r.clientPorts = ports
 		return
 	}
-	if (srcPort != 161 && !vpnInbound) || !fleet.Contains(r.SrcIP) || fleet.Contains(r.DstIP) || !isLocalIPv4(r.DstIP) {
-		return
-	}
-	if vpnInbound {
-		r.returnEvidence = vpnReturn
+	if srcPort != 161 || !fleet.Contains(r.SrcIP) || fleet.Contains(r.DstIP) || !isLocalIPv4(r.DstIP) {
 		return
 	}
 	r.returnEvidence = unverifiedReturn
@@ -69,7 +68,6 @@ func highVPNClientPort(port uint16) bool {
 func PrivateEndpointBehaviors(servers, inbound []Record) (listeners, targets []Record) {
 	type peer struct {
 		client, device netip.Addr
-		servicePort    uint16
 		identity       string
 	}
 	contacts := make(map[peer]*clientPorts)
@@ -78,7 +76,7 @@ func PrivateEndpointBehaviors(servers, inbound []Record) (listeners, targets []R
 			targets = append(targets, r)
 		}
 		if r.clientPorts != nil {
-			contacts[peer{r.SrcIP, r.DstIP, r.DstPort, r.FleetIdentity}] = r.clientPorts
+			contacts[peer{r.SrcIP, r.DstIP, r.FleetIdentity}] = r.clientPorts
 		}
 	}
 	listeners = servers[:0]
@@ -88,11 +86,9 @@ func PrivateEndpointBehaviors(servers, inbound []Record) (listeners, targets []R
 			targets = append(targets, Record{SrcIP: r.DstIP, DstIP: r.SrcIP, Protocol: ProtocolUDP, DstPort: 161, FleetIdentity: r.FleetIdentity, Timestamp: r.Timestamp})
 		}
 		if ev != 0 && ev&ordinaryUDP == 0 {
-			// Multiple service source ports can contribute to one aggregated
-			// listener. Every candidate must be accounted for before removal.
-			unmatchedSNMP := ev&unverifiedReturn != 0 && !contacts[peer{r.DstIP, r.SrcIP, 161, r.FleetIdentity}].contains(r.DstPort)
-			unmatchedVPN := ev&vpnReturn != 0 && !contacts[peer{r.DstIP, r.SrcIP, 1194, r.FleetIdentity}].contains(r.DstPort)
-			if !unmatchedSNMP && !unmatchedVPN {
+			// An ignored VPN return provides no listener evidence. A mixed
+			// tuple can still qualify through an unmatched UDP/161 return.
+			if ev&unverifiedReturn == 0 || contacts[peer{r.DstIP, r.SrcIP, r.FleetIdentity}].contains(r.DstPort) {
 				continue
 			}
 		}

@@ -482,12 +482,11 @@ the daily UDP/161 target, but registry learning and SQL correction retain their
 existing qualification rules. Upgrade daily artifact readers before rollout.
 
 For UDP/1194, fleet traffic to a private non-fleet server counts toward its
-UDP/1194 listener. A private non-fleet client can also contact a fleet IP on
-UDP/1194. If a packet from that fleet IP's UDP/1194 returns to the exact
-client IP and source port (1024 or higher, excluding 1194), the daily summary
-omits that return as listener evidence. Matching spans capture files within
-the run and uses the fleet identity when available. One-sided observations and
-independent traffic to the same client port retain their ordinary behavior.
+UDP/1194 listener. In the daily private endpoint summary, a packet from fleet
+UDP/1194 to a private non-fleet destination port of 1024 or higher (except 1194)
+contributes zero listener evidence, including in one-sided captures. The rule
+uses the UDP ports and fleet membership. Independent traffic from another source
+port can still establish the same listener.
 This is a transport observation and adds no application label or probe target.
 
 The top-level `snapshot_time` is an integer Unix timestamp in milliseconds,
