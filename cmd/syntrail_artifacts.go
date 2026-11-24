@@ -93,9 +93,9 @@ func writeSYNTrailArtifacts(
 	privateServerRecords := syntrail.SelectFleetToNonFleetByDestinationLocality(
 		bucketRecords(buckets, syntrail.BucketFleetToNonFleet), true,
 	)
+	privateServerRecords, privateProbeRecords := syntrail.PrivateEndpointBehaviors(privateServerRecords, bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet))
 	privateServerRecords = filterOwnedPassiveFTPServerSummaryRecords(privateServerRecords, opt)
 	privateServerRecords = filterOwnedUDPServerSummaryRecords(privateServerRecords, opt.ServerSummaryExcludeUDPPorts)
-	privateProbeRecords := tcpSYNTrailRecords(bucketRecords(buckets, syntrail.BucketPrivateNonFleetToFleet))
 
 	opt.Diagnostics.Checkpoint("fleet_private_selected", recordCounts(opt.Diagnostics, privateServerRecords), true)
 	for _, spec := range synTrailArtifactSpecs {
@@ -428,6 +428,7 @@ func writePrivateNonFleetEndpointsArtifact(
 
 // directionScanOptions supplies identical qualification policy to both scans.
 func directionScanOptions(fleet *syntrail.FleetSet, registry, netID string, scanOpt syntrail.ScanOptions) (syntrail.ScanOptions, error) {
+	scanOpt.PrivateUDPFleet = fleet
 	scanOpt.SyslogEligible = func(src, dst netip.Addr) bool {
 		return fleet.Contains(src) && !fleet.Contains(dst) && direction.Private(dst)
 	}

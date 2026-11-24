@@ -69,8 +69,8 @@ func Decode(data []byte) (Document, error) {
 			}
 		}
 		for _, b := range e.Probe.Targets {
-			if b.Protocol != "tcp" {
-				return d, fmt.Errorf("UDP probe evidence is unsupported")
+			if b.Protocol == "udp" && (b.Port != 161 || b.Evidence != "") {
+				return d, fmt.Errorf("UDP probe target must be port 161 with no evidence label")
 			}
 		}
 	}
