@@ -3,8 +3,8 @@
 `cmd/flow_direction_sql.go` is the shared renderer for daily artifacts and
 `render-flow-direction-sql` cumulative-registry output. The CLI contract lives in
 `cmd/direction_registry.go`; daily callers live in `cmd/syntrail_artifacts.go`.
-Evidence learning and persistence remain in `internal/direction`, unchanged by
-this refactor. No stream-specific addresses or rule counts are built into code.
+Daily SQL and cumulative registry learning share the role checks in
+`internal/direction`. No stream-specific addresses or rule counts are built into code.
 
 ## Rule representation and ordering
 
@@ -20,7 +20,7 @@ protocol, IP side (source before destination), literal IP string, then port side
 Mirrored groups retain the canonical order. This ordering does not assign rule
 priority: OR alternatives share one reversal reason. The old renderer used
 input order; canonical sorting makes equivalent unordered input deterministic.
-Stored registry order and merge behavior have not changed.
+Registry entries accumulate independently by IP, role, protocol and port.
 
 ## Preserved decisions
 
@@ -31,7 +31,11 @@ Stored registry order and merge behavior have not changed.
    match is false. TRUE/TRUE conflicts and TRUE/NULL uncertainty preserve the row.
 5. Everything else retains orientation.
 
-TCP and positively qualified syslog UDP are supported. The DNS preservation
+Daily and cumulative SQL use TCP, positively qualified syslog UDP, observed UDP/162 and UDP/1194
+listeners, and observed UDP/161 probe targets. A UDP/161 return matches the
+manager as destination IP and the fleet device’s 161 as source port. A listener
+return matches both source IP and source port on the observed receiver or server.
+Other ordinary UDP listeners do not supply direction evidence. The DNS preservation
 branch is redundant for TCP-only or empty collections and omitted there. It is
 **not redundant with learned UDP**: for example, a syslog server's UDP/6514 to
 port 53 must still be preserved. Protocol checks are factored into decisions,
@@ -43,7 +47,7 @@ COALESCE-to-false classification, and lowercase protocol. Invalid/null IPs and
 IPv6 are outside the recognized ranges, just as before. This can cause a swap
 when their destination is recognized private; changing that policy is separate
 work. This refactor does not change fleet membership, device attribution,
-reason labels, counts, rule expiry, learning or registry schema.
+reason labels, counts, rule expiry or registry schema.
 
 The final 12-column projection retains column order, names, and source types;
 IPs, ports, byte counters and packet counters exchange together. Device IDs and
@@ -59,7 +63,7 @@ and grouped IN lists are wrapped at token boundaries, targeting 100 characters.
 An indivisible identifier, string literal or placeholder may exceed that target.
 
 The `direction-generator: cumulative-v1` marker and schema version are retained
-because policies and persistence contracts are unchanged. A rendering comment
+for compatibility with existing SQL consumers and registry files. A rendering comment
 describes grouped scalar rules. The CREATE keyword and target now occupy separate
 lines. Consumers must not require a single-line CREATE header or DNS predicate.
 PTI's accompanying changes validate whitespace independently and submit/persist

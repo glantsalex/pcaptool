@@ -419,6 +419,7 @@ func executeDNSExtract(ctx context.Context, opts DNSExtractOptions) (runErr erro
 			return err
 		}
 		sharedFleetOptions.SYNSummary = artifactOpt.synSummaryPolicy(*fleet)
+		artifactOpt.ScanOptions = sharedFleetOptions
 		sharedFleetAccumulator = syntrail.NewAccumulatorWithSummary(sharedFleetOptions.SYNSummary)
 		connectionScanOpt.NewFileObserver = func(_ int, path string) dns.PacketFileObserver {
 			collector := syntrail.NewCollectorWithOptions(sharedFleetOptions)

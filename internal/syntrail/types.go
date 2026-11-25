@@ -46,6 +46,7 @@ type Record struct {
 	SyslogQualified bool
 	MissingTime     bool
 	hasSYNHeader    bool
+	returnEvidence  returnEvidence
 }
 
 // SrcAddr returns the source IPv4 address.

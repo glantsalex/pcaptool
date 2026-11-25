@@ -37,6 +37,7 @@ type ScanOptions struct {
 	// PacketAdmission, when non-nil, is applied immediately after packet
 	// decoding. Rejected packets cannot contribute trail evidence.
 	PacketAdmission pcaputil.PacketAdmission
+	PrivateUDP      *PrivateUDPObservations // Enables private UDP endpoint reconciliation.
 	SyslogCache     *SyslogCache
 	// SyslogEligible restricts qualification to fleet -> private nonfleet.
 	SyslogEligible func(src, dst netip.Addr) bool
@@ -353,6 +354,8 @@ func (a *Accumulator) TakeRecords() []Record {
 // Collector extracts trail evidence from one decoded capture file. Collector
 // is owned by one file worker and is not safe for concurrent use.
 type Collector struct {
+	privateUDP     *PrivateUDPObservations
+	pollContacts   map[pollContact]struct{}
 	summary        synSummary
 	fleetIdentity  func(Record) string
 	syslogCache    *SyslogCache
@@ -375,6 +378,7 @@ func NewCollectorWithOptions(opts ScanOptions) *Collector {
 		cache = NewSyslogCache()
 	}
 	return &Collector{
+		privateUDP:     opts.PrivateUDP,
 		summary:        synSummary{policy: opts.SYNSummary},
 		fleetIdentity:  opts.FleetIdentity,
 		udpRecords:     make(map[observedRecordKey]Record),
@@ -416,8 +420,9 @@ func (c *Collector) Observe(packet gopacket.Packet) error {
 				return nil
 			}
 		}
-		if c.syslogEligible != nil && c.syslogEligible(record.SrcAddr(), record.DstAddr()) {
-			udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
+		udp := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
+		c.observePrivateUDP(&record, uint16(udp.SrcPort), udp.Payload)
+		if record.returnEvidence != ignoredVPNReturn && c.syslogEligible != nil && c.syslogEligible(record.SrcAddr(), record.DstAddr()) {
 			record.SyslogQualified = c.syslogCache.Qualify(record.DstAddr(), record.DstPort, udp.Payload)
 		}
 		addEarliestRecord(c.udpRecords, &c.udpOrder, record)
@@ -434,6 +439,10 @@ func (c *Collector) TakeRecords() []Record {
 // TakePacketBatch transfers this file's observations, including the TCP wire
 // fields needed by Accumulator.Add to recognize retransmissions across files.
 func (c *Collector) TakePacketBatch() []Record {
+	if len(c.pollContacts) != 0 {
+		c.privateUDP.commit(c.pollContacts)
+		c.pollContacts = nil
+	}
 	records := appendOrderedRecords(c.tcpRecords, c.udpRecords, c.udpOrder)
 	ApplySyslogQualifications(records, c.syslogCache)
 	return records
@@ -631,9 +640,23 @@ func addEarliestRecord(records map[observedRecordKey]Record, order *[]observedRe
 		*order = append(*order, key)
 		return
 	}
-	if record.TimeBefore(current) {
-		records[key] = record
+	earlier := record.TimeBefore(current)
+	if !earlier && current.returnEvidence == record.returnEvidence {
+		return
 	}
+	if earlier {
+		current.Timestamp, current.MissingTime = record.Timestamp, record.MissingTime
+		current.SyslogQualified = record.SyslogQualified
+	}
+	if current.returnEvidence != record.returnEvidence {
+		// Zero denotes ordinary traffic. Preserve its listener even if the
+		// same daily tuple also carried service return traffic.
+		if current.returnEvidence == 0 || record.returnEvidence == 0 {
+			current.returnEvidence |= ordinaryUDP
+		}
+		current.returnEvidence |= record.returnEvidence
+	}
+	records[key] = current
 }
 
 func appendOrderedRecords(prefix []Record, records map[observedRecordKey]Record, order []observedRecordKey) []Record {

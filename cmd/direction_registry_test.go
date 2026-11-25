@@ -39,7 +39,11 @@ func TestRegistryCommands(t *testing.T) {
 	daily := filepath.Join(dir, "daily.json")
 	reg := filepath.Join(dir, "registry.json")
 	out := filepath.Join(dir, "output.sql")
-	if err := os.WriteFile(daily, []byte(`{"schema_version":1,"endpoints":[{"ip":"10.4.100.58","server":{"listeners":[{"protocol":"udp","port":6514,"evidence":"syslog"}]}}]}`), 0600); err != nil {
+	discovery := []byte(`{"schema_version":1,"endpoints":[
+		{"ip":"10.61.8.71","server":{"listeners":[{"protocol":"udp","port":162},{"protocol":"udp","port":6514,"evidence":"syslog"}]},"probe":{"targets":[{"protocol":"udp","port":161}]}},
+		{"ip":"10.61.47.27","server":{"listeners":[{"protocol":"udp","port":1194},{"protocol":"udp","port":49153}]}}
+	]}`)
+	if err := os.WriteFile(daily, discovery, 0600); err != nil {
 		t.Fatal(err)
 	}
 	root := newRootCommand()
@@ -53,8 +57,28 @@ func TestRegistryCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(out)
-	if err != nil || !strings.Contains(string(data), "src_port IN (6514)") {
-		t.Fatalf("%s %v", data, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := direction.Decode(discovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := flowDirectionCorrectionSQLForDocument("s", d); string(data) != want {
+		t.Fatal("first cumulative render differs from daily render")
+	}
+	sql := strings.Join(strings.Fields(string(data)), " ")
+	for _, predicate := range []string{
+		"src_ip = '10.61.8.71' AND src_port IN (162, 6514)",
+		"dst_ip = '10.61.8.71' AND src_port IN (161)",
+		"src_ip = '10.61.47.27' AND src_port IN (1194)",
+	} {
+		if !strings.Contains(sql, predicate) {
+			t.Errorf("missing %s", predicate)
+		}
+	}
+	if strings.Contains(sql, "49153") {
+		t.Error("unqualified UDP listener promoted")
 	}
 	root = newRootCommand()
 	root.SetArgs([]string{"render-flow-direction-sql", "--net-id", "other", "--account", "a", "--registry", reg, "--output", out})

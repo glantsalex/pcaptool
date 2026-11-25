@@ -478,7 +478,24 @@ With `--debug`, the sidecar additionally writes these detailed artifacts:
 - `private-nonfleet-to-fleet-trail.csv`
 - `private-nonfleet-to-fleet-tcp-syn-unique.csv`
 
-`private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses without RADIUS, or resolved IMSIs with RADIUS, for that exact role/protocol/port behavior. RADIUS output declares `fleet_identity_basis: imsi` and counts resolved identities only. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Probe targets retain the existing TCP-only qualification.
+`private-nonfleet-endpoints.json` uses schema version 1 and manifest key `private_nonfleet_endpoints`. It contains one object per private non-fleet IPv4 endpoint in the union of server and probe evidence. Every endpoint always includes `server.listeners` and `probe.targets` arrays. Each behavior is identified by its lowercase transport `protocol` and destination `port`; `fleet_devices_count` is the number of distinct fleet-side IPv4 addresses without RADIUS, or resolved IMSIs with RADIUS, for that exact role/protocol/port behavior. RADIUS output declares `fleet_identity_basis: imsi` and counts resolved identities only. Server listeners retain the existing passive-FTP and configured UDP-port filtering. Daily probe targets include TCP SYNs and private non-fleet traffic to fleet UDP/161.
+A complete, recognizable plaintext SNMP Response from fleet UDP/161 also counts
+the responding fleet identity toward the private peer's UDP/161 target. Fleet
+traffic to UDP/162 takes precedence as listener evidence. Other UDP/161 returns
+are reconciled with the exact reversed ports, addresses and fleet identity
+across the capture files in this run. A decoded response or a matched return
+does not create a listener on the return port. Unmatched inconclusive traffic
+and independent traffic to that port retain their ordinary listener behavior.
+These observations carry no SNMP label. Both daily and cumulative direction SQL
+use observed UDP/161 probe targets and UDP/162 and UDP/1194 listeners.
+
+For UDP/1194, fleet traffic to a private non-fleet server counts toward its
+UDP/1194 listener. In the daily private endpoint summary, a packet from fleet
+UDP/1194 to a private non-fleet destination port of 1024 or higher (except 1194)
+contributes zero listener evidence, including in one-sided captures. The rule
+uses the UDP ports and fleet membership. Independent traffic from another source
+port can still establish the same listener.
+This is a transport observation and adds no application label or probe target.
 
 The top-level `snapshot_time` is an integer Unix timestamp in milliseconds,
 aligned to 00:00:00 UTC on the date of the first packet in the first capture
@@ -503,7 +520,7 @@ Bucket meanings:
 - private non-fleet endpoint summary
   - `private-nonfleet-endpoints.json` merges server and probe behavior by private non-fleet IPv4 address
   - server listeners come from the fleet-to-private-nonfleet split; TCP rows and non-excluded UDP rows are retained
-  - probe targets come from the private-nonfleet-to-fleet TCP evidence path
+  - probe targets include private-to-fleet TCP SYNs and daily UDP/161 target evidence
   - repeated observations of the same counted identity (IPv4 without RADIUS; IMSI with RADIUS) contribute one device to that behavior's `fleet_devices_count`
   - TCP passive FTP data ports are suppressed only when a matching control connection is observed
   - configured UDP destination ports are suppressed only from server summary artifacts
@@ -881,12 +898,18 @@ pcaptool render-flow-direction-sql --account 301686 --net-id 301686-1 \
 
 Registry entries accumulate first/last PCAP data dates per IP/role/transport,
 without summing daily counts or expiring silent endpoints. Legacy TCP daily
-entries use the existing initial-SYN contract. Historical UDP entries lacking
-positive syslog evidence are not promoted. Registry identity/schema mismatch
-fails. PTI manages cloud persistence, placeholders, leasing and BigQuery jobs;
-these commands perform no cloud operations.
+entries use the existing initial-SYN contract. For UDP, the registry learns
+probe targets on port 161, listeners on ports 162 and 1194, and listeners on
+any port with positive syslog evidence. A later unlabeled observation preserves
+previously confirmed syslog evidence. Registry identity/schema mismatch fails.
+PTI manages cloud persistence, placeholders, leasing and BigQuery jobs.
 
-Generated SQL now covers TCP probes as well as servers, qualified syslog UDP,
+Upgrade registry readers before writing the new roles. Existing version 1
+registries can be used directly. To backfill a role, merge a saved daily
+artifact that contains it using its original PCAP date. For days whose
+artifacts omit the role, regenerate the daily artifact from captures first.
+
+Generated SQL covers learned TCP and UDP roles
 and private/private UDP DNS (`src_port = 53 AND dst_port != 53`). Opposing learned
 roles preserve observed direction; unknown private traffic is unchanged. The
 existing public-to-private policy and paired field projection are retained.

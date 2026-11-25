@@ -63,20 +63,20 @@ func (g directionRuleGroup) mirror() directionRuleGroup {
 	return g
 }
 
-// directionRules derives one canonical reversal collection. Daily artifacts may
-// carry unqualified UDP observations; only positive syslog evidence is admitted.
-// Registry learning, evidence dates and stored representation are not changed.
+// directionRules derives reversals from observed endpoint roles. UDP listeners
+// qualify on the SNMP notification and OpenVPN ports, or through syslog
+// evidence. A UDP probe's target port belongs to the peer of the recorded IP.
 func directionRules(d direction.Document) []directionRule {
 	var rules []directionRule
 	for _, e := range d.Endpoints {
 		for _, b := range e.Server.Listeners {
-			if b.Protocol == "udp" && b.Evidence != "syslog" {
+			if !direction.ListenerRole.Qualifies(b) {
 				continue
 			}
 			rules = append(rules, directionRule{b.Protocol, directionSource, e.IP, directionSource, b.Port})
 		}
 		for _, b := range e.Probe.Targets {
-			if b.Protocol != "tcp" {
+			if !direction.ProbeRole.Qualifies(b) {
 				continue
 			}
 			rules = append(rules, directionRule{b.Protocol, directionDestination, e.IP, directionSource, b.Port})
@@ -142,7 +142,7 @@ func flowDirectionCorrectionSQLForDocument(netID string, d direction.Document) s
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "-- direction-generator: %s\n", direction.GeneratorVersion)
-	b.WriteString("-- Rendering: grouped scalar rules; cumulative evidence and policies are unchanged.\n")
+	b.WriteString("-- Rendering: grouped scalar rules.\n")
 	b.WriteString("CREATE OR REPLACE MATERIALIZED VIEW\n")
 	fmt.Fprintf(&b, "  `{{gcp_project_id}}.{{bq_dataset}}.mv-flow-data-%s`\n", netID)
 	b.WriteString("PARTITION BY TIMESTAMP_TRUNC(start_time, HOUR)\nAS\nWITH parsed AS (\n  SELECT\n")
@@ -184,7 +184,7 @@ func flowDirectionCorrectionSQLForDocument(netID string, d direction.Document) s
 	b.WriteString("      WHEN NOT src_is_private\n        AND dst_is_private\n        THEN 'public_to_private_artifact'\n")
 	b.WriteString("      WHEN src_is_private AND dst_is_private\n        AND protocol_lc = 'udp'\n        AND src_port = 53\n        AND dst_port != 53\n        THEN 'udp_dns_response'\n")
 	if len(byProtocol["udp"]) > 0 {
-		b.WriteString("      -- DNS preservation must precede learned syslog UDP correction.\n")
+		b.WriteString("      -- DNS preservation must precede learned UDP correction.\n")
 		b.WriteString("      WHEN src_is_private AND dst_is_private\n        AND protocol_lc = 'udp'\n        AND (src_port = 53 OR dst_port = 53)\n        THEN NULL\n")
 	}
 	for i, p := range protocols {
