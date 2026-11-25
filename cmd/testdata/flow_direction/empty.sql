@@ -1,5 +1,5 @@
 -- direction-generator: cumulative-v1
--- Rendering: grouped scalar rules; cumulative evidence and policies are unchanged.
+-- Rendering: grouped scalar rules.
 CREATE OR REPLACE MATERIALIZED VIEW
   `{{gcp_project_id}}.{{bq_dataset}}.mv-flow-data-empty`
 PARTITION BY TIMESTAMP_TRUNC(start_time, HOUR)

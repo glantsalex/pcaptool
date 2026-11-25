@@ -477,10 +477,8 @@ are reconciled with the exact reversed ports, addresses and fleet identity
 across the capture files in this run. A decoded response or a matched return
 does not create a listener on the return port. Unmatched inconclusive traffic
 and independent traffic to that port retain their ordinary listener behavior.
-These observations carry no SNMP label. The direction registry reader accepts
-the daily UDP/161 target. Daily direction SQL uses these targets and observed
-UDP/162 and UDP/1194 listeners. The cumulative registry continues to learn TCP
-and qualified syslog behaviors. Upgrade daily artifact readers before rollout.
+These observations carry no SNMP label. Both daily and cumulative direction SQL
+use observed UDP/161 probe targets and UDP/162 and UDP/1194 listeners.
 
 For UDP/1194, fleet traffic to a private non-fleet server counts toward its
 UDP/1194 listener. In the daily private endpoint summary, a packet from fleet
@@ -917,12 +915,18 @@ pcaptool render-flow-direction-sql --account 301686 --net-id 301686-1 \
 
 Registry entries accumulate first/last PCAP data dates per IP/role/transport,
 without summing daily counts or expiring silent endpoints. Legacy TCP daily
-entries use the existing initial-SYN contract. Historical UDP entries lacking
-positive syslog evidence are not promoted. Registry identity/schema mismatch
-fails. PTI manages cloud persistence, placeholders, leasing and BigQuery jobs;
-these commands perform no cloud operations.
+entries use the existing initial-SYN contract. For UDP, the registry learns
+probe targets on port 161, listeners on ports 162 and 1194, and listeners on
+any port with positive syslog evidence. A later unlabeled observation preserves
+previously confirmed syslog evidence. Registry identity/schema mismatch fails.
+PTI manages cloud persistence, placeholders, leasing and BigQuery jobs.
 
-Generated SQL now covers TCP probes as well as servers, qualified syslog UDP,
+Upgrade registry readers before writing the new roles. Existing version 1
+registries can be used directly. To backfill a role, merge a saved daily
+artifact that contains it using its original PCAP date. For days whose
+artifacts omit the role, regenerate the daily artifact from captures first.
+
+Generated SQL covers learned TCP and UDP roles
 and private/private UDP DNS (`src_port = 53 AND dst_port != 53`). Opposing learned
 roles preserve observed direction; unknown private traffic is unchanged. The
 existing public-to-private policy and paired field projection are retained.

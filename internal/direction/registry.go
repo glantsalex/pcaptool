@@ -69,7 +69,7 @@ func Decode(data []byte) (Document, error) {
 			}
 		}
 		for _, b := range e.Probe.Targets {
-			if b.Protocol == "udp" && (b.Port != 161 || b.Evidence != "") {
+			if b.Protocol == "udp" && !ProbeRole.Qualifies(b) {
 				return d, fmt.Errorf("UDP probe target must be port 161 with no evidence label")
 			}
 		}
@@ -81,35 +81,64 @@ func Private(ip netip.Addr) bool {
 	return ip.Is4() && (ip.IsPrivate() || cgnat.Contains(ip))
 }
 
+// Role identifies which side of an observed interaction owns the endpoint IP.
+type Role string
+
+const (
+	ListenerRole Role = "server"
+	ProbeRole    Role = "probe"
+)
+
+// Qualifies reports whether a daily observation supplies flow direction evidence.
+// TCP observations with no label come from the producer's initial-SYN path.
+func (r Role) Qualifies(b Behavior) bool {
+	switch b.Protocol {
+	case "tcp":
+		return (r == ListenerRole || r == ProbeRole) && (b.Evidence == "" || b.Evidence == "tcp_syn")
+	case "udp":
+		switch r {
+		case ListenerRole:
+			return b.Evidence == "syslog" || b.Evidence == "" && (b.Port == 162 || b.Port == 1194)
+		case ProbeRole:
+			return b.Evidence == "" && b.Port == 161
+		}
+	}
+	return false
+}
+
+func (e Endpoint) behaviors(role Role) []Behavior {
+	if role == ProbeRole {
+		return e.Probe.Targets
+	}
+	return e.Server.Listeners
+}
+
 // ValidateRegistry rejects malformed or unqualified persistent evidence.
 func (d Document) ValidateRegistry(account, stream string) error {
 	if !Identifier.MatchString(account) || !Identifier.MatchString(stream) || d.AccountID != account || d.StreamID != stream {
 		return fmt.Errorf("registry identity mismatch")
 	}
 	for _, e := range d.Endpoints {
-		for _, b := range append(append([]Behavior{}, e.Server.Listeners...), e.Probe.Targets...) {
-			first, err := time.Parse("2006-01-02", b.FirstSeen)
-			if err != nil {
-				return fmt.Errorf("invalid first_seen")
-			}
-			last, err := time.Parse("2006-01-02", b.LastSeen)
-			if err != nil || last.Before(first) {
-				return fmt.Errorf("invalid last_seen")
-			}
-			if !qualified(b) {
-				return fmt.Errorf("unqualified persistent evidence")
+		for _, role := range [...]Role{ListenerRole, ProbeRole} {
+			for _, b := range e.behaviors(role) {
+				first, err := time.Parse("2006-01-02", b.FirstSeen)
+				if err != nil {
+					return fmt.Errorf("invalid first_seen")
+				}
+				last, err := time.Parse("2006-01-02", b.LastSeen)
+				if err != nil || last.Before(first) {
+					return fmt.Errorf("invalid last_seen")
+				}
+				if !role.Qualifies(b) || b.Protocol == "tcp" && b.Evidence == "" {
+					return fmt.Errorf("unqualified persistent evidence for %s %s %s/%d", e.IP, role, b.Protocol, b.Port)
+				}
 			}
 		}
 	}
 	return nil
 }
-func qualified(b Behavior) bool {
-	return b.Protocol == "tcp" && b.Evidence == "tcp_syn" || b.Protocol == "udp" && b.Evidence == "syslog"
-}
 
-// Merge is a monotonic union; replay and out-of-order data days are harmless.
-// Legacy TCP discovery is SYN-qualified by the producer contract; legacy UDP
-// observations without explicit syslog evidence are deliberately not promoted.
+// Merge is a monotonic union of qualified roles across capture days.
 func Merge(old, daily Document, account, stream, day string) (Document, error) {
 	if _, err := time.Parse("2006-01-02", day); err != nil {
 		return Document{}, err
@@ -121,29 +150,29 @@ func Merge(old, daily Document, account, stream, day string) (Document, error) {
 		return Document{}, fmt.Errorf("discovery identity mismatch")
 	}
 	type key struct {
-		ip, role, protocol string
-		port               uint16
+		ip, protocol string
+		role         Role
+		port         uint16
 	}
 	entries := map[key]Behavior{}
 	add := func(d Document, observed bool) {
 		for _, e := range d.Endpoints {
-			for _, role := range []string{"server", "probe"} {
-				list := e.Server.Listeners
-				if role == "probe" {
-					list = e.Probe.Targets
-				}
-				for _, b := range list {
+			for _, role := range [...]Role{ListenerRole, ProbeRole} {
+				for _, b := range e.behaviors(role) {
 					if observed && b.Protocol == "tcp" && b.Evidence == "" {
 						b.Evidence = "tcp_syn"
 					}
-					if !qualified(b) {
+					if !role.Qualifies(b) {
 						continue
 					}
 					if observed {
 						b.FirstSeen, b.LastSeen = day, day
 					}
-					k := key{e.IP, role, b.Protocol, b.Port}
+					k := key{ip: e.IP, role: role, protocol: b.Protocol, port: b.Port}
 					if prev, ok := entries[k]; ok {
+						if b.Evidence == "" {
+							b.Evidence = prev.Evidence
+						}
 						if prev.FirstSeen < b.FirstSeen {
 							b.FirstSeen = prev.FirstSeen
 						}
@@ -181,7 +210,7 @@ func Merge(old, daily Document, account, stream, day string) (Document, error) {
 			out.Endpoints = append(out.Endpoints, Endpoint{IP: k.ip, Server: Server{[]Behavior{}}, Probe: Probe{[]Behavior{}}})
 		}
 		e := &out.Endpoints[len(out.Endpoints)-1]
-		if k.role == "server" {
+		if k.role == ListenerRole {
 			e.Server.Listeners = append(e.Server.Listeners, entries[k])
 		} else {
 			e.Probe.Targets = append(e.Probe.Targets, entries[k])

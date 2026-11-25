@@ -70,13 +70,13 @@ func directionRules(d direction.Document) []directionRule {
 	var rules []directionRule
 	for _, e := range d.Endpoints {
 		for _, b := range e.Server.Listeners {
-			if b.Protocol == "udp" && b.Port != 162 && b.Port != 1194 && b.Evidence != "syslog" {
+			if !direction.ListenerRole.Qualifies(b) {
 				continue
 			}
 			rules = append(rules, directionRule{b.Protocol, directionSource, e.IP, directionSource, b.Port})
 		}
 		for _, b := range e.Probe.Targets {
-			if b.Protocol != "tcp" && !(b.Protocol == "udp" && b.Port == 161) {
+			if !direction.ProbeRole.Qualifies(b) {
 				continue
 			}
 			rules = append(rules, directionRule{b.Protocol, directionDestination, e.IP, directionSource, b.Port})
@@ -142,7 +142,7 @@ func flowDirectionCorrectionSQLForDocument(netID string, d direction.Document) s
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "-- direction-generator: %s\n", direction.GeneratorVersion)
-	b.WriteString("-- Rendering: grouped scalar rules; cumulative evidence and policies are unchanged.\n")
+	b.WriteString("-- Rendering: grouped scalar rules.\n")
 	b.WriteString("CREATE OR REPLACE MATERIALIZED VIEW\n")
 	fmt.Fprintf(&b, "  `{{gcp_project_id}}.{{bq_dataset}}.mv-flow-data-%s`\n", netID)
 	b.WriteString("PARTITION BY TIMESTAMP_TRUNC(start_time, HOUR)\nAS\nWITH parsed AS (\n  SELECT\n")
